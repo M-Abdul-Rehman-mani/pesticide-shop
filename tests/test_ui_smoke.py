@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from PySide6.QtCore import QModelIndex, Qt, QThreadPool
-from PySide6.QtWidgets import QLineEdit
+from PySide6.QtWidgets import QLineEdit, QPushButton
 from pytestqt.qtbot import QtBot
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -34,6 +34,12 @@ def test_table_model_and_financial_form_widgets(qtbot: QtBot) -> None:
     assert payments.values() == ()
     first_amount = payments.findChild(QLineEdit)
     assert first_amount is not None
+    add_payment = next(
+        button for button in payments.findChildren(QPushButton) if button.text() == "Add payment"
+    )
+    qtbot.mouseClick(add_payment, Qt.MouseButton.LeftButton)
+    assert payments.table.rowCount() == 2
+    assert payments.values() == ()
 
 
 def test_owner_main_window_constructs_and_navigates_offscreen(

@@ -54,7 +54,7 @@ class PaymentEditor(QWidget):
         controls.addStretch()
         layout.addWidget(self.table)
         layout.addLayout(controls)
-        add.clicked.connect(self.add_row)
+        add.clicked.connect(lambda _checked=False: self.add_row())
         remove.clicked.connect(self.remove_selected)
         self.add_row()
 
