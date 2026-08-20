@@ -93,7 +93,9 @@ class SalesScreen(QWidget):
         top.addWidget(scan_group, 1)
         layout.addLayout(top)
         self.cart_table = QTableWidget(0, 4)
-        self.cart_table.setHorizontalHeaderLabels(("Product", "IMEI", "Price", "Action"))
+        self.cart_table.setHorizontalHeaderLabels(
+            ("Product", "IMEI", "Sale Price (editable)", "Action")
+        )
         self.cart_table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.cart_table, 1)
         bottom = QHBoxLayout()
@@ -183,7 +185,9 @@ class SalesScreen(QWidget):
         self.cart_table.insertRow(row)
         self.cart_table.setItem(row, 0, QTableWidgetItem(result.product))
         self.cart_table.setItem(row, 1, QTableWidgetItem(result.imei))
-        self.cart_table.setItem(row, 2, QTableWidgetItem(f"{result.price:,.2f}"))
+        price = MoneyEdit(f"{result.price:.2f}")
+        price.textChanged.connect(self._calculate)
+        self.cart_table.setCellWidget(row, 2, price)
         remove = QPushButton("Remove")
         remove.setProperty("danger", True)
         remove.clicked.connect(lambda _checked=False, item=result: self._remove(item))
@@ -200,7 +204,10 @@ class SalesScreen(QWidget):
 
     def _calculate(self) -> None:
         try:
-            subtotal = sum((entry.price for entry in self._cart), Decimal("0.00"))
+            subtotal = sum(
+                (line.price or Decimal("0.00") for line in self._sale_lines()),
+                Decimal("0.00"),
+            )
             total = (
                 subtotal - self.discount.decimal_value("Discount") + self.tax.decimal_value("Tax")
             )
@@ -209,10 +216,23 @@ class SalesScreen(QWidget):
         self.subtotal_label.setText(f"{self._settings.app_currency} {subtotal:,.2f}")
         self.total_label.setText(f"{self._settings.app_currency} {total:,.2f}")
 
+    def _sale_lines(self) -> tuple[SaleLineInput, ...]:
+        lines: list[SaleLineInput] = []
+        for row, entry in enumerate(self._cart):
+            price = self.cart_table.cellWidget(row, 2)
+            assert isinstance(price, MoneyEdit)
+            lines.append(
+                SaleLineInput(
+                    imei=entry.imei,
+                    price=price.decimal_value("Sale price"),
+                )
+            )
+        return tuple(lines)
+
     def save(self) -> None:
         command = CreateSaleCommand(
             customer_id=self.customer.currentData(),
-            lines=tuple(SaleLineInput(imei=entry.imei) for entry in self._cart),
+            lines=self._sale_lines(),
             payments=self.payments.values(),
             order_discount=self.discount.decimal_value("Discount"),
             tax=self.tax.decimal_value("Tax"),

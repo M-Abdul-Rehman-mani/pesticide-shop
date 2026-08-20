@@ -82,6 +82,26 @@ def test_payment_cannot_exceed_total(
         )
 
 
+def test_sale_price_can_exceed_planned_selling_price(
+    db_session: Session,
+    owner: AuthenticatedUser,
+    purchase_phone: object,
+) -> None:
+    phone: PhoneInventory = purchase_phone("350000000000105", None)  # type: ignore[operator]
+    actual_price = phone.selling_price + Decimal("25000.00")
+
+    sale = SaleService(db_session).create(
+        CreateSaleCommand(
+            lines=(SaleLineInput(phone.imei_1, price=actual_price),),
+            payments=(PaymentInput(PaymentMethod.CASH, actual_price),),
+        ),
+        owner,
+    )
+
+    assert sale.total == actual_price
+    assert sale.items[0].price == actual_price
+
+
 def test_sale_queues_customer_and_owner_email(
     db_session: Session,
     owner: AuthenticatedUser,

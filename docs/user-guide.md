@@ -18,9 +18,9 @@ payments, and audit entry. Duplicate IMEIs are rejected.
 ### Sale
 
 Open Sales (`Ctrl+N`), select a customer or walk-in, scan an IMEI, add one or more available
-phones, set discounts/tax, and enter one or more payment methods. Only `IN_STOCK` phones can be
-committed. Save the A4 invoice or open print preview afterward. Customer and owner receipt
-emails are queued after commit.
+phones, edit each cart item's sale price when needed, set discounts/tax, and enter payment methods.
+Only `IN_STOCK` phones can be committed. Save the A4 invoice or open print preview afterward.
+Customer and owner receipt emails are queued after commit.
 
 ### Return
 

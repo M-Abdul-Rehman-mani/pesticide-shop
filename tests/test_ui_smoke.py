@@ -12,6 +12,7 @@ from app.config.settings import get_settings
 from app.security.authentication import AuthenticatedUser
 from app.ui.forms import MoneyEdit, PaymentEditor
 from app.ui.main_window import MainWindow
+from app.ui.sales.screen import CartEntry, SalesScreen
 from app.ui.widgets import RowsTableModel
 
 
@@ -51,4 +52,27 @@ def test_owner_main_window_constructs_and_navigates_offscreen(
     assert "Settings" in window._pages
     window.navigate("Inventory")
     assert window.stack.currentWidget() is window._pages["Inventory"]
+    assert QThreadPool.globalInstance().waitForDone(10_000)
+
+
+def test_sale_cart_submits_edited_price(
+    qtbot: QtBot,
+    database_engine: Engine,
+    owner: AuthenticatedUser,
+) -> None:
+    factory = sessionmaker[Session](
+        bind=database_engine,
+        expire_on_commit=False,
+        autoflush=False,
+    )
+    screen = SalesScreen(factory, owner, get_settings())
+    qtbot.addWidget(screen)
+    screen._phone_added(CartEntry("350000000000999", "Test Phone", Decimal("125000.00")))
+
+    price = screen.cart_table.cellWidget(0, 2)
+    assert isinstance(price, MoneyEdit)
+    price.setText("175000.00")
+
+    assert screen._sale_lines()[0].price == Decimal("175000.00")
+    assert screen.subtotal_label.text().endswith("175,000.00")
     assert QThreadPool.globalInstance().waitForDone(10_000)
