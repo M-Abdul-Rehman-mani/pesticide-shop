@@ -3,7 +3,8 @@ from __future__ import annotations
 from decimal import Decimal
 
 from PySide6.QtCore import QModelIndex, Qt, QThreadPool
-from PySide6.QtWidgets import QLineEdit, QPushButton
+from PySide6.QtGui import QPalette
+from PySide6.QtWidgets import QApplication, QComboBox, QLineEdit, QPushButton
 from pytestqt.qtbot import QtBot
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -13,6 +14,7 @@ from app.security.authentication import AuthenticatedUser
 from app.ui.forms import MoneyEdit, PaymentEditor
 from app.ui.main_window import MainWindow
 from app.ui.sales.screen import CartEntry, SalesScreen
+from app.ui.theme import APPLICATION_STYLESHEET
 from app.ui.widgets import RowsTableModel
 
 
@@ -40,6 +42,32 @@ def test_table_model_and_financial_form_widgets(qtbot: QtBot) -> None:
     qtbot.mouseClick(add_payment, Qt.MouseButton.LeftButton)
     assert payments.table.rowCount() == 2
     assert payments.values() == ()
+
+
+def test_combo_boxes_have_readable_field_and_popup_colors(qtbot: QtBot) -> None:
+    application = QApplication.instance()
+    assert application is not None
+    original_stylesheet = application.styleSheet()
+    application.setStyleSheet(APPLICATION_STYLESHEET)
+    try:
+        combo = QComboBox()
+        qtbot.addWidget(combo)
+        combo.addItems(("Cash", "Card", "Bank Transfer"))
+        combo.show()
+        combo.showPopup()
+        combo.ensurePolished()
+        combo.view().ensurePolished()
+
+        field_palette = combo.palette()
+        popup_palette = combo.view().palette()
+        for palette in (field_palette, popup_palette):
+            assert palette.color(QPalette.ColorRole.Base).name() == "#ffffff"
+            assert palette.color(QPalette.ColorRole.Text).name() == "#1f2933"
+            assert palette.color(QPalette.ColorRole.Highlight).name() == "#2f80ed"
+            assert palette.color(QPalette.ColorRole.HighlightedText).name() == "#ffffff"
+        combo.hidePopup()
+    finally:
+        application.setStyleSheet(original_stylesheet)
 
 
 def test_owner_main_window_constructs_and_navigates_offscreen(
