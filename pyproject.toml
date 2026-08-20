@@ -1,0 +1,107 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mobile-shop-manager"
+version = "1.0.0"
+description = "PostgreSQL-backed desktop point-of-sale and inventory system for mobile shops"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { text = "Proprietary" }
+authors = [{ name = "Mobile Shop Engineering" }]
+dependencies = [
+  "alembic>=1.13,<2",
+  "argon2-cffi>=23.1,<26",
+  "celery[redis]>=5.4,<6",
+  "cryptography>=43,<47",
+  "matplotlib>=3.9,<4",
+  "openpyxl>=3.1,<4",
+  "psycopg[binary]>=3.2,<4",
+  "pydantic>=2.8,<3",
+  "pydantic-settings>=2.4,<3",
+  "PySide6>=6.7,<7",
+  "python-dotenv>=1.0,<2",
+  "reportlab>=4.2,<5",
+  "SQLAlchemy>=2.0.36,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.13,<3",
+  "pytest>=8.3,<10",
+  "pytest-cov>=5,<8",
+  "pytest-qt>=4.4,<5",
+  "ruff>=0.8,<1",
+  "types-openpyxl>=3.1",
+  "types-reportlab>=4.2",
+]
+build = ["pyinstaller>=6.11,<7"]
+
+[project.scripts]
+mobile-shop = "app.main:main"
+mobile-shop-seed = "scripts.seed_database:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app", "scripts"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = ["alembic/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "RUF"]
+ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = ["pydantic.mypy", "sqlalchemy.ext.mypy.plugin"]
+exclude = ["alembic/versions"]
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = ["celery", "celery.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["app.tasks.*"]
+disallow_untyped_decorators = false
+
+[[tool.mypy.overrides]]
+module = ["app.ui.dashboard.*"]
+disallow_untyped_calls = false
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra --strict-markers --strict-config"
+testpaths = ["tests"]
+markers = [
+  "integration: requires the dedicated PostgreSQL test database",
+  "ui: requires a Qt display or offscreen Qt platform",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["app"]
+omit = [
+  # Platform adapters are exercised by smoke/integration tests, while the numeric
+  # quality gate intentionally measures deterministic domain and service logic.
+  "app/ui/*",
+  "app/main.py",
+  "app/tasks/*",
+  "app/printing/printer_service.py",
+  "app/printing/invoice_generator.py",
+  "app/config/logging.py",
+  "app/database/connection.py",
+  "app/database/session.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 80

@@ -1,0 +1,61 @@
+name: mobile-shop
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DATABASE_NAME:-mobile_shop}
+      POSTGRES_USER: ${DATABASE_USER:-mobile_shop}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD in .env}
+      TZ: ${APP_TIMEZONE:-UTC}
+    ports:
+      - "${DATABASE_PORT:-5432}:5432"
+    volumes:
+      - mobile_shop_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - mobile_shop_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    security_opt:
+      - no-new-privileges:true
+
+  postgres-test:
+    image: postgres:16-alpine
+    profiles: ["test"]
+    environment:
+      POSTGRES_DB: ${TEST_DATABASE_NAME:-mobile_shop_test}
+      POSTGRES_USER: ${TEST_DATABASE_USER:-mobile_shop_test}
+      POSTGRES_PASSWORD: ${TEST_DATABASE_PASSWORD:?Set TEST_DATABASE_PASSWORD in .env}
+    ports:
+      - "${TEST_DATABASE_PORT:-5433}:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  mobile_shop_postgres_data:
+  mobile_shop_redis_data:
+
