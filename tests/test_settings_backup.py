@@ -15,6 +15,7 @@ from app.config.settings import get_settings
 from app.email.configuration import load_smtp_config
 from app.models.enums import SettingCategory, UserRole
 from app.models.settings import AppSetting
+from app.printing.shop_profile import load_shop_profile
 from app.security.authentication import AuthenticatedUser
 from app.services.backup_service import BackupService
 from app.services.settings_service import SettingsService
@@ -85,6 +86,39 @@ def test_settings_permissions(db_session: Session, owner: AuthenticatedUser) -> 
             key="name",
             value="No access",
         )
+
+
+def test_shop_profile_fields_are_optional_and_load_for_receipts(
+    db_session: Session,
+    owner: AuthenticatedUser,
+) -> None:
+    settings = get_settings()
+    service = SettingsService(db_session, settings.app_secret_key.get_secret_value())
+    for key, value in {
+        "name": "",
+        "owner_name": "Shop Owner",
+        "address": "",
+        "phone": "",
+        "email": "",
+        "website": "example.test",
+        "tax_information": "",
+        "logo_path": "",
+    }.items():
+        service.set(
+            actor=owner,
+            category=SettingCategory.SHOP,
+            key=key,
+            value=value,
+        )
+    db_session.flush()
+
+    profile = load_shop_profile(db_session, settings)
+
+    assert profile.name == ""
+    assert profile.owner_name == "Shop Owner"
+    assert profile.website == "example.test"
+    assert profile.address == ""
+    assert profile.logo_path is None
 
 
 def test_backup_success_then_retention(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

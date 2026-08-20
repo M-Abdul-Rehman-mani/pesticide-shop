@@ -18,10 +18,12 @@ def load_shop_profile(session: Session, settings: Settings) -> ShopProfile:
     stored = SettingsService(session, settings.app_secret_key.get_secret_value())
     logo_value = stored.get(SettingCategory.SHOP, "logo_path", "") or ""
     return ShopProfile(
-        name=stored.get(SettingCategory.SHOP, "name", "Mobile Shop") or "Mobile Shop",
+        name=stored.get(SettingCategory.SHOP, "name", "") or "",
+        owner_name=stored.get(SettingCategory.SHOP, "owner_name", "") or "",
         address=stored.get(SettingCategory.SHOP, "address", "") or "",
         phone=stored.get(SettingCategory.SHOP, "phone", "") or "",
         email=stored.get(SettingCategory.SHOP, "email", "") or "",
+        website=stored.get(SettingCategory.SHOP, "website", "") or "",
         tax_information=stored.get(SettingCategory.SHOP, "tax_information", "") or "",
         currency=stored.get(SettingCategory.GENERAL, "currency", settings.app_currency)
         or settings.app_currency,

@@ -22,6 +22,12 @@ phones, edit each cart item's sale price when needed, set discounts/tax, and ent
 Only `IN_STOCK` phones can be committed. Save the A4 invoice or open print preview afterward.
 Customer and owner receipt emails are queued after commit.
 
+### Shop settings
+
+Owners and managers can open Shop Settings from the sidebar and optionally enter the shop name,
+owner name, address, contact number, email, website, tax or registration details, and a logo.
+Completed fields are printed on A4 and thermal sale and return receipts; blank fields are omitted.
+
 ### Return
 
 Enter the original invoice and IMEI, choose reason/condition/refund method, and obtain manager or

@@ -36,6 +36,7 @@ from app.ui.returns.screen import ReturnsScreen
 from app.ui.sales.screen import SalesScreen
 from app.ui.session_timeout import SessionTimeoutMonitor
 from app.ui.settings.screen import SettingsScreen
+from app.ui.shop_settings.screen import ShopSettingsScreen
 from app.ui.suppliers.screen import SuppliersScreen
 from app.ui.users.screen import UsersScreen
 
@@ -208,6 +209,12 @@ class MainWindow(QMainWindow):
             "Users",
             lambda: UsersScreen(factory, actor),
             Permission.MANAGE_USERS,
+        )
+        self._add_page(
+            sidebar,
+            "Shop Settings",
+            lambda: ShopSettingsScreen(factory, actor, settings),
+            Permission.MANAGE_SETTINGS,
         )
         self._add_page(
             sidebar,

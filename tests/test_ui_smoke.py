@@ -55,6 +55,7 @@ def test_owner_main_window_constructs_and_navigates_offscreen(
     window = MainWindow(factory, owner, get_settings())
     qtbot.addWidget(window)
     assert "Dashboard" in window._pages
+    assert "Shop Settings" in window._pages
     assert "Settings" in window._pages
     window.navigate("Inventory")
     assert window.stack.currentWidget() is window._pages["Inventory"]

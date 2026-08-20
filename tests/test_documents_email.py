@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from PIL import Image
 
 from app.email.email_service import EmailAttachment, OutgoingEmail
 from app.email.smtp_client import SMTPConfig, SMTPEmailService
@@ -89,6 +91,30 @@ def test_a4_return_receipt_is_valid_pdf() -> None:
     )
     assert payload.startswith(b"%PDF")
     assert len(payload) > 1000
+
+
+def test_optional_shop_details_render_on_every_receipt_format(tmp_path: Path) -> None:
+    logo_path = tmp_path / "shop-logo.png"
+    Image.new("RGB", (64, 32), "navy").save(logo_path)
+    shop = ShopProfile(
+        owner_name="Owner & Partner",
+        phone="+92 300 0000000",
+        email="owner@example.test",
+        website="https://example.test/?a=1&b=2",
+        tax_information="NTN & REG-123",
+        footer="",
+        logo_path=logo_path,
+    )
+
+    payloads = (
+        ReceiptGenerator().generate_a4(_receipt(), shop),
+        ReceiptGenerator().generate_thermal(_receipt(), shop, 58),
+        ReceiptGenerator().generate_return_a4(_return_receipt(), shop),
+        ReceiptGenerator().generate_return_thermal(_return_receipt(), shop, 58),
+    )
+
+    assert all(payload.startswith(b"%PDF") for payload in payloads)
+    assert all(len(payload) > 1000 for payload in payloads)
 
 
 @patch("app.email.smtp_client.smtplib.SMTP")

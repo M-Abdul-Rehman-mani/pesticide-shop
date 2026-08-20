@@ -106,8 +106,6 @@ class SettingsService:
                     "Document prefixes may contain 1-12 letters, numbers, or hyphens."
                 )
             return prefix
-        if (category, key) == (SettingCategory.SHOP, "name") and not cleaned:
-            raise ValidationError("Shop name is required.")
         if category in {SettingCategory.SHOP, SettingCategory.EMAIL} and key in {
             "email",
             "owner_email",

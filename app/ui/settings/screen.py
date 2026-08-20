@@ -1,4 +1,4 @@
-"""Authorized shop, email, receipt, printer, backup, and security settings."""
+"""Authorized email, receipt, printer, backup, and security settings."""
 
 from __future__ import annotations
 
@@ -68,7 +68,6 @@ class SettingsScreen(QWidget):
         self.tabs = QTabWidget()
         root.addWidget(self.tabs)
         self._build_general()
-        self._build_shop()
         self._build_email()
         self._build_printer()
         self._build_receipt()
@@ -97,29 +96,6 @@ class SettingsScreen(QWidget):
         form.addRow("Invoice prefix", self.invoice_prefix)
         form.addRow("Return prefix", self.return_prefix)
         self.tabs.addTab(tab, "General")
-
-    def _build_shop(self) -> None:
-        tab, form = self._tab_form()
-        self.shop_name = QLineEdit("Mobile Shop")
-        self.shop_address = QTextEdit()
-        self.shop_address.setMaximumHeight(80)
-        self.shop_phone = QLineEdit()
-        self.shop_email = QLineEdit()
-        self.tax_information = QLineEdit()
-        self.logo_path = QLineEdit()
-        choose_logo = QPushButton("Choose…")
-        choose_logo.setProperty("secondary", True)
-        choose_logo.clicked.connect(self._choose_logo)
-        logo_row = QHBoxLayout()
-        logo_row.addWidget(self.logo_path)
-        logo_row.addWidget(choose_logo)
-        form.addRow("Shop name", self.shop_name)
-        form.addRow("Address", self.shop_address)
-        form.addRow("Phone", self.shop_phone)
-        form.addRow("Email", self.shop_email)
-        form.addRow("Tax information", self.tax_information)
-        form.addRow("Logo", logo_row)
-        self.tabs.addTab(tab, "Shop Information")
 
     def _build_email(self) -> None:
         tab, form = self._tab_form()
@@ -230,25 +206,12 @@ class SettingsScreen(QWidget):
         retry.clicked.connect(self._retry_email)
         self.tabs.addTab(tab, "Email History")
 
-    def _choose_logo(self) -> None:
-        path, _filter = QFileDialog.getOpenFileName(
-            self, "Choose shop logo", "", "Images (*.png *.jpg *.jpeg)"
-        )
-        if path:
-            self.logo_path.setText(path)
-
     def _load(self) -> None:
         keys = (
             (SettingCategory.GENERAL, "currency"),
             (SettingCategory.GENERAL, "timezone"),
             (SettingCategory.GENERAL, "invoice_prefix"),
             (SettingCategory.GENERAL, "return_prefix"),
-            (SettingCategory.SHOP, "name"),
-            (SettingCategory.SHOP, "address"),
-            (SettingCategory.SHOP, "phone"),
-            (SettingCategory.SHOP, "email"),
-            (SettingCategory.SHOP, "tax_information"),
-            (SettingCategory.SHOP, "logo_path"),
             (SettingCategory.EMAIL, "smtp_host"),
             (SettingCategory.EMAIL, "smtp_port"),
             (SettingCategory.EMAIL, "smtp_username"),
@@ -282,11 +245,6 @@ class SettingsScreen(QWidget):
             ((SettingCategory.GENERAL, "timezone"), self.timezone),
             ((SettingCategory.GENERAL, "invoice_prefix"), self.invoice_prefix),
             ((SettingCategory.GENERAL, "return_prefix"), self.return_prefix),
-            ((SettingCategory.SHOP, "name"), self.shop_name),
-            ((SettingCategory.SHOP, "phone"), self.shop_phone),
-            ((SettingCategory.SHOP, "email"), self.shop_email),
-            ((SettingCategory.SHOP, "tax_information"), self.tax_information),
-            ((SettingCategory.SHOP, "logo_path"), self.logo_path),
             ((SettingCategory.EMAIL, "smtp_host"), self.smtp_host),
             ((SettingCategory.EMAIL, "smtp_username"), self.smtp_username),
             ((SettingCategory.EMAIL, "smtp_from_email"), self.smtp_from),
@@ -295,8 +253,6 @@ class SettingsScreen(QWidget):
         for key, widget in mappings:
             if data.get(key) is not None:
                 widget.setText(data[key])
-        if (address := data.get((SettingCategory.SHOP, "address"))) is not None:
-            self.shop_address.setPlainText(address)
         if (footer := data.get((SettingCategory.RECEIPT, "footer"))) is not None:
             self.receipt_footer.setPlainText(footer)
         if port := data.get((SettingCategory.EMAIL, "smtp_port")):
@@ -323,12 +279,6 @@ class SettingsScreen(QWidget):
             (SettingCategory.GENERAL, "timezone", self.timezone.text(), False),
             (SettingCategory.GENERAL, "invoice_prefix", self.invoice_prefix.text(), False),
             (SettingCategory.GENERAL, "return_prefix", self.return_prefix.text(), False),
-            (SettingCategory.SHOP, "name", self.shop_name.text(), False),
-            (SettingCategory.SHOP, "address", self.shop_address.toPlainText(), False),
-            (SettingCategory.SHOP, "phone", self.shop_phone.text(), False),
-            (SettingCategory.SHOP, "email", self.shop_email.text(), False),
-            (SettingCategory.SHOP, "tax_information", self.tax_information.text(), False),
-            (SettingCategory.SHOP, "logo_path", self.logo_path.text(), False),
             (SettingCategory.EMAIL, "smtp_host", self.smtp_host.text(), False),
             (SettingCategory.EMAIL, "smtp_port", str(self.smtp_port.value()), False),
             (SettingCategory.EMAIL, "smtp_username", self.smtp_username.text(), False),

@@ -7,6 +7,7 @@ from datetime import datetime
 from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
+from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
@@ -29,10 +30,12 @@ from app.models.sale import Sale
 
 @dataclass(frozen=True, slots=True)
 class ShopProfile:
-    name: str
+    name: str = ""
+    owner_name: str = ""
     address: str = ""
     phone: str = ""
     email: str = ""
+    website: str = ""
     tax_information: str = ""
     currency: str = "PKR"
     footer: str = "Thank you for your business."
@@ -143,7 +146,7 @@ class ReceiptGenerator:
             topMargin=14 * mm,
             bottomMargin=14 * mm,
             title=f"Invoice {receipt.invoice_number}",
-            author=shop.name,
+            author=shop.name or "Mobile Shop Manager",
         )
         styles = getSampleStyleSheet()
         brand_style = ParagraphStyle(
@@ -158,13 +161,12 @@ class ReceiptGenerator:
         story: list[Flowable] = []
         if shop.logo_path and shop.logo_path.is_file():
             story.append(Image(str(shop.logo_path), width=30 * mm, height=30 * mm))
+        if shop.name:
+            story.append(Paragraph(escape(shop.name), brand_style))
+        if details := self._shop_details(shop):
+            story.append(Paragraph(details, styles["Normal"]))
         story.extend(
             [
-                Paragraph(shop.name, brand_style),
-                Paragraph(
-                    "<br/>".join(filter(None, (shop.address, shop.phone, shop.email))),
-                    styles["Normal"],
-                ),
                 Spacer(1, 7 * mm),
                 Table(
                     [
@@ -234,10 +236,10 @@ class ReceiptGenerator:
             [
                 totals,
                 Spacer(1, 12 * mm),
-                Paragraph(shop.tax_information, styles["Normal"]),
-                Paragraph(shop.footer, styles["Italic"]),
             ]
         )
+        if shop.footer:
+            story.append(Paragraph(escape(shop.footer), styles["Italic"]))
         document.build(story)
         return buffer.getvalue()
 
@@ -247,7 +249,8 @@ class ReceiptGenerator:
         if width_mm not in {58, 80}:
             raise ValueError("Thermal receipt width must be 58 mm or 80 mm")
         buffer = BytesIO()
-        page_height = max(120, 95 + len(receipt.lines) * 25) * mm
+        logo_height = 22 if shop.logo_path and shop.logo_path.is_file() else 0
+        page_height = max(120, 95 + logo_height + len(receipt.lines) * 25) * mm
         width = width_mm * mm
         document = SimpleDocTemplate(
             buffer,
@@ -257,7 +260,7 @@ class ReceiptGenerator:
             topMargin=3 * mm,
             bottomMargin=3 * mm,
             title=f"Receipt {receipt.invoice_number}",
-            author=shop.name,
+            author=shop.name or "Mobile Shop Manager",
         )
         base_size = 7 if width_mm == 58 else 8
         normal = ParagraphStyle(
@@ -274,15 +277,22 @@ class ReceiptGenerator:
             leading=base_size + 6,
         )
         usable_width = width - 6 * mm
-        story: list[Flowable] = [
-            Paragraph(shop.name, heading),
-            Paragraph("<br/>".join(filter(None, (shop.address, shop.phone, shop.email))), center),
-            Spacer(1, 2 * mm),
-            Paragraph(f"Invoice: {receipt.invoice_number}", left),
-            Paragraph(f"Date: {receipt.sold_at:%d-%b-%Y %H:%M}", left),
-            Paragraph(f"Customer: {receipt.customer_name}", left),
-            Spacer(1, 2 * mm),
-        ]
+        story: list[Flowable] = []
+        if shop.logo_path and shop.logo_path.is_file():
+            story.append(Image(str(shop.logo_path), width=18 * mm, height=18 * mm))
+        if shop.name:
+            story.append(Paragraph(escape(shop.name), heading))
+        if details := self._shop_details(shop):
+            story.append(Paragraph(details, center))
+        story.extend(
+            [
+                Spacer(1, 2 * mm),
+                Paragraph(f"Invoice: {receipt.invoice_number}", left),
+                Paragraph(f"Date: {receipt.sold_at:%d-%b-%Y %H:%M}", left),
+                Paragraph(f"Customer: {receipt.customer_name}", left),
+                Spacer(1, 2 * mm),
+            ]
+        )
         for line in receipt.lines:
             story.extend(
                 [
@@ -323,9 +333,10 @@ class ReceiptGenerator:
             [
                 Paragraph(f"Payment: {receipt.payment_methods}", left),
                 Spacer(1, 3 * mm),
-                Paragraph(shop.footer, center),
             ]
         )
+        if shop.footer:
+            story.append(Paragraph(escape(shop.footer), center))
         document.build(story)
         return buffer.getvalue()
 
@@ -341,7 +352,7 @@ class ReceiptGenerator:
             topMargin=14 * mm,
             bottomMargin=14 * mm,
             title=f"Return {receipt.return_number}",
-            author=shop.name,
+            author=shop.name or "Mobile Shop Manager",
         )
         styles = getSampleStyleSheet()
         heading = ParagraphStyle(
@@ -354,13 +365,12 @@ class ReceiptGenerator:
         story: list[Flowable] = []
         if shop.logo_path and shop.logo_path.is_file():
             story.append(Image(str(shop.logo_path), width=30 * mm, height=30 * mm))
+        if shop.name:
+            story.append(Paragraph(escape(shop.name), heading))
+        if details := self._shop_details(shop):
+            story.append(Paragraph(details, styles["Normal"]))
         story.extend(
             [
-                Paragraph(shop.name, heading),
-                Paragraph(
-                    "<br/>".join(filter(None, (shop.address, shop.phone, shop.email))),
-                    styles["Normal"],
-                ),
                 Spacer(1, 5 * mm),
                 Paragraph("<b>RETURN / REFUND RECEIPT</b>", styles["Heading2"]),
                 Table(
@@ -397,9 +407,10 @@ class ReceiptGenerator:
                 Spacer(1, 7 * mm),
                 Paragraph(f"<b>Refund method:</b> {receipt.refund_method}", styles["Normal"]),
                 Spacer(1, 12 * mm),
-                Paragraph(shop.footer, styles["Italic"]),
             ]
         )
+        if shop.footer:
+            story.append(Paragraph(escape(shop.footer), styles["Italic"]))
         document.build(story)
         return buffer.getvalue()
 
@@ -415,15 +426,16 @@ class ReceiptGenerator:
             raise ValueError("Thermal receipt width must be 58 mm or 80 mm")
         buffer = BytesIO()
         width = width_mm * mm
+        logo_height = 22 if shop.logo_path and shop.logo_path.is_file() else 0
         document = SimpleDocTemplate(
             buffer,
-            pagesize=(width, 145 * mm),
+            pagesize=(width, (165 + logo_height) * mm),
             leftMargin=3 * mm,
             rightMargin=3 * mm,
             topMargin=3 * mm,
             bottomMargin=3 * mm,
             title=f"Return {receipt.return_number}",
-            author=shop.name,
+            author=shop.name or "Mobile Shop Manager",
         )
         size = 7 if width_mm == 58 else 8
         normal = ParagraphStyle(
@@ -438,31 +450,56 @@ class ReceiptGenerator:
             leading=size + 6,
         )
         usable_width = width - 6 * mm
-        story: list[Flowable] = [
-            Paragraph(shop.name, heading),
-            Paragraph("RETURN / REFUND RECEIPT", center),
-            Paragraph(f"Return: {receipt.return_number}", normal),
-            Paragraph(f"Invoice: {receipt.invoice_number}", normal),
-            Paragraph(f"Date: {receipt.returned_at:%d-%b-%Y %H:%M}", normal),
-            Paragraph(f"Customer: {receipt.customer_name}", normal),
-            self._thermal_rule(usable_width),
-            Paragraph(receipt.product, normal),
-            Paragraph(f"IMEI: {receipt.imei}", normal),
-            Paragraph(f"Reason: {receipt.reason}", normal),
-            Paragraph(f"Condition: {receipt.condition}", normal),
-            self._thermal_rule(usable_width),
-            Paragraph(f"REFUND: {shop.currency} {receipt.refund:,.2f}", heading),
-            Paragraph(f"Method: {receipt.refund_method}", normal),
-            Paragraph(f"Approved by: {receipt.approved_by}", normal),
-            Spacer(1, 3 * mm),
-            Paragraph(shop.footer, center),
-        ]
+        story: list[Flowable] = []
+        if shop.logo_path and shop.logo_path.is_file():
+            story.append(Image(str(shop.logo_path), width=18 * mm, height=18 * mm))
+        if shop.name:
+            story.append(Paragraph(escape(shop.name), heading))
+        if details := self._shop_details(shop):
+            story.append(Paragraph(details, center))
+        story.extend(
+            [
+                Paragraph("RETURN / REFUND RECEIPT", center),
+                Paragraph(f"Return: {receipt.return_number}", normal),
+                Paragraph(f"Invoice: {receipt.invoice_number}", normal),
+                Paragraph(f"Date: {receipt.returned_at:%d-%b-%Y %H:%M}", normal),
+                Paragraph(f"Customer: {receipt.customer_name}", normal),
+                self._thermal_rule(usable_width),
+                Paragraph(receipt.product, normal),
+                Paragraph(f"IMEI: {receipt.imei}", normal),
+                Paragraph(f"Reason: {receipt.reason}", normal),
+                Paragraph(f"Condition: {receipt.condition}", normal),
+                self._thermal_rule(usable_width),
+                Paragraph(f"REFUND: {shop.currency} {receipt.refund:,.2f}", heading),
+                Paragraph(f"Method: {receipt.refund_method}", normal),
+                Paragraph(f"Approved by: {receipt.approved_by}", normal),
+                Spacer(1, 3 * mm),
+            ]
+        )
+        if shop.footer:
+            story.append(Paragraph(escape(shop.footer), center))
         document.build(story)
         return buffer.getvalue()
 
     @staticmethod
     def _amount(value: Decimal, currency: str) -> str:
         return f"{currency} {value:,.2f}"
+
+    @staticmethod
+    def _shop_details(shop: ShopProfile) -> str:
+        lines: list[str] = []
+        if shop.owner_name:
+            lines.append(f"Owner: {shop.owner_name}")
+        lines.extend(line for line in shop.address.splitlines() if line.strip())
+        if shop.phone:
+            lines.append(f"Contact: {shop.phone}")
+        if shop.email:
+            lines.append(f"Email: {shop.email}")
+        if shop.website:
+            lines.append(f"Website: {shop.website}")
+        if shop.tax_information:
+            lines.append(f"Tax / Registration: {shop.tax_information}")
+        return "<br/>".join(escape(line.strip()) for line in lines)
 
     @staticmethod
     def _invoice_table_style() -> TableStyle:
