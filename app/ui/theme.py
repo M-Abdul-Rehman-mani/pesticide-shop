@@ -1,5 +1,9 @@
 """Application-wide professional Qt stylesheet."""
 
+from pathlib import Path
+
+_COMBO_BOX_ARROW = (Path(__file__).parent / "assets" / "combo-down-arrow.svg").as_posix()
+
 APPLICATION_STYLESHEET = """
 QWidget {
     color: #1f2933;
@@ -43,6 +47,10 @@ QComboBox::drop-down {
     background: #f4f7fa;
 }
 QComboBox::drop-down:hover { background: #e8eef4; }
+QComboBox::down-arrow {
+    image: url("__COMBO_BOX_ARROW__");
+    width: 10px; height: 6px;
+}
 QComboBox QAbstractItemView {
     background-color: #ffffff; color: #1f2933;
     border: 1px solid #829ab1; outline: 0;
@@ -79,4 +87,4 @@ QStatusBar { background: #ffffff; color: #486581; }
 QTabWidget::pane { border: 1px solid #d9e2ec; background: #ffffff; }
 QTabBar::tab { background: #e8eef4; padding: 8px 16px; }
 QTabBar::tab:selected { background: #2f80ed; color: #ffffff; }
-"""
+""".replace("__COMBO_BOX_ARROW__", _COMBO_BOX_ARROW)

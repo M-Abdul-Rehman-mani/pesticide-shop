@@ -12,6 +12,7 @@ project_root = Path(SPECPATH)
 datas = [
     (str(project_root / "alembic.ini"), "."),
     (str(project_root / "alembic"), "alembic"),
+    (str(project_root / "app" / "ui" / "assets"), "app/ui/assets"),
 ]
 datas += collect_data_files("alembic")
 

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from pathlib import Path
 
-from PySide6.QtCore import QModelIndex, Qt, QThreadPool
+from PySide6.QtCore import QModelIndex, QPoint, Qt, QThreadPool
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QApplication, QComboBox, QLineEdit, QPushButton
 from pytestqt.qtbot import QtBot
@@ -66,8 +67,23 @@ def test_combo_boxes_have_readable_field_and_popup_colors(qtbot: QtBot) -> None:
             assert palette.color(QPalette.ColorRole.Highlight).name() == "#2f80ed"
             assert palette.color(QPalette.ColorRole.HighlightedText).name() == "#ffffff"
         combo.hidePopup()
+        qtbot.mouseClick(
+            combo,
+            Qt.MouseButton.LeftButton,
+            pos=QPoint(combo.width() - 12, combo.height() // 2),
+        )
+        assert combo.view().isVisible()
+        combo.hidePopup()
     finally:
         application.setStyleSheet(original_stylesheet)
+
+
+def test_combo_box_theme_includes_visible_down_arrow() -> None:
+    arrow_path = Path(__file__).parents[1] / "app" / "ui" / "assets" / "combo-down-arrow.svg"
+
+    assert arrow_path.is_file()
+    assert "QComboBox::down-arrow" in APPLICATION_STYLESHEET
+    assert arrow_path.as_posix() in APPLICATION_STYLESHEET
 
 
 def test_owner_main_window_constructs_and_navigates_offscreen(
