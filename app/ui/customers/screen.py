@@ -1,0 +1,292 @@
+"""Paginated customer management and sales history."""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+from typing import cast
+
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QTableView,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.repositories.customer_repository import CustomerRepository
+from app.security.authentication import AuthenticatedUser
+from app.services.catalog_service import CustomerService
+from app.ui.widgets import RowsTableModel, show_error
+from app.ui.workers import FunctionWorker, start_worker
+from app.utils.formatting import format_date
+
+
+@dataclass(frozen=True, slots=True)
+class CustomerFormData:
+    name: str
+    phone: str
+    email: str | None
+    address: str | None
+    cnic: str | None
+    notes: str | None
+
+
+class CustomerDialog(QDialog):
+    def __init__(self, data: CustomerFormData | None = None, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Edit Customer" if data else "Add Customer")
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.name = QLineEdit(data.name if data else "")
+        self.phone = QLineEdit(data.phone if data else "")
+        self.email = QLineEdit(data.email or "" if data else "")
+        self.address = QTextEdit(data.address or "" if data else "")
+        self.address.setMaximumHeight(70)
+        self.cnic = QLineEdit(data.cnic or "" if data else "")
+        self.notes = QTextEdit(data.notes or "" if data else "")
+        self.notes.setMaximumHeight(70)
+        form.addRow("Name", self.name)
+        form.addRow("Phone", self.phone)
+        form.addRow("Email", self.email)
+        form.addRow("Address", self.address)
+        form.addRow("CNIC (optional)", self.cnic)
+        form.addRow("Notes", self.notes)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def values(self) -> CustomerFormData:
+        return CustomerFormData(
+            name=self.name.text(),
+            phone=self.phone.text(),
+            email=self.email.text().strip() or None,
+            address=self.address.toPlainText().strip() or None,
+            cnic=self.cnic.text().strip() or None,
+            notes=self.notes.toPlainText().strip() or None,
+        )
+
+
+class CustomersScreen(QWidget):
+    def __init__(
+        self,
+        session_factory: sessionmaker[Session],
+        actor: AuthenticatedUser,
+        currency: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._session_factory = session_factory
+        self._actor = actor
+        self._currency = currency
+        self._worker: FunctionWorker | None = None
+        self._ids: list[uuid.UUID] = []
+        self._data: list[CustomerFormData] = []
+        self._page = 1
+        layout = QVBoxLayout(self)
+        header = QHBoxLayout()
+        title = QLabel("Customers")
+        title.setObjectName("PageTitle")
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search customer name or phone")
+        add = QPushButton("Add Customer")
+        edit = QPushButton("Edit")
+        edit.setProperty("secondary", True)
+        history = QPushButton("History")
+        history.setProperty("secondary", True)
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(self.search)
+        header.addWidget(history)
+        header.addWidget(edit)
+        header.addWidget(add)
+        self.model = RowsTableModel(("Name", "Phone", "Email", "CNIC", "Created"), self)
+        self.table = QTableView()
+        self.table.setModel(self.model)
+        self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        pager = QHBoxLayout()
+        previous = QPushButton("Previous")
+        next_button = QPushButton("Next")
+        self.page_label = QLabel("Page 1")
+        pager.addStretch()
+        pager.addWidget(previous)
+        pager.addWidget(self.page_label)
+        pager.addWidget(next_button)
+        layout.addLayout(header)
+        layout.addWidget(self.table, 1)
+        layout.addLayout(pager)
+        self._timer = QTimer(self)
+        self._timer.setInterval(250)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self._reset_refresh)
+        self.search.textChanged.connect(lambda _text: self._timer.start())
+        add.clicked.connect(self._add)
+        edit.clicked.connect(self._edit)
+        history.clicked.connect(self._history)
+        self.table.doubleClicked.connect(lambda _index: self._history())
+        previous.clicked.connect(lambda: self._change_page(-1))
+        next_button.clicked.connect(lambda: self._change_page(1))
+        self.refresh()
+
+    def _reset_refresh(self) -> None:
+        self._page = 1
+        self.refresh()
+
+    def _change_page(self, delta: int) -> None:
+        self._page = max(1, self._page + delta)
+        self.refresh()
+
+    def refresh(self) -> None:
+        query, page = self.search.text(), self._page
+
+        def operation() -> tuple[
+            list[tuple[object, ...]], list[uuid.UUID], list[CustomerFormData], int
+        ]:
+            with self._session_factory() as session:
+                result = CustomerRepository(session).search(query, page, 50)
+                return (
+                    [
+                        (
+                            customer.name,
+                            customer.phone,
+                            customer.email or "—",
+                            customer.cnic or "—",
+                            format_date(customer.created_at),
+                        )
+                        for customer in result.items
+                    ],
+                    [customer.id for customer in result.items],
+                    [
+                        CustomerFormData(
+                            customer.name,
+                            customer.phone,
+                            customer.email,
+                            customer.address,
+                            customer.cnic,
+                            customer.notes,
+                        )
+                        for customer in result.items
+                    ],
+                    result.total_pages,
+                )
+
+        self._worker = start_worker(
+            operation, succeeded=self._display, failed=lambda error: show_error(self, error)
+        )
+
+    def _display(self, result: object) -> None:
+        rows, self._ids, self._data, pages = cast(
+            tuple[
+                list[tuple[object, ...]],
+                list[uuid.UUID],
+                list[CustomerFormData],
+                int,
+            ],
+            result,
+        )
+        self.model.set_rows(rows)
+        self.page_label.setText(f"Page {self._page} of {pages}")
+
+    def _selected(self) -> int | None:
+        rows = self.table.selectionModel().selectedRows()
+        return rows[0].row() if rows else None
+
+    def _add(self) -> None:
+        dialog = CustomerDialog(parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._save(None, dialog.values())
+
+    def _edit(self) -> None:
+        row = self._selected()
+        if row is None:
+            QMessageBox.information(self, "Select customer", "Select a customer to edit.")
+            return
+        dialog = CustomerDialog(self._data[row], self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._save(self._ids[row], dialog.values())
+
+    def _save(self, customer_id: uuid.UUID | None, data: CustomerFormData) -> None:
+        def operation() -> None:
+            with self._session_factory.begin() as session:
+                service = CustomerService(session)
+                if customer_id:
+                    service.update(
+                        customer_id,
+                        actor=self._actor,
+                        name=data.name,
+                        phone=data.phone,
+                        email=data.email,
+                        address=data.address,
+                        cnic=data.cnic,
+                        notes=data.notes,
+                    )
+                else:
+                    service.create(
+                        actor=self._actor,
+                        name=data.name,
+                        phone=data.phone,
+                        email=data.email,
+                        address=data.address,
+                        cnic=data.cnic,
+                        notes=data.notes,
+                    )
+
+        self._worker = start_worker(
+            operation,
+            succeeded=lambda _result: self.refresh(),
+            failed=lambda error: show_error(self, error),
+        )
+
+    def _history(self) -> None:
+        row = self._selected()
+        if row is None:
+            QMessageBox.information(self, "Select customer", "Select a customer to view history.")
+            return
+        customer_id = self._ids[row]
+
+        def operation() -> list[tuple[object, ...]]:
+            with self._session_factory() as session:
+                return [
+                    (
+                        sale.invoice_number,
+                        format_date(sale.sale_date),
+                        f"{self._currency} {sale.total:,.2f}",
+                        sale.payment_status.value,
+                        sale.status.value,
+                    )
+                    for sale in CustomerRepository(session).sales(customer_id)
+                ]
+
+        def display(rows: object) -> None:
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Customer purchase history")
+            dialog.resize(700, 400)
+            layout = QVBoxLayout(dialog)
+            model = RowsTableModel(("Invoice", "Date", "Total", "Payment", "Status"), dialog)
+            model.set_rows(rows)  # type: ignore[arg-type]
+            table = QTableView()
+            table.setModel(model)
+            layout.addWidget(table)
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+            dialog.exec()
+
+        self._worker = start_worker(
+            operation, succeeded=display, failed=lambda error: show_error(self, error)
+        )

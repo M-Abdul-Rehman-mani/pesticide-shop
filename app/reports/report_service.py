@@ -1,0 +1,312 @@
+"""Sales, stock, payment, and profit reporting queries."""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import UTC, date, datetime, time, timedelta
+from decimal import Decimal
+from zoneinfo import ZoneInfo
+
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session, selectinload
+
+from app.models.enums import PaymentDirection, SaleStatus
+from app.models.inventory import StockBatch
+from app.models.payment import Payment
+from app.models.product import Product
+from app.models.sale import Sale, SaleItem
+
+
+@dataclass(frozen=True, slots=True)
+class DateRange:
+    start: datetime
+    end: datetime
+
+    @classmethod
+    def local_days(cls, start: date, end: date, timezone: str) -> DateRange:
+        if end < start:
+            raise ValueError("End date cannot be before start date")
+        zone = ZoneInfo(timezone)
+        local_start = datetime.combine(start, time.min, tzinfo=zone)
+        local_end = datetime.combine(end + timedelta(days=1), time.min, tzinfo=zone)
+        return cls(local_start.astimezone(UTC), local_end.astimezone(UTC))
+
+    @classmethod
+    def today(cls, timezone: str) -> DateRange:
+        today = datetime.now(ZoneInfo(timezone)).date()
+        return cls.local_days(today, today, timezone)
+
+
+@dataclass(frozen=True, slots=True)
+class DashboardMetrics:
+    sales: Decimal
+    profit: Decimal
+    units_sold: int
+    current_inventory: int
+    low_stock_products: int
+    expiring_units: int
+    outstanding_payments: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class SalesReportRow:
+    invoice: str
+    recipient: str
+    product: str
+    batch: str
+    quantity: int
+    salesperson: str
+    amount: Decimal
+    payment_status: str
+    sold_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class DailyFinancialPoint:
+    day: date
+    sales: Decimal
+    profit: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class TopSellingModel:
+    product: str
+    units: int
+    revenue: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class LowStockModel:
+    product: str
+    in_stock: int
+    minimum_stock: int
+
+
+class ReportService:
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def dashboard(self, period: DateRange) -> DashboardMetrics:
+        sales_total = self._session.scalar(
+            select(func.coalesce(func.sum(Sale.total), Decimal("0.00"))).where(
+                Sale.status == SaleStatus.COMPLETED,
+                Sale.sale_date >= period.start,
+                Sale.sale_date < period.end,
+            )
+        )
+        units_sold = self._session.scalar(
+            select(func.coalesce(func.sum(SaleItem.quantity), 0))
+            .join(Sale, Sale.id == SaleItem.sale_id)
+            .where(
+                Sale.status == SaleStatus.COMPLETED,
+                Sale.sale_date >= period.start,
+                Sale.sale_date < period.end,
+            )
+        )
+        current_inventory = self._session.scalar(
+            select(func.coalesce(func.sum(StockBatch.quantity_available), 0))
+        )
+        outstanding = self._session.scalar(
+            select(func.coalesce(func.sum(Sale.remaining_amount), Decimal("0.00"))).where(
+                Sale.status == SaleStatus.COMPLETED, Sale.remaining_amount > 0
+            )
+        )
+        expiring = self._session.scalar(
+            select(func.coalesce(func.sum(StockBatch.quantity_available), 0)).where(
+                StockBatch.quantity_available > 0,
+                StockBatch.expiry_date.is_not(None),
+                StockBatch.expiry_date <= date.today() + timedelta(days=90),
+            )
+        )
+        return DashboardMetrics(
+            sales=Decimal(sales_total or 0),
+            profit=self.profit(period),
+            units_sold=int(units_sold or 0),
+            current_inventory=int(current_inventory or 0),
+            low_stock_products=len(self.low_stock_models()),
+            expiring_units=int(expiring or 0),
+            outstanding_payments=Decimal(outstanding or 0),
+        )
+
+    def profit(self, period: DateRange) -> Decimal:
+        costs = (
+            select(
+                SaleItem.sale_id,
+                func.sum(SaleItem.purchase_cost + SaleItem.other_cost).label("cost"),
+            )
+            .group_by(SaleItem.sale_id)
+            .subquery()
+        )
+        value = self._session.scalar(
+            select(
+                func.coalesce(
+                    func.sum(Sale.total - Sale.tax - func.coalesce(costs.c.cost, 0)),
+                    Decimal("0.00"),
+                )
+            )
+            .outerjoin(costs, costs.c.sale_id == Sale.id)
+            .where(
+                Sale.status == SaleStatus.COMPLETED,
+                Sale.sale_date >= period.start,
+                Sale.sale_date < period.end,
+            )
+        )
+        return Decimal(value or 0)
+
+    def sales(self, period: DateRange) -> list[SalesReportRow]:
+        documents = self._session.scalars(
+            select(Sale)
+            .options(selectinload(Sale.items))
+            .where(
+                Sale.status == SaleStatus.COMPLETED,
+                Sale.sale_date >= period.start,
+                Sale.sale_date < period.end,
+            )
+            .order_by(Sale.sale_date.desc())
+        )
+        return [
+            SalesReportRow(
+                invoice=sale.invoice_number,
+                recipient=(
+                    sale.dealer.display_name
+                    if sale.dealer
+                    else sale.customer.name
+                    if sale.customer
+                    else "Walk-in"
+                ),
+                product=item.product.display_name,
+                batch=item.batch_number,
+                quantity=item.quantity,
+                salesperson=sale.creator.full_name,
+                amount=item.total,
+                payment_status=sale.payment_status.value,
+                sold_at=sale.sale_date,
+            )
+            for sale in documents
+            for item in sale.items
+        ]
+
+    def sales_by_day(self, period: DateRange, timezone: str) -> list[tuple[date, Decimal]]:
+        zone = ZoneInfo(timezone)
+        rows = self._session.execute(
+            select(Sale.sale_date, Sale.total).where(
+                Sale.status == SaleStatus.COMPLETED,
+                Sale.sale_date >= period.start,
+                Sale.sale_date < period.end,
+            )
+        )
+        totals: dict[date, Decimal] = defaultdict(lambda: Decimal("0.00"))
+        for sold_at, total in rows:
+            totals[sold_at.astimezone(zone).date()] += total
+        return sorted(totals.items())
+
+    def sales_by_month(self, period: DateRange, timezone: str) -> list[tuple[date, Decimal]]:
+        totals: dict[date, Decimal] = defaultdict(lambda: Decimal("0.00"))
+        for day, amount in self.sales_by_day(period, timezone):
+            totals[day.replace(day=1)] += amount
+        return sorted(totals.items())
+
+    def financial_by_day(self, period: DateRange, timezone: str) -> list[DailyFinancialPoint]:
+        zone = ZoneInfo(timezone)
+        costs = (
+            select(
+                SaleItem.sale_id,
+                func.sum(SaleItem.purchase_cost + SaleItem.other_cost).label("cost"),
+            )
+            .group_by(SaleItem.sale_id)
+            .subquery()
+        )
+        rows = self._session.execute(
+            select(
+                Sale.sale_date,
+                Sale.total,
+                Sale.total - Sale.tax - func.coalesce(costs.c.cost, 0),
+            )
+            .outerjoin(costs, costs.c.sale_id == Sale.id)
+            .where(
+                Sale.status == SaleStatus.COMPLETED,
+                Sale.sale_date >= period.start,
+                Sale.sale_date < period.end,
+            )
+        )
+        totals: dict[date, list[Decimal]] = defaultdict(lambda: [Decimal("0.00"), Decimal("0.00")])
+        for occurred_at, amount, profit in rows:
+            values = totals[occurred_at.astimezone(zone).date()]
+            values[0] += Decimal(amount)
+            values[1] += Decimal(profit)
+        return [
+            DailyFinancialPoint(day, values[0], values[1]) for day, values in sorted(totals.items())
+        ]
+
+    def top_selling_models(self, period: DateRange, *, limit: int = 5) -> list[TopSellingModel]:
+        rows = self._session.execute(
+            select(
+                Product,
+                func.sum(SaleItem.quantity).label("units"),
+                func.sum(SaleItem.total).label("revenue"),
+            )
+            .join(SaleItem, SaleItem.product_id == Product.id)
+            .join(Sale, Sale.id == SaleItem.sale_id)
+            .where(
+                Sale.status == SaleStatus.COMPLETED,
+                Sale.sale_date >= period.start,
+                Sale.sale_date < period.end,
+            )
+            .group_by(Product.id)
+            .order_by(func.sum(SaleItem.quantity).desc())
+            .limit(limit)
+        )
+        return [
+            TopSellingModel(product.display_name, int(units), Decimal(revenue))
+            for product, units, revenue in rows
+        ]
+
+    def low_stock_models(self, *, limit: int = 100) -> list[LowStockModel]:
+        rows = self._session.execute(
+            select(Product, func.coalesce(func.sum(StockBatch.quantity_available), 0))
+            .outerjoin(StockBatch, StockBatch.product_id == Product.id)
+            .where(Product.is_active.is_(True))
+            .group_by(Product.id)
+            .order_by(Product.manufacturer, Product.name)
+        )
+        result = [
+            LowStockModel(product.display_name, int(stock), product.minimum_stock)
+            for product, stock in rows
+            if int(stock) <= product.minimum_stock
+        ]
+        return result[:limit]
+
+    def inventory_status(self) -> dict[str, int]:
+        today = date.today()
+        in_stock = self._session.scalar(
+            select(func.coalesce(func.sum(StockBatch.quantity_available), 0)).where(
+                StockBatch.quantity_available > 0,
+                (StockBatch.expiry_date.is_(None) | (StockBatch.expiry_date >= today)),
+            )
+        )
+        expired = self._session.scalar(
+            select(func.coalesce(func.sum(StockBatch.quantity_available), 0)).where(
+                StockBatch.quantity_available > 0, StockBatch.expiry_date < today
+            )
+        )
+        out = self._session.scalar(
+            select(func.count(StockBatch.id)).where(StockBatch.quantity_available == 0)
+        )
+        return {
+            "IN_STOCK": int(in_stock or 0),
+            "EXPIRED": int(expired or 0),
+            "OUT_OF_STOCK_BATCHES": int(out or 0),
+        }
+
+    def payment_breakdown(self, period: DateRange) -> dict[str, Decimal]:
+        rows = self._session.execute(
+            select(Payment.method, func.sum(Payment.amount))
+            .where(
+                Payment.direction == PaymentDirection.INCOMING,
+                Payment.created_at >= period.start,
+                Payment.created_at < period.end,
+            )
+            .group_by(Payment.method)
+        )
+        return {method.value: Decimal(total) for method, total in rows}

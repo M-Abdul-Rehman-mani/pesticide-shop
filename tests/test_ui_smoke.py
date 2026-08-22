@@ -1,0 +1,69 @@
+from __future__ import annotations
+
+from decimal import Decimal
+
+from PySide6.QtCore import QModelIndex, Qt, QThreadPool
+from PySide6.QtWidgets import QLineEdit, QPushButton
+from pytestqt.qtbot import QtBot
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.config.settings import get_settings
+from app.security.authentication import AuthenticatedUser
+from app.ui.forms import MoneyEdit, PaymentEditor
+from app.ui.main_window import MainWindow
+from app.ui.widgets import RowsTableModel
+
+
+def test_table_model_and_financial_widgets(qtbot: QtBot) -> None:
+    model = RowsTableModel(("Product", "Amount"))
+    model.set_rows((("Gazonner 15% EC", Decimal("150.00")),))
+    assert model.rowCount() == 1
+    assert model.data(model.index(0, 0)) == "Gazonner 15% EC"
+    assert model.headerData(1, Qt.Orientation.Horizontal) == "Amount"
+    assert model.data(QModelIndex()) is None
+
+    money = MoneyEdit()
+    qtbot.addWidget(money)
+    money.setText("1250.50")
+    assert money.decimal_value("Amount") == Decimal("1250.50")
+
+    payments = PaymentEditor()
+    qtbot.addWidget(payments)
+    assert payments.values() == ()
+    assert payments.findChild(QLineEdit) is not None
+    add_payment = next(
+        button for button in payments.findChildren(QPushButton) if button.text() == "Add payment"
+    )
+    qtbot.mouseClick(add_payment, Qt.MouseButton.LeftButton)
+    assert payments.table.rowCount() == 2
+
+
+def test_owner_window_contains_complete_pesticide_workflow(
+    qtbot: QtBot,
+    database_engine: Engine,
+    owner: AuthenticatedUser,
+) -> None:
+    factory = sessionmaker[Session](bind=database_engine, expire_on_commit=False, autoflush=False)
+    window = MainWindow(factory, owner, get_settings())
+    qtbot.addWidget(window)
+
+    expected = {
+        "Dashboard",
+        "Sales",
+        "Purchases",
+        "Inventory",
+        "Products",
+        "Customers",
+        "Dealers",
+        "Suppliers",
+        "Reports",
+        "Users",
+        "Shop Settings",
+        "Settings",
+    }
+    assert expected == set(window._pages)
+    assert window.windowTitle() == "Pesticide Shop Management System"
+    window.navigate("Dealers")
+    assert window.stack.currentWidget() is window._pages["Dealers"]
+    assert QThreadPool.globalInstance().waitForDone(10_000)
