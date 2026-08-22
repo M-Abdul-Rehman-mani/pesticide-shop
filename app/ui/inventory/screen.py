@@ -6,11 +6,13 @@ import uuid
 from datetime import date, timedelta
 from typing import cast
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -29,7 +31,7 @@ from app.models.product import Product
 from app.models.supplier import Supplier
 from app.security.authentication import AuthenticatedUser
 from app.services.stock_inventory_service import StockInventoryService
-from app.ui.widgets import RowsTableModel, show_error
+from app.ui.widgets import PageHeader, RowsTableModel, configure_table, show_error
 from app.ui.workers import FunctionWorker, start_worker
 from app.utils.formatting import format_date
 
@@ -48,11 +50,24 @@ class InventoryScreen(QWidget):
         self._ids: list[uuid.UUID] = []
         self._received: list[int] = []
         self._available: list[int] = []
-        layout, header = QVBoxLayout(self), QHBoxLayout()
-        title = QLabel("Pesticide Batch Inventory")
-        title.setObjectName("PageTitle")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(26, 24, 26, 20)
+        layout.setSpacing(14)
+        layout.addWidget(
+            PageHeader(
+                "Batch inventory",
+                "Monitor sellable stock, expiry risk, purchase cost, and batch movements.",
+            )
+        )
+        filter_bar, header = QFrame(), QHBoxLayout()
+        filter_bar.setObjectName("FilterBar")
+        filter_bar.setLayout(header)
+        header.setContentsMargins(14, 10, 14, 10)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Product, batch, ingredient, supplier")
+        self.search.setProperty("search", True)
+        self.search.setClearButtonEnabled(True)
+        self.search.setMinimumWidth(290)
         self.filter = QComboBox()
         self.filter.addItems(
             ("All", "In Stock", "Low Stock", "Expiring in 90 Days", "Expired", "Out of Stock")
@@ -64,10 +79,14 @@ class InventoryScreen(QWidget):
         )
         history.setProperty("secondary", True)
         adjust.setProperty("secondary", True)
-        header.addWidget(title)
-        header.addStretch()
+        history.setEnabled(False)
+        adjust.setEnabled(False)
+        self._history_button, self._adjust_button = history, adjust
+        header.addWidget(QLabel("Search"))
         header.addWidget(self.search)
+        header.addWidget(QLabel("Status"))
         header.addWidget(self.filter)
+        header.addStretch()
         header.addWidget(history)
         header.addWidget(adjust)
         header.addWidget(refresh)
@@ -90,15 +109,25 @@ class InventoryScreen(QWidget):
         )
         self.table = QTableView()
         self.table.setModel(self.model)
-        self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
-        self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
-        layout.addLayout(header)
-        layout.addWidget(self.table)
+        configure_table(self.table, stretch_column=0)
+        layout.addWidget(filter_bar)
+        layout.addWidget(self.table, 1)
+        self.record_count = QLabel("Loading inventory…")
+        self.record_count.setObjectName("RecordCount")
+        layout.addWidget(self.record_count)
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(350)
+        self._search_timer.timeout.connect(self.refresh)
         refresh.clicked.connect(self.refresh)
+        self.search.textChanged.connect(lambda _text: self._search_timer.start())
+        self.search.returnPressed.connect(lambda: self._search_timer.stop())
         self.search.returnPressed.connect(self.refresh)
         self.filter.currentIndexChanged.connect(self.refresh)
         history.clicked.connect(self._history)
         adjust.clicked.connect(self._adjust)
+        self.table.doubleClicked.connect(lambda _index: self._history())
+        self.table.selectionModel().selectionChanged.connect(self._selection_changed)
         self.refresh()
 
     @staticmethod
@@ -185,6 +214,13 @@ class InventoryScreen(QWidget):
             tuple[list[tuple[object, ...]], list[uuid.UUID], list[int], list[int]], result
         )
         self.model.set_rows(rows)
+        self.record_count.setText(f"{len(rows):,} {'batch' if len(rows) == 1 else 'batches'} shown")
+        self._selection_changed()
+
+    def _selection_changed(self) -> None:
+        selected = self._selected() is not None
+        self._history_button.setEnabled(selected)
+        self._adjust_button.setEnabled(selected and self._actor is not None)
 
     def _selected(self) -> int | None:
         rows = self.table.selectionModel().selectedRows()
@@ -270,6 +306,7 @@ class InventoryScreen(QWidget):
             model.set_rows(rows)  # type: ignore[arg-type]
             table = QTableView()
             table.setModel(model)
+            configure_table(table, stretch_column=5)
             layout.addWidget(table)
             buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
             buttons.rejected.connect(dialog.reject)

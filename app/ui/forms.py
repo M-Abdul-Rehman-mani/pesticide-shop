@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from app.models.enums import PaymentMethod
 from app.services.dto import PaymentInput
+from app.ui.widgets import configure_table
 from app.utils.validators import nonnegative_money
 
 
@@ -43,12 +44,13 @@ class PaymentEditor(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(("Method", "Amount", "Reference"))
-        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setMinimumHeight(150)
+        configure_table(self.table, stretch_column=2, editable=True)
         controls = QHBoxLayout()
         add = QPushButton("Add payment")
         add.setProperty("secondary", True)
         remove = QPushButton("Remove")
-        remove.setProperty("secondary", True)
+        remove.setProperty("quiet", True)
         controls.addWidget(add)
         controls.addWidget(remove)
         controls.addStretch()

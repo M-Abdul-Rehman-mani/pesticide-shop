@@ -45,7 +45,7 @@ from app.services.dto import CreatePesticideSaleCommand, PesticideSaleLineInput
 from app.services.pesticide_sale_service import PesticideSaleService
 from app.services.settings_service import SettingsService
 from app.ui.forms import MoneyEdit, PaymentEditor
-from app.ui.widgets import show_error
+from app.ui.widgets import PageHeader, configure_table, show_error
 from app.ui.workers import FunctionWorker, start_worker
 from app.utils.exceptions import ConflictError
 
@@ -78,9 +78,14 @@ class SalesScreen(QWidget):
         self._dealers: list[tuple[uuid.UUID, str, str | None, str | None]] = []
         self._last_sale_id: uuid.UUID | None = None
         layout = QVBoxLayout(self)
-        title = QLabel("New Pesticide Sale / Delivery Challan")
-        title.setObjectName("PageTitle")
-        layout.addWidget(title)
+        layout.setContentsMargins(26, 24, 26, 20)
+        layout.setSpacing(14)
+        layout.addWidget(
+            PageHeader(
+                "New pesticide sale",
+                "Select a recipient, add stock by batch, and record one or more payments.",
+            )
+        )
 
         top = QHBoxLayout()
         recipient_group, recipient_form = QGroupBox("Invoice Recipient"), QFormLayout()
@@ -94,13 +99,18 @@ class SalesScreen(QWidget):
         details_group.setLayout(details_form)
         self.order_number, self.territory = QLineEdit(), QLineEdit()
         self.policy, self.store = QLineEdit("NET SALE"), QLineEdit("FINISHED")
-        self.delivery_address = QLineEdit()
+        self.delivery_address, self.notes = QLineEdit(), QLineEdit()
+        self.order_number.setPlaceholderText("Optional customer order reference")
+        self.territory.setPlaceholderText("Sales territory")
+        self.delivery_address.setPlaceholderText("Address printed on the invoice")
+        self.notes.setPlaceholderText("Optional invoice note")
         for field_label, field_widget in (
             ("Order #", self.order_number),
             ("Territory", self.territory),
             ("Policy", self.policy),
             ("Store", self.store),
             ("Delivery address", self.delivery_address),
+            ("Notes", self.notes),
         ):
             details_form.addRow(field_label, field_widget)
         top.addWidget(recipient_group)
@@ -112,7 +122,8 @@ class SalesScreen(QWidget):
         self.batch, self.quantity, self.unit_price = QComboBox(), QSpinBox(), MoneyEdit()
         self.batch.setMinimumWidth(440)
         self.quantity.setRange(1, 1_000_000)
-        add = QPushButton("Add to Cart")
+        add = QPushButton("+  Add batch")
+        add.setToolTip("Add this batch and quantity to the invoice")
         for stock_widget in (
             QLabel("Product / batch"),
             self.batch,
@@ -128,8 +139,11 @@ class SalesScreen(QWidget):
         self.cart_table.setHorizontalHeaderLabels(
             ("Product", "Batch", "Qty", "Unit", "Line Discount", "Total", "Action")
         )
-        self.cart_table.horizontalHeader().setStretchLastSection(True)
+        configure_table(self.cart_table, stretch_column=0, minimum_section_size=80)
         layout.addWidget(self.cart_table, 1)
+        self.cart_count = QLabel("0 items in invoice")
+        self.cart_count.setObjectName("RecordCount")
+        layout.addWidget(self.cart_count)
 
         bottom = QHBoxLayout()
         payment_group, payment_layout = QGroupBox("Payments"), QVBoxLayout()
@@ -141,7 +155,8 @@ class SalesScreen(QWidget):
         self.subtotal_label = QLabel(f"{settings.app_currency} 0.00")
         self.discount, self.tax = MoneyEdit(), MoneyEdit()
         self.total_label = QLabel(f"{settings.app_currency} 0.00")
-        self.total_label.setStyleSheet("font-size: 16pt; font-weight: 700; color: #17324d;")
+        self.total_label.setObjectName("GrandTotal")
+        self.total_label.setStyleSheet("color: #176d49;")
         for total_label, total_widget in (
             ("Subtotal", self.subtotal_label),
             ("Order discount", self.discount),
@@ -159,6 +174,8 @@ class SalesScreen(QWidget):
         self.preview.setProperty("secondary", True)
         self.save_pdf.setEnabled(False)
         self.preview.setEnabled(False)
+        self.complete.setEnabled(False)
+        self.complete.setToolTip("Save the sale, reduce stock, and queue invoice emails")
         actions.addWidget(self.save_pdf)
         actions.addWidget(self.preview)
         actions.addStretch()
@@ -175,6 +192,7 @@ class SalesScreen(QWidget):
         self.save_pdf.clicked.connect(self._save_last_pdf)
         self.preview.clicked.connect(self._preview_last)
         self._load_choices()
+        self._update_cart_state()
 
     def _load_choices(self) -> None:
         def operation() -> tuple[
@@ -309,12 +327,19 @@ class SalesScreen(QWidget):
         remove.clicked.connect(lambda _checked=False, item=entry: self._remove(item))
         self.cart_table.setCellWidget(row, 6, remove)
         self._calculate()
+        self._update_cart_state()
 
     def _remove(self, entry: CartEntry) -> None:
         row = self._cart.index(entry)
         self._cart.pop(row)
         self.cart_table.removeRow(row)
         self._calculate()
+        self._update_cart_state()
+
+    def _update_cart_state(self) -> None:
+        count = len(self._cart)
+        self.cart_count.setText(f"{count} {'item' if count == 1 else 'items'} in invoice")
+        self.complete.setEnabled(count > 0)
 
     def _sale_lines(self) -> tuple[PesticideSaleLineInput, ...]:
         lines: list[PesticideSaleLineInput] = []
@@ -367,6 +392,7 @@ class SalesScreen(QWidget):
             delivery_address=self.delivery_address.text().strip() or None,
             policy=self.policy.text().strip() or None,
             store=self.store.text().strip() or None,
+            notes=self.notes.text().strip() or None,
         )
         self.complete.setEnabled(False)
 
@@ -390,7 +416,7 @@ class SalesScreen(QWidget):
             operation,
             succeeded=self._sale_saved,
             failed=lambda error: show_error(self, error),
-            finished=lambda: self.complete.setEnabled(True),
+            finished=self._update_cart_state,
         )
 
     def _sale_saved(self, result: object) -> None:
@@ -409,7 +435,9 @@ class SalesScreen(QWidget):
         self.discount.setText("0.00")
         self.tax.setText("0.00")
         self.payments.clear()
+        self.notes.clear()
         self._calculate()
+        self._update_cart_state()
         self._load_choices()
 
     def _receipt_payload(self) -> bytes:

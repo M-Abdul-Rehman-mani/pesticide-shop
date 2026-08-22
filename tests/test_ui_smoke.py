@@ -12,7 +12,8 @@ from app.config.settings import get_settings
 from app.security.authentication import AuthenticatedUser
 from app.ui.forms import MoneyEdit, PaymentEditor
 from app.ui.main_window import MainWindow
-from app.ui.widgets import RowsTableModel
+from app.ui.theme import APPLICATION_STYLESHEET
+from app.ui.widgets import PageHeader, RowsTableModel
 
 
 def test_table_model_and_financial_widgets(qtbot: QtBot) -> None:
@@ -37,6 +38,17 @@ def test_table_model_and_financial_widgets(qtbot: QtBot) -> None:
     )
     qtbot.mouseClick(add_payment, Qt.MouseButton.LeftButton)
     assert payments.table.rowCount() == 2
+
+
+def test_modern_ui_components_expose_clear_hierarchy(qtbot: QtBot) -> None:
+    header = PageHeader("Batch inventory", "Track stock and expiry risk.")
+    qtbot.addWidget(header)
+
+    assert header.title_label.objectName() == "PageTitle"
+    assert header.subtitle_label.objectName() == "PageSubtitle"
+    assert "QFrame#Sidebar" in APPLICATION_STYLESHEET
+    assert "QFrame#FilterBar" in APPLICATION_STYLESHEET
+    assert "QFrame#MetricCard" in APPLICATION_STYLESHEET
 
 
 def test_owner_window_contains_complete_pesticide_workflow(
@@ -66,4 +78,11 @@ def test_owner_window_contains_complete_pesticide_workflow(
     assert window.windowTitle() == "Pesticide Shop Management System"
     window.navigate("Dealers")
     assert window.stack.currentWidget() is window._pages["Dealers"]
+    assert window._page_label.text() == "Dealers"
+    assert window._nav_buttons["Dealers"].isChecked()
+    assert window._nav_buttons["Dealers"].accessibleName() == "Dealers"
+    window.navigate("Sales")
+    sales = window._pages["Sales"]
+    assert sales.complete.isEnabled() is False  # type: ignore[attr-defined]
+    assert sales.cart_count.text() == "0 items in invoice"  # type: ignore[attr-defined]
     assert QThreadPool.globalInstance().waitForDone(10_000)
