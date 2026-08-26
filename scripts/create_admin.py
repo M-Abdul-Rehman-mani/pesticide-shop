@@ -16,7 +16,7 @@ from app.utils.validators import normalize_email
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Create a Mobile Shop owner account")
+    parser = argparse.ArgumentParser(description="Create a Pesticide Shop owner account")
     parser.add_argument("--username", default="admin")
     parser.add_argument("--full-name", required=True)
     parser.add_argument("--email", required=True)

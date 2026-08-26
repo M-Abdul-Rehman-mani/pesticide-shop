@@ -16,7 +16,6 @@ from app.models.enums import PaymentDirection, PaymentMethod
 
 if TYPE_CHECKING:
     from app.models.purchase import Purchase
-    from app.models.return_record import SaleReturn
     from app.models.sale import Sale
     from app.models.user import User
 
@@ -26,7 +25,7 @@ class Payment(UUIDPrimaryKeyMixin, Base):
     __table_args__ = (
         CheckConstraint("amount > 0", name="amount_positive"),
         CheckConstraint(
-            "num_nonnulls(sale_id, purchase_id, sale_return_id) = 1",
+            "num_nonnulls(sale_id, purchase_id) = 1",
             name="exactly_one_document",
         ),
         Index("ix_payments_created", "created_at"),
@@ -39,9 +38,6 @@ class Payment(UUIDPrimaryKeyMixin, Base):
     )
     purchase_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("purchases.id", ondelete="RESTRICT")
-    )
-    sale_return_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("sale_returns.id", ondelete="RESTRICT")
     )
     method: Mapped[PaymentMethod] = mapped_column(
         Enum(PaymentMethod, name="payment_method", create_type=False), nullable=False
@@ -61,7 +57,6 @@ class Payment(UUIDPrimaryKeyMixin, Base):
 
     sale: Mapped[Sale | None] = relationship()
     purchase: Mapped[Purchase | None] = relationship()
-    sale_return: Mapped[SaleReturn | None] = relationship()
     receiver: Mapped[User] = relationship(lazy="joined")
 
 

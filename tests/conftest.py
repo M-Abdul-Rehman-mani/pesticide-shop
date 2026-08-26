@@ -1,9 +1,9 @@
-"""PostgreSQL-only fixtures with per-test transaction isolation."""
+"""PostgreSQL fixtures with transaction isolation for pesticide-shop tests."""
 
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Generator
+from collections.abc import Generator
 from decimal import Decimal
 from pathlib import Path
 
@@ -19,13 +19,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.update(
     {
         "APP_ENV": "test",
-        "APP_SECRET_KEY": "test-application-secret-key-at-least-thirty-two-chars",
+        "APP_SECRET_KEY": "test-pesticide-shop-secret-at-least-thirty-two-chars",
         "DATABASE_HOST": os.environ.get("TEST_DATABASE_HOST", "127.0.0.1"),
-        "DATABASE_PORT": os.environ.get("TEST_DATABASE_PORT", "5433"),
-        "DATABASE_NAME": os.environ.get("TEST_DATABASE_NAME", "mobile_shop_test"),
-        "DATABASE_USER": os.environ.get("TEST_DATABASE_USER", "mobile_shop_test"),
+        "DATABASE_PORT": os.environ.get("TEST_DATABASE_PORT", "5441"),
+        "DATABASE_NAME": os.environ.get("TEST_DATABASE_NAME", "pesticide_shop_test"),
+        "DATABASE_USER": os.environ.get("TEST_DATABASE_USER", "pesticide_shop_test"),
         "DATABASE_PASSWORD": os.environ.get(
-            "TEST_DATABASE_PASSWORD", "local-mobile-shop-test-password"
+            "TEST_DATABASE_PASSWORD", "local-pesticide-shop-test-password"
         ),
         "DATABASE_SSL_MODE": "disable",
     }
@@ -33,18 +33,11 @@ os.environ.update(
 
 from app.config.settings import get_settings
 from app.models.customer import Customer
-from app.models.enums import PaymentMethod, UserRole
-from app.models.inventory import PhoneInventory
+from app.models.enums import UserRole
 from app.models.product import Product
 from app.models.supplier import Supplier
 from app.models.user import User
 from app.security.authentication import AuthenticatedUser
-from app.services.dto import (
-    CreatePurchaseCommand,
-    PaymentInput,
-    PurchasedPhoneInput,
-)
-from app.services.purchase_service import PurchaseService
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:
@@ -115,15 +108,16 @@ def supplier(db_session: Session) -> Supplier:
 @pytest.fixture
 def product(db_session: Session) -> Product:
     product = Product(
-        brand="Test Brand",
-        model="Test Phone",
-        variant="V1",
-        storage="128GB",
-        ram="8GB",
-        color="Black",
-        category="PHONE",
-        default_purchase_price=Decimal("100000.00"),
-        default_sale_price=Decimal("125000.00"),
+        manufacturer="Test Crop Sciences",
+        name="Test Herbicide",
+        active_ingredient="Quizalofop-P-Ethyl",
+        formulation="15% EC",
+        pack_size="500-ML",
+        registration_number="REG-TEST-1",
+        unit="PACK",
+        category="HERBICIDE",
+        default_purchase_price=Decimal("100.00"),
+        default_sale_price=Decimal("150.00"),
         minimum_stock=2,
         is_active=True,
     )
@@ -142,33 +136,3 @@ def customer(db_session: Session) -> Customer:
     db_session.add(customer)
     db_session.flush()
     return customer
-
-
-@pytest.fixture
-def purchase_phone(
-    db_session: Session,
-    owner: AuthenticatedUser,
-    supplier: Supplier,
-    product: Product,
-) -> Callable[[str, str | None], PhoneInventory]:
-    def create(imei_1: str = "350000000000001", imei_2: str | None = None) -> PhoneInventory:
-        PurchaseService(db_session).create(
-            CreatePurchaseCommand(
-                supplier_id=supplier.id,
-                phones=(
-                    PurchasedPhoneInput(
-                        product_id=product.id,
-                        imei_1=imei_1,
-                        imei_2=imei_2,
-                        purchase_price=Decimal("100000.00"),
-                        selling_price=Decimal("125000.00"),
-                    ),
-                ),
-                payments=(PaymentInput(PaymentMethod.CASH, Decimal("100000.00")),),
-            ),
-            owner,
-        )
-        db_session.flush()
-        return db_session.query(PhoneInventory).filter_by(imei_1=imei_1).one()
-
-    return create

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import ClassVar
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
@@ -22,17 +23,17 @@ from PySide6.QtWidgets import (
 )
 from sqlalchemy.orm import Session, sessionmaker
 
+from app import __version__
 from app.config.settings import Settings
 from app.security.authentication import AuthenticatedUser
 from app.security.permissions import Permission, has_permission
 from app.ui.customers.screen import CustomersScreen
-from app.ui.damages.screen import DamagesScreen
 from app.ui.dashboard.screen import DashboardScreen
+from app.ui.dealers.screen import DealersScreen
 from app.ui.inventory.screen import InventoryScreen
 from app.ui.products.screen import ProductsScreen
 from app.ui.purchases.screen import PurchasesScreen
 from app.ui.reports.screen import ReportsScreen
-from app.ui.returns.screen import ReturnsScreen
 from app.ui.sales.screen import SalesScreen
 from app.ui.session_timeout import SessionTimeoutMonitor
 from app.ui.settings.screen import SettingsScreen
@@ -43,6 +44,35 @@ from app.ui.users.screen import UsersScreen
 
 class MainWindow(QMainWindow):
     logout_requested = Signal()
+
+    _NAV_GLYPHS: ClassVar[dict[str, str]] = {
+        "Dashboard": "⌂",
+        "Sales": "+",
+        "Purchases": "⇣",
+        "Inventory": "▦",
+        "Products": "◇",
+        "Customers": "♙",
+        "Dealers": "◎",
+        "Suppliers": "⬡",
+        "Reports": "▥",
+        "Users": "♟",
+        "Shop Settings": "⌂",
+        "Settings": "⚙",
+    }
+    _PAGE_CONTEXT: ClassVar[dict[str, str]] = {
+        "Dashboard": "Business overview and stock health",
+        "Sales": "Create a delivery challan and invoice",
+        "Purchases": "Receive supplier stock by batch",
+        "Inventory": "Track quantities, expiry, and movements",
+        "Products": "Manage the pesticide product catalog",
+        "Customers": "Retail customer directory",
+        "Dealers": "Trade accounts, credit, and balances",
+        "Suppliers": "Supplier accounts and purchase history",
+        "Reports": "Sales, profit, inventory, and exports",
+        "Users": "Roles and account access",
+        "Shop Settings": "Business identity and invoice details",
+        "Settings": "Email, printing, backup, and security",
+    }
 
     def __init__(
         self,
@@ -56,9 +86,9 @@ class MainWindow(QMainWindow):
         self._settings = settings
         self._pages: dict[str, QWidget] = {}
         self._nav_buttons: dict[str, QPushButton] = {}
-        self.setWindowTitle("Mobile Shop Management System")
-        self.resize(1440, 880)
-        self.setMinimumSize(1100, 700)
+        self.setWindowTitle("Pesticide Shop Management System")
+        self.resize(1480, 900)
+        self.setMinimumSize(1180, 720)
         central = QWidget()
         central.setObjectName("PageBackground")
         root = QVBoxLayout(central)
@@ -70,11 +100,17 @@ class MainWindow(QMainWindow):
         content.setSpacing(0)
         sidebar, sidebar_layout = self._sidebar()
         self.stack = QStackedWidget()
+        self.stack.setObjectName("ContentStack")
         content.addWidget(sidebar)
         content.addWidget(self.stack, 1)
         root.addLayout(content, 1)
         self.setCentralWidget(central)
-        self.setStatusBar(QStatusBar())
+        status = QStatusBar()
+        status.setSizeGripEnabled(False)
+        shortcuts = QLabel("Ctrl+N  New sale    Ctrl+R  Refresh    Ctrl+F  Search")
+        shortcuts.setObjectName("RecordCount")
+        status.addPermanentWidget(shortcuts)
+        self.setStatusBar(status)
         self._build_pages(sidebar_layout)
         self._install_shortcuts()
         self._session_monitor = SessionTimeoutMonitor(settings.app_session_timeout_minutes, self)
@@ -87,20 +123,47 @@ class MainWindow(QMainWindow):
     def _top_bar(self) -> QFrame:
         frame = QFrame()
         frame.setObjectName("TopBar")
-        frame.setFixedHeight(64)
+        frame.setFixedHeight(72)
         layout = QHBoxLayout(frame)
-        layout.setContentsMargins(22, 0, 22, 0)
-        title = QLabel("MOBILE SHOP MANAGEMENT")
-        title.setStyleSheet("font-size: 15pt; font-weight: 700; color: #17324d;")
-        user = QLabel(
-            f"{self._user.full_name}  •  {self._user.role.value.replace('_', ' ').title()}"
-        )
+        layout.setContentsMargins(24, 0, 22, 0)
+        page_copy = QVBoxLayout()
+        page_copy.setSpacing(0)
+        eyebrow = QLabel("WORKSPACE")
+        eyebrow.setObjectName("TopBarEyebrow")
+        self._page_label = QLabel("Dashboard")
+        self._page_label.setObjectName("TopBarTitle")
+        page_copy.addWidget(eyebrow)
+        page_copy.addWidget(self._page_label)
+
+        quick_sale = QPushButton("+  New sale")
+        quick_sale.setObjectName("QuickSaleButton")
+        quick_sale.setToolTip("Start a new sale (Ctrl+N)")
+        quick_sale.clicked.connect(lambda: self.navigate("Sales"))
+        quick_sale.setVisible(has_permission(self._user.role, Permission.CREATE_SALE))
+
+        initials = "".join(part[0] for part in self._user.full_name.split()[:2]).upper() or "U"
+        avatar = QLabel(initials)
+        avatar.setObjectName("Avatar")
+        avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        avatar.setFixedSize(36, 36)
+        user_copy = QVBoxLayout()
+        user_copy.setSpacing(0)
+        user_name = QLabel(self._user.full_name)
+        user_name.setObjectName("UserName")
+        user_role = QLabel(self._user.role.value.replace("_", " ").title())
+        user_role.setObjectName("UserRole")
+        user_copy.addWidget(user_name)
+        user_copy.addWidget(user_role)
         logout = QPushButton("Logout")
-        logout.setProperty("secondary", True)
+        logout.setProperty("quiet", True)
+        logout.setToolTip("Sign out of this workstation")
         logout.clicked.connect(self._logout)
-        layout.addWidget(title)
+        layout.addLayout(page_copy)
         layout.addStretch()
-        layout.addWidget(user)
+        layout.addWidget(quick_sale)
+        layout.addSpacing(10)
+        layout.addWidget(avatar)
+        layout.addLayout(user_copy)
         layout.addWidget(logout)
         return frame
 
@@ -108,16 +171,36 @@ class MainWindow(QMainWindow):
     def _sidebar() -> tuple[QFrame, QVBoxLayout]:
         frame = QFrame()
         frame.setObjectName("Sidebar")
-        frame.setFixedWidth(215)
+        frame.setFixedWidth(238)
         layout = QVBoxLayout(frame)
-        layout.setContentsMargins(12, 18, 12, 18)
-        layout.setSpacing(4)
-        brand = QLabel("M  SHOP")
+        layout.setContentsMargins(13, 18, 13, 14)
+        layout.setSpacing(3)
+        brand_row = QHBoxLayout()
+        brand_row.setSpacing(10)
+        mark = QLabel("C")
+        mark.setObjectName("BrandMark")
+        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mark.setFixedSize(36, 36)
+        brand_copy = QVBoxLayout()
+        brand_copy.setSpacing(0)
+        brand = QLabel("CropCare")
         brand.setObjectName("Brand")
-        brand.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(brand)
-        layout.addSpacing(18)
+        caption = QLabel("PESTICIDE OPERATIONS")
+        caption.setObjectName("BrandCaption")
+        brand_copy.addWidget(brand)
+        brand_copy.addWidget(caption)
+        brand_row.addWidget(mark)
+        brand_row.addLayout(brand_copy)
+        brand_row.addStretch()
+        layout.addLayout(brand_row)
+        layout.addSpacing(12)
         return frame, layout
+
+    @staticmethod
+    def _add_section(sidebar: QVBoxLayout, name: str) -> None:
+        label = QLabel(name.upper())
+        label.setObjectName("NavSection")
+        sidebar.addWidget(label)
 
     def _add_page(
         self,
@@ -131,8 +214,9 @@ class MainWindow(QMainWindow):
         page = factory()
         self._pages[name] = page
         self.stack.addWidget(page)
-        button = QPushButton(name)
+        button = QPushButton(f"{self._NAV_GLYPHS.get(name, '•')}   {name}")
         button.setObjectName("NavButton")
+        button.setAccessibleName(name)
         button.setCheckable(True)
         button.setAutoExclusive(True)
         button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -144,6 +228,7 @@ class MainWindow(QMainWindow):
         factory = self._session_factory
         settings = self._settings
         actor = self._user
+        self._add_section(sidebar, "Operations")
         self._add_page(
             sidebar,
             "Dashboard",
@@ -158,12 +243,6 @@ class MainWindow(QMainWindow):
         )
         self._add_page(
             sidebar,
-            "Returns",
-            lambda: ReturnsScreen(factory, actor, settings),
-            Permission.CREATE_RETURN,
-        )
-        self._add_page(
-            sidebar,
             "Purchases",
             lambda: PurchasesScreen(factory, actor, settings),
             Permission.RECORD_PURCHASE,
@@ -171,20 +250,15 @@ class MainWindow(QMainWindow):
         self._add_page(
             sidebar,
             "Inventory",
-            lambda: InventoryScreen(factory, settings.app_currency),
+            lambda: InventoryScreen(factory, settings.app_currency, actor),
             Permission.VIEW_INVENTORY,
         )
+        self._add_section(sidebar, "Directory")
         self._add_page(
             sidebar,
             "Products",
             lambda: ProductsScreen(factory, actor, settings.app_currency),
             Permission.MANAGE_INVENTORY,
-        )
-        self._add_page(
-            sidebar,
-            "Damage",
-            lambda: DamagesScreen(factory, actor, settings),
-            Permission.RECORD_DAMAGE,
         )
         self._add_page(
             sidebar,
@@ -194,16 +268,24 @@ class MainWindow(QMainWindow):
         )
         self._add_page(
             sidebar,
+            "Dealers",
+            lambda: DealersScreen(factory, actor, settings.app_currency),
+            Permission.MANAGE_DEALERS,
+        )
+        self._add_page(
+            sidebar,
             "Suppliers",
             lambda: SuppliersScreen(factory, actor, settings.app_currency),
             Permission.MANAGE_SUPPLIERS,
         )
+        self._add_section(sidebar, "Insights")
         self._add_page(
             sidebar,
             "Reports",
             lambda: ReportsScreen(factory, actor, settings),
             Permission.VIEW_REPORTS,
         )
+        self._add_section(sidebar, "Administration")
         self._add_page(
             sidebar,
             "Users",
@@ -223,6 +305,9 @@ class MainWindow(QMainWindow):
             Permission.MANAGE_SETTINGS,
         )
         sidebar.addStretch()
+        hint = QLabel(f"Version {__version__}\nSecure PostgreSQL workspace")
+        hint.setObjectName("SidebarHint")
+        sidebar.addWidget(hint)
 
     def navigate(self, name: str) -> None:
         page = self._pages.get(name)
@@ -230,7 +315,8 @@ class MainWindow(QMainWindow):
             return
         self.stack.setCurrentWidget(page)
         self._nav_buttons[name].setChecked(True)
-        self.statusBar().showMessage(f"{name} ready", 2500)
+        self._page_label.setText(name)
+        self.statusBar().showMessage(self._PAGE_CONTEXT.get(name, f"{name} ready"), 3500)
 
     def _install_shortcuts(self) -> None:
         bindings = {
@@ -256,7 +342,7 @@ class MainWindow(QMainWindow):
 
     def _focus_search(self) -> None:
         page = self.stack.currentWidget()
-        for name in ("search", "imei", "invoice"):
+        for name in ("search", "invoice"):
             widget = getattr(page, name, None)
             if widget is not None and hasattr(widget, "setFocus"):
                 widget.setFocus()

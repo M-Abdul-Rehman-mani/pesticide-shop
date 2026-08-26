@@ -8,7 +8,7 @@ RUN apt-get update \
     && apt-get install --no-install-recommends -y postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /opt/mobile-shop
+WORKDIR /opt/pesticide-shop
 COPY requirements-worker.txt ./
 RUN python -m pip install -r requirements-worker.txt
 COPY app ./app

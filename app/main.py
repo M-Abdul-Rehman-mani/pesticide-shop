@@ -8,13 +8,13 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from app.ui.theme import APPLICATION_STYLESHEET
-
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from PySide6.QtCore import QObject, QTimer
 from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
 
-from alembic.config import Config
-from alembic.script import ScriptDirectory
+from app.config.settings import Settings
+from app.ui.theme import APPLICATION_STYLESHEET
 
 logger = logging.getLogger(__name__)
 
@@ -144,11 +144,11 @@ def main() -> int:
     from pydantic import ValidationError as ConfigurationValidationError
 
     from app.config.logging import configure_logging
-    from app.config.settings import Settings, get_settings
+    from app.config.settings import get_settings
 
     application = QApplication(sys.argv)
-    application.setApplicationName("Mobile Shop Manager")
-    application.setOrganizationName("Mobile Shop")
+    application.setApplicationName("Pesticide Shop Manager")
+    application.setOrganizationName("Crop Care Retail")
     application.setStyle("Fusion")
     application.setStyleSheet(APPLICATION_STYLESHEET)
     try:

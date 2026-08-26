@@ -35,9 +35,9 @@ class Settings(BaseSettings):
     app_currency: str = Field(default="PKR", min_length=3, max_length=3)
 
     database_host: str = "127.0.0.1"
-    database_port: int = Field(default=5432, ge=1, le=65535)
-    database_name: str = "mobile_shop"
-    database_user: str = "mobile_shop"
+    database_port: int = Field(default=5440, ge=1, le=65535)
+    database_name: str = "pesticide_shop"
+    database_user: str = "pesticide_shop"
     database_password: SecretStr
     database_ssl_mode: Literal[
         "disable", "allow", "prefer", "require", "verify-ca", "verify-full"
@@ -46,13 +46,13 @@ class Settings(BaseSettings):
     database_max_overflow: int = Field(default=20, ge=0, le=200)
 
     test_database_host: str = "127.0.0.1"
-    test_database_port: int = Field(default=5433, ge=1, le=65535)
-    test_database_name: str = "mobile_shop_test"
-    test_database_user: str = "mobile_shop_test"
+    test_database_port: int = Field(default=5441, ge=1, le=65535)
+    test_database_name: str = "pesticide_shop_test"
+    test_database_user: str = "pesticide_shop_test"
     test_database_password: SecretStr | None = None
 
     redis_host: str = "127.0.0.1"
-    redis_port: int = Field(default=6379, ge=1, le=65535)
+    redis_port: int = Field(default=6380, ge=1, le=65535)
     redis_db: int = Field(default=0, ge=0)
     redis_password: SecretStr | None = None
 

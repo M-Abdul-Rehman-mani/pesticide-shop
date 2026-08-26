@@ -1,3 +1,3 @@
-"""Mobile Shop Manager application package."""
+"""Pesticide Shop Manager application package."""
 
 __version__ = "1.0.0"

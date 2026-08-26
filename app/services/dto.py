@@ -7,13 +7,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 
-from app.models.enums import (
-    DamageType,
-    PaymentMethod,
-    PhoneCondition,
-    ReturnCondition,
-    ReturnReason,
-)
+from app.models.enums import PaymentMethod
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,24 +18,24 @@ class PaymentInput:
 
 
 @dataclass(frozen=True, slots=True)
-class PurchasedPhoneInput:
+class PurchasedBatchInput:
     product_id: uuid.UUID
-    imei_1: str
+    batch_number: str
+    quantity: int
     purchase_price: Decimal
     selling_price: Decimal
-    imei_2: str | None = None
-    serial_number: str | None = None
-    condition: PhoneCondition = PhoneCondition.NEW
-    warranty_start: date | None = None
-    warranty_end: date | None = None
+    manufacture_date: date | None = None
+    expiry_date: date | None = None
+    cartons: int = 0
+    packs_per_carton: int = 0
     location: str | None = None
     notes: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class CreatePurchaseCommand:
+class CreateStockPurchaseCommand:
     supplier_id: uuid.UUID
-    phones: tuple[PurchasedPhoneInput, ...]
+    batches: tuple[PurchasedBatchInput, ...]
     payments: tuple[PaymentInput, ...] = field(default_factory=tuple)
     purchase_date: datetime | None = None
     discount: Decimal = Decimal("0.00")
@@ -50,43 +44,31 @@ class CreatePurchaseCommand:
 
 
 @dataclass(frozen=True, slots=True)
-class SaleLineInput:
-    imei: str
-    price: Decimal | None = None
+class PesticideSaleLineInput:
+    stock_batch_id: uuid.UUID
+    quantity: int
+    unit_price: Decimal | None = None
     discount: Decimal = Decimal("0.00")
     other_cost: Decimal = Decimal("0.00")
 
+    @property
+    def price(self) -> Decimal | None:
+        """Compatibility alias for generic cart and reporting integrations."""
+        return self.unit_price
+
 
 @dataclass(frozen=True, slots=True)
-class CreateSaleCommand:
-    lines: tuple[SaleLineInput, ...]
+class CreatePesticideSaleCommand:
+    lines: tuple[PesticideSaleLineInput, ...]
     payments: tuple[PaymentInput, ...]
     customer_id: uuid.UUID | None = None
+    dealer_id: uuid.UUID | None = None
     sale_date: datetime | None = None
     order_discount: Decimal = Decimal("0.00")
     tax: Decimal = Decimal("0.00")
-    notes: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class CreateReturnCommand:
-    invoice_number: str
-    imei: str
-    reason: ReturnReason
-    condition: ReturnCondition
-    refund_amount: Decimal
-    refund_method: PaymentMethod
-    approved_by: uuid.UUID
-    return_date: datetime | None = None
-    notes: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class CreateDamageCommand:
-    imei: str
-    damage_type: DamageType
-    description: str
-    estimated_loss: Decimal = Decimal("0.00")
-    repair_cost: Decimal = Decimal("0.00")
-    damage_date: datetime | None = None
+    order_number: str | None = None
+    territory: str | None = None
+    delivery_address: str | None = None
+    policy: str | None = None
+    store: str | None = None
     notes: str | None = None

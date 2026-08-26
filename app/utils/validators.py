@@ -8,18 +8,8 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from app.utils.exceptions import ValidationError
 
 MONEY_QUANTUM = Decimal("0.01")
-IMEI_PATTERN = re.compile(r"^[0-9]{15}$")
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 PHONE_PATTERN = re.compile(r"^\+?[0-9][0-9 ()-]{5,24}$")
-
-
-def validate_imei(value: str) -> str:
-    """Normalize and validate a 15-digit IMEI."""
-
-    imei = value.strip()
-    if not IMEI_PATTERN.fullmatch(imei):
-        raise ValidationError("IMEI must contain exactly 15 digits.")
-    return imei
 
 
 def normalize_email(value: str | None, *, required: bool = False) -> str | None:

@@ -1,68 +1,76 @@
-# User Guide
+# Pesticide Shop Manager user guide
 
-## First login
+## First-time owner setup
 
-The development seed creates `admin` / `admin` only in development and forces a password change.
-Production administrators are created with `python -m scripts.create_admin`. After login, the
-sidebar shows only pages permitted for the signed-in role. Inactivity triggers logout.
+Sign in with the owner account, change the temporary password, then open **Shop Settings**. Add the
+shop name, owner name, postal address, contact number, email, website, tax/registration text, and an
+optional PNG/JPEG logo. These values brand new invoices. Under **Settings**, configure the invoice
+prefix, currency, timezone, SMTP account, owner notification email, printer/receipt format, backup,
+and session timeout. Use **Send Test Email** before relying on automatic delivery.
 
-## Core workflows
+## Products and parties
 
-### Purchase and inventory intake
+Open **Products** to add each pesticide, herbicide, insecticide, fungicide, fertilizer, or other
+crop-care product. Record product name, manufacturer, active ingredient, formulation, pack size,
+registration number, stock unit, purchase/sale prices, and the low-stock threshold.
 
-Create/select a supplier and product, enter each physical phone with its 15-digit IMEI values,
-prices, condition, warranty, and location, then record supplier payment lines. Completing the
-purchase atomically creates the purchase, serialized stock, inventory ledger, supplier balance,
-payments, and audit entry. Duplicate IMEIs are rejected.
+Use **Suppliers** for companies from which the shop buys stock. Use **Customers** for normal retail
+buyers. Use **Dealers** for trade buyers; dealer records also carry business/shop name, NIC/CNIC,
+tax number, territory, credit limit, outstanding balance, delivery address, and email. Each customer
+and dealer screen includes its own invoice history.
 
-### Sale
+## Receiving pesticide inventory
 
-Open Sales (`Ctrl+N`), select a customer or walk-in, scan an IMEI, add one or more available
-phones, edit each cart item's sale price when needed, set discounts/tax, and enter payment methods.
-Only `IN_STOCK` phones can be committed. Save the A4 invoice or open print preview afterward.
-Customer and owner receipt emails are queued after commit.
+Open **Purchases**, select the supplier and product, then enter the batch number, quantity, cartons,
+packs per carton, manufacture date, expiry date, purchase price, and default selling price. Add all
+batches for the delivery, enter one or more payment lines, discount, and tax, then complete the
+purchase. The purchase, supplier balance, stock batches, payments, audit event, and immutable stock
+movements are committed together. Duplicate product/batch combinations and invalid dates are
+rejected.
 
-### Shop settings
+## Creating and printing a sale
 
-Owners and managers can open Shop Settings from the sidebar and optionally enter the shop name,
-owner name, address, contact number, email, website, tax or registration details, and a logo.
-Completed fields are printed on A4 and thermal sale and return receipts; blank fields are omitted.
+Open **Sales** and choose Customer or Dealer. A customer may be walk-in; a dealer must be saved.
+Enter the delivery challan fields (order number, territory, policy, store, delivery address), choose
+an available product batch, and enter quantity and unit price. Add multiple batches/products, set
+line or invoice discounts, tax, and one or more payments, then complete the sale.
 
-### Return
+The application locks the selected batches while saving, refuses overselling and dealer credit-limit
+violations, deducts the exact quantities, records the movement ledger and payment status, updates the
+dealer balance, and preserves the sale. Use **Save PDF** or **Print Preview** after completion. The A4
+delivery challan/invoice contains the shop identity, invoice/date, customer/dealer details, NIC/tax
+identity, order/territory/store/policy, product/batch/quantity/price lines, totals, payment balance,
+and prepared/approved/recipient signature areas.
 
-Enter the original invoice and IMEI, choose reason/condition/refund method, and obtain manager or
-owner approval. A refund cannot exceed the original amount paid and the item cannot be returned
-twice. Good/opened/used items return to stock with the recorded condition; damaged returns enter
-`DAMAGED`. Save or print the return receipt after completion.
+When the recipient has an email address, their PDF is queued automatically. If the owner email is
+configured, a separate owner copy is queued. Email failure never reverses a sale; inspect and retry
+it from Email History after fixing SMTP/worker connectivity.
 
-### Damage and repair
+## Inventory, expiry, and corrections
 
-Record the IMEI, type, description, loss, and repair estimate. The phone enters `DAMAGED` and the
-owner notification is queued. Authorized inventory staff can move it through repair and return
-it to stock after recording cost and resolution.
+**Inventory** searches by product, manufacturer, active ingredient, batch, or supplier. Filter for
+in-stock, out-of-stock, low-stock, expired, or expiring-within-90-days inventory. Every row shows
+available/received quantities, unit, expiry status, supplier, prices, and current stock value.
+**Batch History** shows every purchase, sale, and adjustment with its resulting balance.
 
-## Search and reports
+Use **Adjust Stock** only after a physical count, spill, expiry disposal, or other correction. Enter
+the new available quantity and a mandatory reason. The application adds an immutable movement and
+audit event instead of silently rewriting history.
 
-Inventory search accepts IMEI, brand, and model and supports status, supplier, date, low-stock,
-and page-size filters. Double-click a phone to see original invoice/customer context and the full
-immutable movement history. Reports provide today, yesterday, week, month, or custom ranges with
-PDF, professionally formatted Excel, and print output.
+## Previous sales and reports
 
-## Shortcuts
+Open **Reports** and choose a date preset or custom range. **Sales History** lists every prior invoice
+line with recipient/type, product, batch, quantity, unit price, discount, total, payment state,
+salesperson, and date. Other reports cover profit, inventory value, upcoming expiry, purchases,
+payments, dealer balances, and employee sales. Reports can be exported to Excel/PDF or printed.
 
-```text
-Ctrl+N  New sale       Ctrl+F  Focus search
-Ctrl+P  Print/preview  Ctrl+S  Save current form
-Ctrl+R  Refresh        Ctrl+I  Inventory
-Ctrl+D  Dashboard      Esc     Close active dialog
-```
+## Roles and operations
 
-## Roles
+- OWNER: full access, including users, profit, settings, audit, backups, and dealer credit.
+- MANAGER: daily operational access except owner-only user and restore operations.
+- SALESPERSON: sales, customer/dealer records, dashboard, and inventory viewing.
+- INVENTORY_MANAGER: products, purchases, suppliers, inventory, adjustments, and reports.
 
-- OWNER: all operations, owner accounts, restore, settings, profit, and audit access.
-- MANAGER: operational administration except owner-account management and restore.
-- SALESPERSON: sales, customer work, inventory search, and permitted returns.
-- INVENTORY_MANAGER: purchasing, stock, suppliers, damage/repair, and inventory reports.
-
-Never share user accounts. Do not correct completed documents by deleting database rows; use the
-application's return, void, payment, damage, repair, or inventory-adjustment workflow.
+Use the backup command and rehearse restore procedures before deployment. Financial documents,
+payments, email history, inventory movements, and audit events are retained; corrections use
+explicit payment, adjustment, void, or other controlled workflows rather than deleting history.

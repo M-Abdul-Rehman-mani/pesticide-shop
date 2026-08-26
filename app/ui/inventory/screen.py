@@ -1,8 +1,9 @@
-"""Paginated inventory search with complete movement history."""
+"""Searchable pesticide batch inventory, expiry visibility, and stock adjustments."""
 
 from __future__ import annotations
 
 import uuid
+from datetime import date, timedelta
 from typing import cast
 
 from PySide6.QtCore import QTimer
@@ -10,256 +11,308 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
+    QSpinBox,
     QTableView,
     QVBoxLayout,
     QWidget,
 )
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.models.enums import PhoneStatus
-from app.repositories.inventory_repository import (
-    IMEILookupDetails,
-    InventoryFilters,
-    InventoryRepository,
-)
-from app.ui.widgets import RowsTableModel, show_error
+from app.models.inventory import StockBatch, StockMovement
+from app.models.product import Product
+from app.models.supplier import Supplier
+from app.security.authentication import AuthenticatedUser
+from app.services.stock_inventory_service import StockInventoryService
+from app.ui.widgets import PageHeader, RowsTableModel, configure_table, show_error
 from app.ui.workers import FunctionWorker, start_worker
 from app.utils.formatting import format_date
 
 
-class InventoryHistoryDialog(QDialog):
-    def __init__(self, imei: str, rows: list[tuple[object, ...]], parent: QWidget) -> None:
-        super().__init__(parent)
-        self.setWindowTitle(f"Inventory history — {imei}")
-        self.resize(850, 450)
-        layout = QVBoxLayout(self)
-        title = QLabel(f"Complete history for IMEI {imei}")
-        title.setObjectName("PageTitle")
-        model = RowsTableModel(
-            ("Date", "Type", "Previous", "New", "Reference", "Performed By", "Notes"), self
-        )
-        model.set_rows(rows)
-        table = QTableView()
-        table.setModel(model)
-        table.horizontalHeader().setStretchLastSection(True)
-        table.setSortingEnabled(False)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(title)
-        layout.addWidget(table)
-        layout.addWidget(buttons)
-
-
 class InventoryScreen(QWidget):
-    HEADERS = (
-        "IMEI",
-        "IMEI2",
-        "Brand",
-        "Model",
-        "Storage",
-        "Color",
-        "Purchase Price",
-        "Selling Price",
-        "Status",
-        "Supplier",
-        "Purchase Date",
-        "Warranty",
-    )
-
     def __init__(
-        self, session_factory: sessionmaker[Session], currency: str, parent: QWidget | None = None
+        self,
+        session_factory: sessionmaker[Session],
+        currency: str,
+        actor: AuthenticatedUser | None = None,
+        parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self._session_factory = session_factory
-        self._currency = currency
+        self._session_factory, self._currency, self._actor = session_factory, currency, actor
         self._worker: FunctionWorker | None = None
-        self._page = 1
-        self._phone_ids: list[uuid.UUID] = []
-        self._imeis: list[str] = []
+        self._ids: list[uuid.UUID] = []
+        self._received: list[int] = []
+        self._available: list[int] = []
         layout = QVBoxLayout(self)
-        title_row = QHBoxLayout()
-        title = QLabel("Inventory")
-        title.setObjectName("PageTitle")
-        self.search = QLineEdit()
-        self.search.setPlaceholderText("Search IMEI, model, or brand")
-        self.status = QComboBox()
-        self.status.addItem("All statuses", None)
-        for status in PhoneStatus:
-            self.status.addItem(status.value.replace("_", " ").title(), status)
-        self.page_size = QComboBox()
-        for size in (20, 50, 100):
-            self.page_size.addItem(str(size), size)
-        refresh = QPushButton("Refresh")
-        refresh.clicked.connect(self.refresh)
-        title_row.addWidget(title)
-        title_row.addStretch()
-        title_row.addWidget(self.search, 1)
-        title_row.addWidget(self.status)
-        title_row.addWidget(self.page_size)
-        title_row.addWidget(refresh)
-        self.model = RowsTableModel(self.HEADERS, self)
-        self.imei_details = QLabel("")
-        self.imei_details.setWordWrap(True)
-        self.imei_details.setStyleSheet(
-            "background: #e8f1fb; color: #17324d; border-radius: 6px; padding: 9px;"
+        layout.setContentsMargins(26, 24, 26, 20)
+        layout.setSpacing(14)
+        layout.addWidget(
+            PageHeader(
+                "Batch inventory",
+                "Monitor sellable stock, expiry risk, purchase cost, and batch movements.",
+            )
         )
-        self.imei_details.hide()
+        filter_bar, header = QFrame(), QHBoxLayout()
+        filter_bar.setObjectName("FilterBar")
+        filter_bar.setLayout(header)
+        header.setContentsMargins(14, 10, 14, 10)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Product, batch, ingredient, supplier")
+        self.search.setProperty("search", True)
+        self.search.setClearButtonEnabled(True)
+        self.search.setMinimumWidth(290)
+        self.filter = QComboBox()
+        self.filter.addItems(
+            ("All", "In Stock", "Low Stock", "Expiring in 90 Days", "Expired", "Out of Stock")
+        )
+        refresh, history, adjust = (
+            QPushButton("Refresh"),
+            QPushButton("Batch History"),
+            QPushButton("Adjust Stock"),
+        )
+        history.setProperty("secondary", True)
+        adjust.setProperty("secondary", True)
+        history.setEnabled(False)
+        adjust.setEnabled(False)
+        self._history_button, self._adjust_button = history, adjust
+        header.addWidget(QLabel("Search"))
+        header.addWidget(self.search)
+        header.addWidget(QLabel("Status"))
+        header.addWidget(self.filter)
+        header.addStretch()
+        header.addWidget(history)
+        header.addWidget(adjust)
+        header.addWidget(refresh)
+        self.model = RowsTableModel(
+            (
+                "Product",
+                "Manufacturer",
+                "Batch",
+                "Available",
+                "Received",
+                "Unit",
+                "Expiry",
+                "Expiry Status",
+                "Supplier",
+                "Purchase",
+                "Sale",
+                "Stock Value",
+            ),
+            self,
+        )
         self.table = QTableView()
         self.table.setModel(self.model)
-        self.table.setAlternatingRowColors(True)
-        self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
-        self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.doubleClicked.connect(self._show_history)
-        pager = QHBoxLayout()
-        self.previous = QPushButton("Previous")
-        self.previous.setProperty("secondary", True)
-        self.next = QPushButton("Next")
-        self.next.setProperty("secondary", True)
-        self.page_label = QLabel("Page 1")
-        self.previous.clicked.connect(self._previous_page)
-        self.next.clicked.connect(self._next_page)
-        pager.addStretch()
-        pager.addWidget(self.previous)
-        pager.addWidget(self.page_label)
-        pager.addWidget(self.next)
-        layout.addLayout(title_row)
-        layout.addWidget(self.imei_details)
+        configure_table(self.table, stretch_column=0)
+        layout.addWidget(filter_bar)
         layout.addWidget(self.table, 1)
-        layout.addLayout(pager)
+        self.record_count = QLabel("Loading inventory…")
+        self.record_count.setObjectName("RecordCount")
+        layout.addWidget(self.record_count)
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
-        self._search_timer.setInterval(250)
-        self._search_timer.timeout.connect(self._reset_and_refresh)
-        self.search.textChanged.connect(lambda _value: self._search_timer.start())
-        self.status.currentIndexChanged.connect(self._reset_and_refresh)
-        self.page_size.currentIndexChanged.connect(self._reset_and_refresh)
-
-    def showEvent(self, event: object) -> None:
-        super().showEvent(event)  # type: ignore[arg-type]
-        if not self._phone_ids:
-            self.refresh()
-
-    def _reset_and_refresh(self) -> None:
-        self._page = 1
+        self._search_timer.setInterval(350)
+        self._search_timer.timeout.connect(self.refresh)
+        refresh.clicked.connect(self.refresh)
+        self.search.textChanged.connect(lambda _text: self._search_timer.start())
+        self.search.returnPressed.connect(lambda: self._search_timer.stop())
+        self.search.returnPressed.connect(self.refresh)
+        self.filter.currentIndexChanged.connect(self.refresh)
+        history.clicked.connect(self._history)
+        adjust.clicked.connect(self._adjust)
+        self.table.doubleClicked.connect(lambda _index: self._history())
+        self.table.selectionModel().selectionChanged.connect(self._selection_changed)
         self.refresh()
 
-    def _previous_page(self) -> None:
-        if self._page > 1:
-            self._page -= 1
-            self.refresh()
-
-    def _next_page(self) -> None:
-        if self.next.isEnabled():
-            self._page += 1
-            self.refresh()
+    @staticmethod
+    def _expiry_status(expiry: date | None) -> str:
+        if expiry is None:
+            return "Not set"
+        days = (expiry - date.today()).days
+        if days < 0:
+            return f"EXPIRED ({abs(days)} days ago)"
+        if days <= 90:
+            return f"Expiring in {days} days"
+        return "Valid"
 
     def refresh(self) -> None:
-        filters = InventoryFilters(search=self.search.text(), status=self.status.currentData())
-        page = self._page
-        page_size = int(self.page_size.currentData())
+        query, selected_filter = self.search.text().strip(), self.filter.currentText()
 
-        def operation() -> tuple[
-            list[tuple[object, ...]],
-            list[uuid.UUID],
-            list[str],
-            int,
-            IMEILookupDetails | None,
-        ]:
+        def operation() -> tuple[list[tuple[object, ...]], list[uuid.UUID], list[int], list[int]]:
             with self._session_factory() as session:
-                result = InventoryRepository(session).search(filters, page, page_size)
-                rows: list[tuple[object, ...]] = [
-                    (
-                        phone.imei_1,
-                        phone.imei_2 or "—",
-                        phone.product.brand,
-                        phone.product.model,
-                        phone.product.storage,
-                        phone.product.color,
-                        f"{self._currency} {phone.purchase_price:,.2f}",
-                        f"{self._currency} {phone.selling_price:,.2f}",
-                        phone.status.value,
-                        phone.supplier.name,
-                        format_date(phone.purchase.purchase_date),
-                        format_date(phone.warranty_end),
+                statement = select(StockBatch).join(StockBatch.product).join(StockBatch.supplier)
+                if query:
+                    pattern = f"%{query}%"
+                    statement = statement.where(
+                        or_(
+                            Product.name.ilike(pattern),
+                            Product.manufacturer.ilike(pattern),
+                            Product.active_ingredient.ilike(pattern),
+                            StockBatch.batch_number.ilike(pattern),
+                            Supplier.name.ilike(pattern),
+                            Supplier.company_name.ilike(pattern),
+                        )
                     )
-                    for phone in result.items
-                ]
-                details = None
-                if len(filters.search.strip()) == 15 and filters.search.strip().isdigit():
-                    details = InventoryRepository(session).lookup_details(filters.search.strip())
+                today = date.today()
+                if selected_filter == "In Stock":
+                    statement = statement.where(StockBatch.quantity_available > 0)
+                elif selected_filter == "Out of Stock":
+                    statement = statement.where(StockBatch.quantity_available == 0)
+                elif selected_filter == "Expired":
+                    statement = statement.where(StockBatch.expiry_date < today)
+                elif selected_filter == "Expiring in 90 Days":
+                    statement = statement.where(
+                        StockBatch.expiry_date >= today,
+                        StockBatch.expiry_date <= today + timedelta(days=90),
+                    )
+                elif selected_filter == "Low Stock":
+                    statement = statement.where(
+                        StockBatch.quantity_available <= Product.minimum_stock
+                    )
+                batches = list(
+                    session.scalars(
+                        statement.order_by(
+                            StockBatch.expiry_date.asc().nullslast(), Product.name
+                        ).limit(1000)
+                    )
+                )
                 return (
-                    rows,
-                    [phone.id for phone in result.items],
-                    [phone.imei_1 for phone in result.items],
-                    result.total_pages,
-                    details,
+                    [
+                        (
+                            b.product.display_name,
+                            b.product.manufacturer,
+                            b.batch_number,
+                            b.quantity_available,
+                            b.quantity_received,
+                            b.product.unit,
+                            format_date(b.expiry_date),
+                            self._expiry_status(b.expiry_date),
+                            b.supplier.company_name or b.supplier.name,
+                            f"{self._currency} {b.purchase_price:,.2f}",
+                            f"{self._currency} {b.selling_price:,.2f}",
+                            f"{self._currency} {b.stock_value:,.2f}",
+                        )
+                        for b in batches
+                    ],
+                    [b.id for b in batches],
+                    [b.quantity_received for b in batches],
+                    [b.quantity_available for b in batches],
+                )
+
+        self._worker = start_worker(
+            operation, succeeded=self._display, failed=lambda error: show_error(self, error)
+        )
+
+    def _display(self, result: object) -> None:
+        rows, self._ids, self._received, self._available = cast(
+            tuple[list[tuple[object, ...]], list[uuid.UUID], list[int], list[int]], result
+        )
+        self.model.set_rows(rows)
+        self.record_count.setText(f"{len(rows):,} {'batch' if len(rows) == 1 else 'batches'} shown")
+        self._selection_changed()
+
+    def _selection_changed(self) -> None:
+        selected = self._selected() is not None
+        self._history_button.setEnabled(selected)
+        self._adjust_button.setEnabled(selected and self._actor is not None)
+
+    def _selected(self) -> int | None:
+        rows = self.table.selectionModel().selectedRows()
+        return rows[0].row() if rows else None
+
+    def _adjust(self) -> None:
+        row = self._selected()
+        if row is None:
+            QMessageBox.information(self, "Select batch", "Select a batch first.")
+            return
+        if self._actor is None:
+            QMessageBox.information(self, "Not available", "Sign in with inventory permission.")
+            return
+        actor = self._actor
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Adjust Available Stock")
+        form = QFormLayout(dialog)
+        quantity = QSpinBox()
+        quantity.setRange(0, self._received[row])
+        quantity.setValue(self._available[row])
+        reason = QLineEdit()
+        reason.setPlaceholderText("Count correction, spillage, expiry, etc.")
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow("Available quantity", quantity)
+        form.addRow("Reason", reason)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        def operation() -> None:
+            with self._session_factory.begin() as session:
+                StockInventoryService(session).adjust(
+                    self._ids[row],
+                    quantity=quantity.value(),
+                    reason=reason.text(),
+                    actor=actor,
                 )
 
         self._worker = start_worker(
             operation,
-            succeeded=self._display,
+            succeeded=lambda _result: self.refresh(),
             failed=lambda error: show_error(self, error),
         )
 
-    def _display(self, result: object) -> None:
-        rows, self._phone_ids, self._imeis, total_pages, details = cast(
-            tuple[
-                list[tuple[object, ...]],
-                list[uuid.UUID],
-                list[str],
-                int,
-                IMEILookupDetails | None,
-            ],
-            result,
-        )
-        self.model.set_rows(rows)
-        self.page_label.setText(f"Page {self._page} of {total_pages}")
-        self.previous.setEnabled(self._page > 1)
-        self.next.setEnabled(self._page < total_pages)
-        self.table.resizeColumnsToContents()
-        if details:
-            sale_context = (
-                f"Customer: {details.customer or 'Walk-in'}  •  Invoice: {details.invoice}  •  "
-                f"Sale Date: {format_date(details.sale_date)}"
-                if details.invoice
-                else "No sale recorded"
-            )
-            self.imei_details.setText(
-                f"{details.product}  •  IMEI: {details.imei}  •  "
-                f"Status: {details.status.value}\n{sale_context}"
-            )
-            self.imei_details.show()
-        else:
-            self.imei_details.hide()
-
-    def _show_history(self, index: object) -> None:
-        row = index.row()  # type: ignore[attr-defined]
-        phone_id = self._phone_ids[row]
-        imei = self._imeis[row]
+    def _history(self) -> None:
+        row = self._selected()
+        if row is None:
+            QMessageBox.information(self, "Select batch", "Select a batch first.")
+            return
+        batch_id = self._ids[row]
 
         def operation() -> list[tuple[object, ...]]:
             with self._session_factory() as session:
-                history = InventoryRepository(session).history(phone_id)
+                movements = session.scalars(
+                    select(StockMovement)
+                    .where(StockMovement.batch_id == batch_id)
+                    .order_by(StockMovement.created_at.desc())
+                )
                 return [
                     (
-                        transaction.created_at.strftime("%d-%b-%Y %H:%M"),
-                        transaction.transaction_type.value,
-                        transaction.previous_status.value if transaction.previous_status else "—",
-                        transaction.new_status.value,
-                        transaction.reference_type,
-                        transaction.performer.full_name,
-                        transaction.notes or "",
+                        format_date(m.created_at),
+                        m.transaction_type.value,
+                        m.quantity_change,
+                        m.balance_after,
+                        m.reference_type,
+                        m.notes or "—",
                     )
-                    for transaction in history
+                    for m in movements
                 ]
 
+        def display(rows: object) -> None:
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Stock Movement History")
+            dialog.resize(850, 420)
+            layout = QVBoxLayout(dialog)
+            model = RowsTableModel(
+                ("Date", "Type", "Change", "Balance", "Reference", "Notes"), dialog
+            )
+            model.set_rows(rows)  # type: ignore[arg-type]
+            table = QTableView()
+            table.setModel(model)
+            configure_table(table, stretch_column=5)
+            layout.addWidget(table)
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(buttons)
+            dialog.exec()
+
         self._worker = start_worker(
-            operation,
-            succeeded=lambda rows: InventoryHistoryDialog(imei, rows, self).exec(),
-            failed=lambda error: show_error(self, error),
+            operation, succeeded=display, failed=lambda error: show_error(self, error)
         )

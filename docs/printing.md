@@ -1,27 +1,13 @@
-# Printing
+# Printing and invoices
 
-ReportLab generates documents independently of printer communication. The application supports:
+Sales produce an A4 delivery challan/invoice and 58 mm or 80 mm thermal receipts. The A4 layout is
+based on the supplied Hanan Spray Center reference and includes recipient/dealer identity, address,
+territory, order number, policy, store, product, batch, quantity, cartons/packs, prices, totals,
+payment details, and signature areas.
 
-- A4 sale invoices and return receipts
-- 58 mm thermal sale/return receipts
-- 80 mm thermal sale/return receipts
-- PDF save, native Qt print dialog, and Qt print preview
-- PDF/Excel/print actions for business reports
+Set the shop name, owner, address, phone, email, registration/tax details, logo, currency, and
+footer under **Shop Settings**. Printer selection remains an operating-system concern; test the
+printer in Windows or CUPS before selecting it in the application.
 
-Select the default printer and receipt width in Settings. The native dialog always enumerates
-operating-system printers; no device is hardcoded.
-
-## Windows
-
-Install the manufacturer's printer driver, print a test page in Windows Settings, choose the
-correct roll width, disable driver scaling where possible, and then verify preview and a real
-receipt. USB thermal printers usually appear as ordinary Windows printers.
-
-## Linux
-
-Install/configure CUPS and the appropriate driver. Verify with `lpstat -p -d`, print a system
-test page, then launch the application from the same desktop account. Ensure that account can
-access USB devices and the CUPS queue.
-
-Receipts intentionally omit passwords, CNIC values, SMTP data, and internal purchase cost.
-Logo, shop name, address, phone, email, tax information, currency, and footer are configurable.
+PDF export does not require a printer. Customer/dealer and owner emails attach the same generated
+invoice through the persistent email outbox.

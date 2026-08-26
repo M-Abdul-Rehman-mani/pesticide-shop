@@ -12,13 +12,11 @@ class Permission(StrEnum):
     VIEW_DASHBOARD = "VIEW_DASHBOARD"
     CREATE_SALE = "CREATE_SALE"
     VOID_SALE = "VOID_SALE"
-    CREATE_RETURN = "CREATE_RETURN"
-    APPROVE_RETURN = "APPROVE_RETURN"
     VIEW_INVENTORY = "VIEW_INVENTORY"
     MANAGE_INVENTORY = "MANAGE_INVENTORY"
     RECORD_PURCHASE = "RECORD_PURCHASE"
-    RECORD_DAMAGE = "RECORD_DAMAGE"
     MANAGE_CUSTOMERS = "MANAGE_CUSTOMERS"
+    MANAGE_DEALERS = "MANAGE_DEALERS"
     MANAGE_SUPPLIERS = "MANAGE_SUPPLIERS"
     VIEW_REPORTS = "VIEW_REPORTS"
     VIEW_PROFIT = "VIEW_PROFIT"
@@ -39,9 +37,9 @@ ROLE_PERMISSIONS: dict[UserRole, frozenset[Permission]] = {
         {
             Permission.VIEW_DASHBOARD,
             Permission.CREATE_SALE,
-            Permission.CREATE_RETURN,
             Permission.VIEW_INVENTORY,
             Permission.MANAGE_CUSTOMERS,
+            Permission.MANAGE_DEALERS,
         }
     ),
     UserRole.INVENTORY_MANAGER: frozenset(
@@ -50,7 +48,6 @@ ROLE_PERMISSIONS: dict[UserRole, frozenset[Permission]] = {
             Permission.VIEW_INVENTORY,
             Permission.MANAGE_INVENTORY,
             Permission.RECORD_PURCHASE,
-            Permission.RECORD_DAMAGE,
             Permission.MANAGE_SUPPLIERS,
             Permission.VIEW_REPORTS,
         }

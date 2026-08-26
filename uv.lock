@@ -891,7 +891,7 @@ wheels = [
 ]
 
 [[package]]
-name = "mobile-shop-manager"
+name = "pesticide-shop-manager"
 version = "1.0.0"
 source = { editable = "." }
 dependencies = [

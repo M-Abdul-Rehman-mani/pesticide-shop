@@ -24,5 +24,5 @@ DKIM, and DMARC configuration. Application logs record delivery failures but red
 credential assignments.
 
 The scheduler queues the daily report at `DAILY_REPORT_TIME` in `APP_TIMEZONE`. The report
-contains sales, returns, damage, net sales, exact profit, payment-method totals, top models,
+contains sales, gross profit, payment-method totals, top products,
 low stock, and outstanding balances.

@@ -1,4 +1,4 @@
-"""Date-filtered business reports with PDF, Excel, and native print export."""
+"""Pesticide sales, inventory, expiry, purchase, payment, and profit reports."""
 
 from __future__ import annotations
 
@@ -26,15 +26,17 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config.settings import Settings
+from app.models.dealer import Dealer
 from app.models.enums import SaleStatus
-from app.models.inventory import PhoneInventory
+from app.models.inventory import StockBatch
 from app.models.payment import Payment
-from app.models.sale import Sale
+from app.models.purchase import Purchase
+from app.models.sale import Sale, SaleItem
 from app.models.user import User
 from app.printing.printer_service import PrinterService
 from app.reports.excel_exporter import ExcelExporter
 from app.reports.pdf_exporter import PDFReportExporter
-from app.reports.report_service import DateRange, ReportService
+from app.reports.report_service import DateRange
 from app.security.authentication import AuthenticatedUser
 from app.security.permissions import Permission, has_permission, require_permission
 from app.ui.widgets import RowsTableModel, show_error
@@ -60,45 +62,58 @@ class ReportsScreen(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self._session_factory = session_factory
-        self._actor = actor
-        self._settings = settings
+        self._session_factory, self._actor, self._settings = session_factory, actor, settings
         self._worker: FunctionWorker | None = None
         self._payload: ReportPayload | None = None
-        layout = QVBoxLayout(self)
-        toolbar = QHBoxLayout()
-        title = QLabel("Reports")
+        layout, toolbar = QVBoxLayout(self), QHBoxLayout()
+        title = QLabel("Reports & Previous Sales")
         title.setObjectName("PageTitle")
         self.report_type = QComboBox()
-        report_names = ["Sales", "Returns", "Damage", "Inventory", "Payments", "Employee Sales"]
+        names = [
+            "Sales History",
+            "Inventory",
+            "Expiry",
+            "Purchases",
+            "Payments",
+            "Dealer Balances",
+            "Employee Sales",
+        ]
         if has_permission(actor.role, Permission.VIEW_PROFIT):
-            report_names.insert(3, "Profit")
-        for name in report_names:
-            self.report_type.addItem(name)
+            names.insert(1, "Profit")
+        self.report_type.addItems(names)
         self.preset = QComboBox()
-        for name in ("Today", "Yesterday", "This Week", "This Month", "Custom"):
-            self.preset.addItem(name)
-        self.from_date = QDateEdit(QDate.currentDate())
+        self.preset.addItems(
+            ("Today", "Yesterday", "This Week", "This Month", "All Time", "Custom")
+        )
+        self.from_date, self.to_date = (
+            QDateEdit(QDate.currentDate()),
+            QDateEdit(QDate.currentDate()),
+        )
         self.from_date.setCalendarPopup(True)
-        self.to_date = QDateEdit(QDate.currentDate())
         self.to_date.setCalendarPopup(True)
-        run = QPushButton("Run Report")
-        self.excel = QPushButton("Export Excel")
-        self.pdf = QPushButton("Export PDF")
-        self.print_button = QPushButton("Print")
+        run, self.excel, self.pdf, self.print_button = (
+            QPushButton("Run Report"),
+            QPushButton("Export Excel"),
+            QPushButton("Export PDF"),
+            QPushButton("Print"),
+        )
         for button in (self.excel, self.pdf, self.print_button):
             button.setProperty("secondary", True)
             button.setEnabled(False)
-        toolbar.addWidget(title)
-        toolbar.addStretch()
-        toolbar.addWidget(self.report_type)
-        toolbar.addWidget(self.preset)
-        toolbar.addWidget(self.from_date)
-        toolbar.addWidget(self.to_date)
-        toolbar.addWidget(run)
-        toolbar.addWidget(self.excel)
-        toolbar.addWidget(self.pdf)
-        toolbar.addWidget(self.print_button)
+        for widget in (
+            title,
+            self.report_type,
+            self.preset,
+            self.from_date,
+            self.to_date,
+            run,
+            self.excel,
+            self.pdf,
+            self.print_button,
+        ):
+            if widget is self.report_type:
+                toolbar.addStretch()
+            toolbar.addWidget(widget)
         self.model = RowsTableModel((), self)
         self.table = QTableView()
         self.table.setModel(self.model)
@@ -122,6 +137,8 @@ class ReportsScreen(QWidget):
             start, end = today - timedelta(days=today.weekday()), today
         elif preset == "This Month":
             start, end = today.replace(day=1), today
+        elif preset == "All Time":
+            start, end = date(2000, 1, 1), today
         else:
             return
         self.from_date.setDate(QDate(start.year, start.month, start.day))
@@ -135,179 +152,204 @@ class ReportsScreen(QWidget):
 
         def operation() -> ReportPayload:
             period = DateRange.local_days(start, end, self._settings.app_timezone)
+            raw: tuple[tuple[object, ...], ...]
             with self._session_factory() as session:
-                if report_type == "Sales":
-                    sales_rows = ReportService(session).sales(period)
-                    sales_raw: tuple[tuple[object, ...], ...] = tuple(
+                if report_type == "Sales History":
+                    rows = session.execute(
+                        select(Sale, SaleItem)
+                        .join(SaleItem)
+                        .where(Sale.sale_date >= period.start, Sale.sale_date < period.end)
+                        .order_by(Sale.sale_date.desc(), Sale.invoice_number)
+                    )
+                    raw = tuple(
                         (
-                            row.invoice,
-                            row.customer,
-                            row.phone,
-                            row.imei,
-                            row.salesperson,
-                            row.amount,
-                            row.payment_status,
-                            row.sold_at,
+                            sale.invoice_number,
+                            sale.dealer.display_name
+                            if sale.dealer
+                            else sale.customer.name
+                            if sale.customer
+                            else "Walk-in",
+                            sale.recipient_type,
+                            item.product.display_name,
+                            item.batch_number,
+                            item.quantity,
+                            item.unit_price or item.price,
+                            item.discount,
+                            item.total,
+                            sale.payment_status.value,
+                            sale.creator.full_name,
+                            sale.sale_date,
                         )
-                        for row in sales_rows
+                        for sale, item in rows
                     )
                     return self._payload_for(
-                        "Sales Report",
+                        "Complete Sales History",
                         (
                             "Invoice",
-                            "Customer",
-                            "Phone",
-                            "IMEI",
-                            "Salesperson",
-                            "Amount",
-                            "Payment",
-                            "Date",
-                        ),
-                        sales_raw,
-                        frozenset({6}),
-                        frozenset({8}),
-                    )
-                if report_type == "Returns":
-                    return_rows = ReportService(session).returns(period)
-                    return_raw: tuple[tuple[object, ...], ...] = tuple(
-                        (
-                            row.return_number,
-                            row.invoice,
-                            row.customer,
-                            row.imei,
-                            row.model,
-                            row.reason,
-                            row.refund,
-                            row.approved_by,
-                            row.returned_at,
-                        )
-                        for row in return_rows
-                    )
-                    return self._payload_for(
-                        "Return Report",
-                        (
-                            "Return",
-                            "Invoice",
-                            "Customer",
-                            "IMEI",
-                            "Model",
-                            "Reason",
-                            "Refund",
-                            "Approved By",
-                            "Date",
-                        ),
-                        return_raw,
-                        frozenset({7}),
-                        frozenset({9}),
-                    )
-                if report_type == "Damage":
-                    damage_rows = ReportService(session).damages(period)
-                    damage_raw: tuple[tuple[object, ...], ...] = tuple(
-                        (
-                            row.damage_number,
-                            row.imei,
-                            row.model,
-                            row.damage_type,
-                            row.estimated_loss,
-                            row.repair_cost,
-                            row.status,
-                            row.reported_by,
-                            row.damaged_at,
-                        )
-                        for row in damage_rows
-                    )
-                    return self._payload_for(
-                        "Damage Report",
-                        (
-                            "Damage",
-                            "IMEI",
-                            "Model",
+                            "Recipient",
                             "Type",
-                            "Estimated Loss",
-                            "Repair Cost",
-                            "Status",
-                            "Reported By",
+                            "Product",
+                            "Batch",
+                            "Qty",
+                            "Unit Price",
+                            "Discount",
+                            "Line Total",
+                            "Payment",
+                            "Salesperson",
                             "Date",
                         ),
-                        damage_raw,
-                        frozenset({5, 6}),
-                        frozenset({9}),
+                        raw,
+                        frozenset({7, 8, 9}),
+                        frozenset({12}),
                     )
                 if report_type == "Profit":
-                    value = ReportService(session).profit(period)
+                    value = session.scalar(
+                        select(
+                            func.coalesce(
+                                func.sum(
+                                    SaleItem.total - SaleItem.purchase_cost - SaleItem.other_cost
+                                ),
+                                Decimal("0.00"),
+                            )
+                        )
+                        .join(Sale)
+                        .where(
+                            Sale.status == SaleStatus.COMPLETED,
+                            Sale.sale_date >= period.start,
+                            Sale.sale_date < period.end,
+                        )
+                    ) or Decimal("0.00")
                     return self._payload_for(
                         "Profit Report",
-                        ("From", "To", "Profit"),
+                        ("From", "To", "Gross Profit"),
                         ((start, end, value),),
                         frozenset({3}),
                         frozenset({1, 2}),
                     )
-                if report_type == "Inventory":
-                    phones = session.scalars(
-                        select(PhoneInventory)
-                        .order_by(PhoneInventory.created_at.desc())
-                        .limit(5000)
+                if report_type in {"Inventory", "Expiry"}:
+                    statement = select(StockBatch).order_by(
+                        StockBatch.expiry_date.asc().nullslast()
                     )
-                    inventory_raw: tuple[tuple[object, ...], ...] = tuple(
-                        (
-                            phone.imei_1,
-                            phone.imei_2 or "",
-                            phone.product.brand,
-                            phone.product.model,
-                            phone.product.storage,
-                            phone.product.color,
-                            phone.purchase_price,
-                            phone.selling_price,
-                            phone.status.value,
-                            phone.supplier.name,
-                            phone.created_at,
+                    if report_type == "Expiry":
+                        statement = statement.where(
+                            StockBatch.expiry_date <= date.today() + timedelta(days=180)
                         )
-                        for phone in phones
+                    batches = session.scalars(statement)
+                    raw = tuple(
+                        (
+                            b.product.display_name,
+                            b.product.manufacturer,
+                            b.batch_number,
+                            b.quantity_available,
+                            b.product.unit,
+                            b.expiry_date,
+                            b.supplier.company_name or b.supplier.name,
+                            b.purchase_price,
+                            b.selling_price,
+                            b.stock_value,
+                        )
+                        for b in batches
                     )
                     return self._payload_for(
-                        "Inventory Report",
+                        f"{report_type} Report",
                         (
-                            "IMEI",
-                            "IMEI2",
-                            "Brand",
-                            "Model",
-                            "Storage",
-                            "Color",
-                            "Purchase Price",
-                            "Selling Price",
-                            "Status",
+                            "Product",
+                            "Manufacturer",
+                            "Batch",
+                            "Available",
+                            "Unit",
+                            "Expiry",
                             "Supplier",
-                            "Added",
+                            "Purchase",
+                            "Sale",
+                            "Value",
                         ),
-                        inventory_raw,
-                        frozenset({7, 8}),
-                        frozenset({11}),
+                        raw,
+                        frozenset({8, 9, 10}),
+                        frozenset({6}),
+                    )
+                if report_type == "Purchases":
+                    purchases = session.scalars(
+                        select(Purchase)
+                        .where(
+                            Purchase.purchase_date >= period.start,
+                            Purchase.purchase_date < period.end,
+                        )
+                        .order_by(Purchase.purchase_date.desc())
+                    )
+                    raw = tuple(
+                        (
+                            p.purchase_number,
+                            p.supplier.company_name or p.supplier.name,
+                            p.total,
+                            p.paid_amount,
+                            p.remaining_amount,
+                            p.payment_status.value,
+                            p.purchase_date,
+                        )
+                        for p in purchases
+                    )
+                    return self._payload_for(
+                        "Purchase Report",
+                        ("Purchase", "Supplier", "Total", "Paid", "Remaining", "Status", "Date"),
+                        raw,
+                        frozenset({3, 4, 5}),
+                        frozenset({7}),
                     )
                 if report_type == "Payments":
-                    payment_rows = session.execute(
+                    payments = session.scalars(
                         select(Payment)
                         .where(Payment.created_at >= period.start, Payment.created_at < period.end)
                         .order_by(Payment.created_at.desc())
-                    ).scalars()
-                    payment_raw: tuple[tuple[object, ...], ...] = tuple(
+                    )
+                    raw = tuple(
                         (
-                            payment.direction.value,
-                            payment.method.value,
-                            payment.amount,
-                            payment.reference or "",
-                            payment.receiver.full_name,
-                            payment.created_at,
+                            p.direction.value,
+                            p.method.value,
+                            p.amount,
+                            p.reference or "",
+                            p.receiver.full_name,
+                            p.created_at,
                         )
-                        for payment in payment_rows
+                        for p in payments
                     )
                     return self._payload_for(
                         "Payment Report",
                         ("Direction", "Method", "Amount", "Reference", "Recorded By", "Date"),
-                        payment_raw,
+                        raw,
                         frozenset({3}),
                         frozenset({6}),
                     )
-                employee_rows = session.execute(
+                if report_type == "Dealer Balances":
+                    dealers = session.scalars(select(Dealer).order_by(Dealer.balance.desc()))
+                    raw = tuple(
+                        (
+                            d.display_name,
+                            d.name,
+                            d.phone,
+                            d.territory or "",
+                            d.balance,
+                            d.credit_limit,
+                            d.email or "",
+                        )
+                        for d in dealers
+                    )
+                    return self._payload_for(
+                        "Dealer Balance Report",
+                        (
+                            "Dealer",
+                            "Contact",
+                            "Phone",
+                            "Territory",
+                            "Balance",
+                            "Credit Limit",
+                            "Email",
+                        ),
+                        raw,
+                        frozenset({5, 6}),
+                        frozenset(),
+                    )
+                rows = session.execute(
                     select(
                         User.full_name,
                         func.count(Sale.id),
@@ -325,7 +367,7 @@ class ReportsScreen(QWidget):
                 return self._payload_for(
                     "Employee Sales Report",
                     ("Employee", "Sales", "Total"),
-                    tuple(tuple(row) for row in employee_rows),
+                    tuple(tuple(row) for row in rows),
                     frozenset({3}),
                     frozenset(),
                 )
@@ -370,25 +412,21 @@ class ReportsScreen(QWidget):
     def _export_excel(self) -> None:
         if not self._payload:
             return
-        path, _filter = QFileDialog.getSaveFileName(
+        path, _ = QFileDialog.getSaveFileName(
             self, "Export Excel", "report.xlsx", "Excel workbooks (*.xlsx)"
         )
         if not path:
             return
         payload = self._payload
-
-        def operation() -> Path:
-            return ExcelExporter().export(
+        self._worker = start_worker(
+            lambda: ExcelExporter().export(
                 Path(path),
                 title=payload.title,
                 headers=payload.headers,
                 rows=payload.rows,
                 currency_columns=payload.currency_columns,
                 date_columns=payload.date_columns,
-            )
-
-        self._worker = start_worker(
-            operation,
+            ),
             succeeded=lambda saved: QMessageBox.information(self, "Export complete", str(saved)),
             failed=lambda error: show_error(self, error),
         )
@@ -404,16 +442,17 @@ class ReportsScreen(QWidget):
     def _export_pdf(self) -> None:
         if not self._payload:
             return
-        path, _filter = QFileDialog.getSaveFileName(
+        path, _ = QFileDialog.getSaveFileName(
             self, "Export PDF", "report.pdf", "PDF documents (*.pdf)"
         )
-        if not path:
-            return
-        self._worker = start_worker(
-            lambda: PrinterService().save_pdf(Path(path), self._pdf_bytes()),
-            succeeded=lambda saved: QMessageBox.information(self, "Export complete", str(saved)),
-            failed=lambda error: show_error(self, error),
-        )
+        if path:
+            self._worker = start_worker(
+                lambda: PrinterService().save_pdf(Path(path), self._pdf_bytes()),
+                succeeded=lambda saved: QMessageBox.information(
+                    self, "Export complete", str(saved)
+                ),
+                failed=lambda error: show_error(self, error),
+            )
 
     def _print(self) -> None:
         if not self._payload:

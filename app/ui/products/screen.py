@@ -1,4 +1,4 @@
-"""Product variants, stock thresholds, and audited default pricing."""
+"""Pesticide catalog, pack information, stock thresholds, and audited pricing."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from decimal import Decimal
 from typing import cast
 
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -18,14 +19,14 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QTableView,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from app.models.enums import PhoneStatus
-from app.models.inventory import PhoneInventory
+from app.models.inventory import StockBatch
 from app.models.product import Product
 from app.security.authentication import AuthenticatedUser
 from app.services.catalog_service import ProductService
@@ -36,12 +37,15 @@ from app.ui.workers import FunctionWorker, start_worker
 
 @dataclass(frozen=True, slots=True)
 class ProductFormData:
-    brand: str
-    model: str
-    variant: str
-    storage: str
-    ram: str
-    color: str
+    name: str
+    manufacturer: str
+    active_ingredient: str
+    formulation: str
+    pack_size: str
+    category: str
+    registration_number: str
+    unit: str
+    description: str | None
     purchase_price: Decimal
     sale_price: Decimal
     minimum_stock: int
@@ -50,29 +54,48 @@ class ProductFormData:
 class ProductDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Add Product")
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
-        self.brand = QLineEdit()
-        self.model = QLineEdit()
-        self.variant = QLineEdit()
-        self.storage = QLineEdit()
-        self.ram = QLineEdit()
-        self.color = QLineEdit()
-        self.purchase = MoneyEdit()
-        self.sale = MoneyEdit()
+        self.setWindowTitle("Add Pesticide Product")
+        layout, form = QVBoxLayout(self), QFormLayout()
+        self.name, self.manufacturer = QLineEdit(), QLineEdit()
+        self.active_ingredient, self.formulation, self.pack_size = (
+            QLineEdit(),
+            QLineEdit(),
+            QLineEdit(),
+        )
+        self.category = QComboBox()
+        self.category.setEditable(True)
+        self.category.addItems(
+            (
+                "HERBICIDE",
+                "INSECTICIDE",
+                "FUNGICIDE",
+                "FERTILIZER",
+                "SEED TREATMENT",
+                "GROWTH REGULATOR",
+                "OTHER",
+            )
+        )
+        self.registration, self.unit = QLineEdit(), QComboBox()
+        self.unit.setEditable(True)
+        self.unit.addItems(("PACK", "BOTTLE", "BAG", "SACHET", "LITRE", "KG"))
+        self.description = QTextEdit()
+        self.description.setMaximumHeight(60)
+        self.purchase, self.sale = MoneyEdit(), MoneyEdit()
         self.minimum = QSpinBox()
-        self.minimum.setRange(0, 100000)
+        self.minimum.setRange(0, 1_000_000)
         for label, widget in (
-            ("Brand", self.brand),
-            ("Model", self.model),
-            ("Variant", self.variant),
-            ("Storage", self.storage),
-            ("RAM", self.ram),
-            ("Color", self.color),
+            ("Product name", self.name),
+            ("Manufacturer", self.manufacturer),
+            ("Active ingredient", self.active_ingredient),
+            ("Formulation", self.formulation),
+            ("Pack size", self.pack_size),
+            ("Category", self.category),
+            ("Registration number", self.registration),
+            ("Stock unit", self.unit),
+            ("Description / usage", self.description),
             ("Default purchase price", self.purchase),
             ("Default sale price", self.sale),
-            ("Minimum stock", self.minimum),
+            ("Low-stock threshold", self.minimum),
         ):
             form.addRow(label, widget)
         buttons = QDialogButtonBox(
@@ -85,12 +108,15 @@ class ProductDialog(QDialog):
 
     def values(self) -> ProductFormData:
         return ProductFormData(
-            self.brand.text(),
-            self.model.text(),
-            self.variant.text(),
-            self.storage.text(),
-            self.ram.text(),
-            self.color.text(),
+            self.name.text(),
+            self.manufacturer.text(),
+            self.active_ingredient.text(),
+            self.formulation.text(),
+            self.pack_size.text(),
+            self.category.currentText(),
+            self.registration.text(),
+            self.unit.currentText(),
+            self.description.toPlainText().strip() or None,
             self.purchase.decimal_value("Purchase price"),
             self.sale.decimal_value("Sale price"),
             self.minimum.value(),
@@ -125,18 +151,14 @@ class ProductsScreen(QWidget):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self._session_factory = session_factory
-        self._actor = actor
-        self._currency = currency
+        self._session_factory, self._actor, self._currency = session_factory, actor, currency
         self._worker: FunctionWorker | None = None
         self._ids: list[uuid.UUID] = []
         self._prices: list[tuple[Decimal, Decimal]] = []
-        layout = QVBoxLayout(self)
-        header = QHBoxLayout()
-        title = QLabel("Products")
+        layout, header = QVBoxLayout(self), QHBoxLayout()
+        title = QLabel("Pesticide Products")
         title.setObjectName("PageTitle")
-        add = QPushButton("Add Product")
-        price = QPushButton("Change Prices")
+        add, price = QPushButton("Add Product"), QPushButton("Change Prices")
         price.setProperty("secondary", True)
         header.addWidget(title)
         header.addStretch()
@@ -144,15 +166,15 @@ class ProductsScreen(QWidget):
         header.addWidget(add)
         self.model = RowsTableModel(
             (
-                "Brand",
-                "Model",
-                "Variant",
-                "Storage",
-                "RAM",
-                "Color",
-                "Purchase Price",
-                "Sale Price",
-                "In Stock",
+                "Product",
+                "Manufacturer",
+                "Active Ingredient",
+                "Formulation",
+                "Pack",
+                "Category",
+                "Purchase",
+                "Sale",
+                "Available",
                 "Minimum",
             ),
             self,
@@ -174,40 +196,38 @@ class ProductsScreen(QWidget):
             with self._session_factory() as session:
                 stock = (
                     select(
-                        PhoneInventory.product_id,
-                        func.count(PhoneInventory.id).label("stock"),
+                        StockBatch.product_id,
+                        func.sum(StockBatch.quantity_available).label("stock"),
                     )
-                    .where(PhoneInventory.status == PhoneStatus.IN_STOCK)
-                    .group_by(PhoneInventory.product_id)
+                    .where(StockBatch.is_active.is_(True))
+                    .group_by(StockBatch.product_id)
                     .subquery()
                 )
-                rows = session.execute(
-                    select(Product, func.coalesce(stock.c.stock, 0))
-                    .outerjoin(stock, stock.c.product_id == Product.id)
-                    .order_by(Product.brand, Product.model)
+                products = list(
+                    session.execute(
+                        select(Product, func.coalesce(stock.c.stock, 0))
+                        .outerjoin(stock, stock.c.product_id == Product.id)
+                        .order_by(Product.manufacturer, Product.name)
+                    )
                 )
-                products = list(rows)
                 return (
                     [
                         (
-                            product.brand,
-                            product.model,
-                            product.variant,
-                            product.storage,
-                            product.ram,
-                            product.color,
-                            f"{self._currency} {product.default_purchase_price:,.2f}",
-                            f"{self._currency} {product.default_sale_price:,.2f}",
+                            p.product_name,
+                            p.manufacturer,
+                            p.active_ingredient or "—",
+                            p.formulation or "—",
+                            p.pack_size or "—",
+                            p.category,
+                            f"{self._currency} {p.default_purchase_price:,.2f}",
+                            f"{self._currency} {p.default_sale_price:,.2f}",
                             count,
-                            product.minimum_stock,
+                            p.minimum_stock,
                         )
-                        for product, count in products
+                        for p, count in products
                     ],
-                    [product.id for product, _count in products],
-                    [
-                        (product.default_purchase_price, product.default_sale_price)
-                        for product, _count in products
-                    ],
+                    [p.id for p, _ in products],
+                    [(p.default_purchase_price, p.default_sale_price) for p, _ in products],
                 )
 
         self._worker = start_worker(
@@ -216,12 +236,7 @@ class ProductsScreen(QWidget):
 
     def _display(self, result: object) -> None:
         rows, self._ids, self._prices = cast(
-            tuple[
-                list[tuple[object, ...]],
-                list[uuid.UUID],
-                list[tuple[Decimal, Decimal]],
-            ],
-            result,
+            tuple[list[tuple[object, ...]], list[uuid.UUID], list[tuple[Decimal, Decimal]]], result
         )
         self.model.set_rows(rows)
 
@@ -235,12 +250,15 @@ class ProductsScreen(QWidget):
             with self._session_factory.begin() as session:
                 ProductService(session).create(
                     actor=self._actor,
-                    brand=data.brand,
-                    model=data.model,
-                    variant=data.variant,
-                    storage=data.storage,
-                    ram=data.ram,
-                    color=data.color,
+                    manufacturer=data.manufacturer,
+                    name=data.name,
+                    active_ingredient=data.active_ingredient,
+                    formulation=data.formulation,
+                    pack_size=data.pack_size,
+                    category=data.category,
+                    registration_number=data.registration_number,
+                    unit=data.unit,
+                    description=data.description,
                     default_purchase_price=data.purchase_price,
                     default_sale_price=data.sale_price,
                     minimum_stock=data.minimum_stock,

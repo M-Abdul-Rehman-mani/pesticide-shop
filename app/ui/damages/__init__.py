@@ -1,1 +1,0 @@
-"""Damage workflow screen."""

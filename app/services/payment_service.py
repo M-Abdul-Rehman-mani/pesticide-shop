@@ -8,6 +8,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.dealer import Dealer
 from app.models.enums import PaymentDirection, PaymentMethod, PurchaseStatus, SaleStatus
 from app.models.payment import Payment
 from app.models.purchase import Purchase
@@ -60,6 +61,11 @@ class PaymentService:
         sale.paid_amount += amount
         sale.remaining_amount -= amount
         sale.payment_status = payment_status(sale.total, sale.paid_amount)
+        if sale.dealer_id:
+            dealer = self._session.execute(
+                select(Dealer).where(Dealer.id == sale.dealer_id).with_for_update(of=Dealer)
+            ).scalar_one()
+            dealer.balance -= amount
         self._audit.record(
             actor_id=actor.id,
             action="SALE_PAYMENT_RECORDED",

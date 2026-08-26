@@ -90,11 +90,9 @@ class SettingsScreen(QWidget):
         self.currency = QLineEdit(self._settings.app_currency)
         self.timezone = QLineEdit(self._settings.app_timezone)
         self.invoice_prefix = QLineEdit("INV")
-        self.return_prefix = QLineEdit("RET")
         form.addRow("Currency", self.currency)
         form.addRow("Timezone", self.timezone)
         form.addRow("Invoice prefix", self.invoice_prefix)
-        form.addRow("Return prefix", self.return_prefix)
         self.tabs.addTab(tab, "General")
 
     def _build_email(self) -> None:
@@ -211,7 +209,6 @@ class SettingsScreen(QWidget):
             (SettingCategory.GENERAL, "currency"),
             (SettingCategory.GENERAL, "timezone"),
             (SettingCategory.GENERAL, "invoice_prefix"),
-            (SettingCategory.GENERAL, "return_prefix"),
             (SettingCategory.EMAIL, "smtp_host"),
             (SettingCategory.EMAIL, "smtp_port"),
             (SettingCategory.EMAIL, "smtp_username"),
@@ -244,7 +241,6 @@ class SettingsScreen(QWidget):
             ((SettingCategory.GENERAL, "currency"), self.currency),
             ((SettingCategory.GENERAL, "timezone"), self.timezone),
             ((SettingCategory.GENERAL, "invoice_prefix"), self.invoice_prefix),
-            ((SettingCategory.GENERAL, "return_prefix"), self.return_prefix),
             ((SettingCategory.EMAIL, "smtp_host"), self.smtp_host),
             ((SettingCategory.EMAIL, "smtp_username"), self.smtp_username),
             ((SettingCategory.EMAIL, "smtp_from_email"), self.smtp_from),
@@ -278,7 +274,6 @@ class SettingsScreen(QWidget):
             (SettingCategory.GENERAL, "currency", self.currency.text(), False),
             (SettingCategory.GENERAL, "timezone", self.timezone.text(), False),
             (SettingCategory.GENERAL, "invoice_prefix", self.invoice_prefix.text(), False),
-            (SettingCategory.GENERAL, "return_prefix", self.return_prefix.text(), False),
             (SettingCategory.EMAIL, "smtp_host", self.smtp_host.text(), False),
             (SettingCategory.EMAIL, "smtp_port", str(self.smtp_port.value()), False),
             (SettingCategory.EMAIL, "smtp_username", self.smtp_username.text(), False),
@@ -362,7 +357,7 @@ class SettingsScreen(QWidget):
             SMTPEmailService(config).send(
                 OutgoingEmail(
                     recipient=recipient,
-                    subject="Mobile Shop Manager - Test Email",
+                    subject="Pesticide Shop Manager - Test Email",
                     text_body="SMTP configuration is working.",
                 )
             )

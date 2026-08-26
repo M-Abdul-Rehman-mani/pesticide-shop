@@ -11,7 +11,7 @@ settings = get_settings()
 report_hour, report_minute = (int(value) for value in settings.daily_report_time.split(":"))
 
 celery_app = Celery(
-    "mobile_shop",
+    "pesticide_shop",
     broker=settings.redis_url,
     backend=settings.redis_url,
     include=(

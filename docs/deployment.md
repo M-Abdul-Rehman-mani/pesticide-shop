@@ -6,10 +6,10 @@ Build on the operating system you will distribute to:
 
 ```bash
 python -m pip install -e '.[build]'
-pyinstaller mobile_shop.spec --clean --noconfirm
+pyinstaller pesticide_shop.spec --clean --noconfirm
 ```
 
-The result is `dist/MobileShopManager` on Linux or `dist/MobileShopManager.exe` on Windows.
+The result is `dist/PesticideShopManager` on Linux or `dist/PesticideShopManager.exe` on Windows.
 PyInstaller bundles Python, PySide6, migrations, and application libraries. It does not bundle
 PostgreSQL, Redis, printer drivers, or PostgreSQL client utilities.
 
@@ -19,7 +19,7 @@ start Celery worker/beat as supervised services. Do not package `.env` into the 
 
 ## Linux production
 
-- Use a dedicated OS account and directory such as `/opt/mobile-shop`.
+- Use a dedicated OS account and directory such as `/opt/pesticide-shop`.
 - Protect `.env` with mode `0600`; give the account write access only to `logs`, `backups`, and
   the operator-selected export directory.
 - Run PostgreSQL/Redis with persistent volumes and host firewall rules.

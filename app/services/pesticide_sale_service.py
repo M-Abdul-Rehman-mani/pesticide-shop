@@ -1,0 +1,277 @@
+"""Quantity-based pesticide sales, inventory ledger, and email notifications."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from decimal import Decimal
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.models.customer import Customer
+from app.models.dealer import Dealer
+from app.models.enums import InventoryTransactionType, PaymentDirection, SaleStatus
+from app.models.inventory import StockBatch, StockMovement
+from app.models.payment import Payment
+from app.models.sale import Sale, SaleItem
+from app.security.authentication import AuthenticatedUser
+from app.security.permissions import Permission, require_permission
+from app.services.audit_service import AuditService
+from app.services.document_service import DocumentNumberService
+from app.services.dto import CreatePesticideSaleCommand
+from app.services.money_service import document_totals, payment_status
+from app.services.notification_service import NotificationService, QueuedMessage
+from app.utils.exceptions import ConflictError, NotFoundError, ValidationError
+from app.utils.validators import nonnegative_money
+
+
+class PesticideSaleService:
+    """Commit a customer/dealer sale and decrement exact batches atomically."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+        self._audit = AuditService(session)
+        self._numbers = DocumentNumberService(session)
+        self._notifications = NotificationService(session)
+
+    def create(
+        self,
+        command: CreatePesticideSaleCommand,
+        actor: AuthenticatedUser,
+        *,
+        invoice_prefix: str = "INV",
+        shop_name: str = "Pesticide Shop",
+        owner_email: str | None = None,
+    ) -> Sale:
+        require_permission(actor.role, Permission.CREATE_SALE)
+        if not command.lines:
+            raise ValidationError("A sale must contain at least one product.")
+        if command.customer_id and command.dealer_id:
+            raise ValidationError("Select either a customer or a dealer, not both.")
+        batch_ids = [line.stock_batch_id for line in command.lines]
+        if len(set(batch_ids)) != len(batch_ids):
+            raise ConflictError("Add each batch only once; edit its quantity in the cart.")
+        if any(line.quantity <= 0 for line in command.lines):
+            raise ValidationError("Sale quantity must be greater than zero.")
+
+        sold_at = command.sale_date or datetime.now(UTC)
+        customer = self._session.get(Customer, command.customer_id) if command.customer_id else None
+        dealer = (
+            self._session.execute(
+                select(Dealer).where(Dealer.id == command.dealer_id).with_for_update(of=Dealer)
+            ).scalar_one_or_none()
+            if command.dealer_id
+            else None
+        )
+        if command.customer_id and customer is None:
+            raise NotFoundError("The selected customer was not found.")
+        if command.dealer_id and (dealer is None or not dealer.is_active):
+            raise NotFoundError("The selected active dealer was not found.")
+
+        batches = list(
+            self._session.scalars(
+                select(StockBatch)
+                .where(StockBatch.id.in_(batch_ids))
+                .order_by(StockBatch.id)
+                .with_for_update(of=StockBatch)
+            ).all()
+        )
+        by_id = {batch.id: batch for batch in batches}
+        if len(by_id) != len(batch_ids):
+            raise NotFoundError("One or more selected stock batches were not found.")
+        ordered_batches = [by_id[batch_id] for batch_id in batch_ids]
+        for line, batch in zip(command.lines, ordered_batches, strict=True):
+            if batch.expiry_date and batch.expiry_date < sold_at.date():
+                raise ConflictError(f"Batch {batch.batch_number} expired on {batch.expiry_date}.")
+            if not batch.is_active or batch.quantity_available < line.quantity:
+                raise ConflictError(
+                    f"Batch {batch.batch_number} has only "
+                    f"{batch.quantity_available} unit(s) available."
+                )
+
+        unit_prices: list[Decimal] = []
+        discounts: list[Decimal] = []
+        other_costs: list[Decimal] = []
+        gross_lines: list[Decimal] = []
+        for line, batch in zip(command.lines, ordered_batches, strict=True):
+            unit_price = nonnegative_money(
+                line.unit_price if line.unit_price is not None else batch.selling_price,
+                field="Unit price",
+            )
+            gross = unit_price * line.quantity
+            discount = nonnegative_money(line.discount, field="Line discount")
+            if discount > gross:
+                raise ValidationError("A line discount cannot exceed its line amount.")
+            unit_prices.append(unit_price)
+            gross_lines.append(gross)
+            discounts.append(discount)
+            other_costs.append(nonnegative_money(line.other_cost, field="Other cost"))
+        subtotal = sum(gross_lines, Decimal("0.00"))
+        total_discount = sum(discounts, Decimal("0.00")) + nonnegative_money(
+            command.order_discount, field="Order discount"
+        )
+        subtotal, total_discount, tax, total = document_totals(
+            subtotal, total_discount, command.tax
+        )
+        if total <= 0:
+            raise ValidationError("A completed sale total must be greater than zero.")
+        payments = [
+            nonnegative_money(payment.amount, field="Payment") for payment in command.payments
+        ]
+        paid = sum(payments, Decimal("0.00"))
+        status = payment_status(total, paid)
+        remaining = total - paid
+        if dealer and dealer.credit_limit > 0 and dealer.balance + remaining > dealer.credit_limit:
+            raise ConflictError("This sale would exceed the dealer's credit limit.")
+
+        recipient_type = "DEALER" if dealer else "CUSTOMER"
+        sale = Sale(
+            invoice_number=self._numbers.next_number("invoice", invoice_prefix, sold_at),
+            customer_id=customer.id if customer else None,
+            dealer_id=dealer.id if dealer else None,
+            recipient_type=recipient_type,
+            order_number=command.order_number.strip() if command.order_number else None,
+            territory=(command.territory or (dealer.territory if dealer else None)),
+            delivery_address=(
+                command.delivery_address
+                or (dealer.address if dealer else customer.address if customer else None)
+            ),
+            policy=command.policy.strip() if command.policy else None,
+            store=command.store.strip() if command.store else None,
+            sale_date=sold_at,
+            subtotal=subtotal,
+            discount=total_discount,
+            tax=tax,
+            total=total,
+            paid_amount=paid,
+            remaining_amount=remaining,
+            payment_status=status,
+            created_by=actor.id,
+            status=SaleStatus.COMPLETED,
+            notes=command.notes.strip() if command.notes else None,
+        )
+        self._session.add(sale)
+        self._session.flush()
+
+        for line, batch, unit_price, gross, discount, other_cost in zip(
+            command.lines,
+            ordered_batches,
+            unit_prices,
+            gross_lines,
+            discounts,
+            other_costs,
+            strict=True,
+        ):
+            batch.quantity_available -= line.quantity
+            self._session.add(
+                SaleItem(
+                    sale_id=sale.id,
+                    stock_batch_id=batch.id,
+                    product_id=batch.product_id,
+                    batch_number=batch.batch_number,
+                    quantity=line.quantity,
+                    unit_price=unit_price,
+                    price=gross,
+                    discount=discount,
+                    total=gross - discount,
+                    purchase_cost=batch.purchase_price * line.quantity,
+                    other_cost=other_cost,
+                )
+            )
+            self._session.add(
+                StockMovement(
+                    batch_id=batch.id,
+                    transaction_type=InventoryTransactionType.SALE,
+                    quantity_change=-line.quantity,
+                    balance_after=batch.quantity_available,
+                    reference_id=sale.id,
+                    reference_type="Sale",
+                    performed_by=actor.id,
+                    created_at=datetime.now(UTC),
+                    notes=sale.invoice_number,
+                )
+            )
+        for payment_input, amount in zip(command.payments, payments, strict=True):
+            if amount:
+                self._session.add(
+                    Payment(
+                        sale_id=sale.id,
+                        method=payment_input.method,
+                        direction=PaymentDirection.INCOMING,
+                        amount=amount,
+                        reference=payment_input.reference,
+                        received_by=actor.id,
+                    )
+                )
+        if dealer:
+            dealer.balance += remaining
+        self._audit.record(
+            actor_id=actor.id,
+            action="PESTICIDE_SALE_CREATED",
+            entity_type="Sale",
+            entity_id=sale.id,
+            new_value={
+                "invoice_number": sale.invoice_number,
+                "recipient_type": recipient_type,
+                "total": str(total),
+                "quantity": sum(line.quantity for line in command.lines),
+            },
+        )
+
+        recipient = dealer or customer
+        if recipient and recipient.email:
+            self._queue_email(
+                recipient.email,
+                recipient.display_name if isinstance(recipient, Dealer) else recipient.name,
+                sale,
+                shop_name,
+                status.value,
+                "sale_dealer" if dealer else "sale_customer",
+            )
+        if owner_email and (
+            recipient is None or owner_email.lower() != (recipient.email or "").lower()
+        ):
+            recipient_name = (
+                dealer.display_name if dealer else customer.name if customer else "Walk-in Customer"
+            )
+            self._notifications.queue(
+                message=QueuedMessage(
+                    recipient=owner_email,
+                    subject=f"New pesticide sale - {sale.invoice_number}",
+                    body_text=(
+                        f"Recipient: {recipient_name}\nSalesperson: {actor.full_name}\n"
+                        f"Total: {total}\nPayment: {status.value}\n"
+                        "The delivery challan / invoice is attached."
+                    ),
+                ),
+                template="sale_owner",
+                entity_type="Sale",
+                entity_id=sale.id,
+            )
+        self._session.flush()
+        return sale
+
+    def _queue_email(
+        self,
+        email: str,
+        name: str,
+        sale: Sale,
+        shop_name: str,
+        payment_status_text: str,
+        template: str,
+    ) -> None:
+        self._notifications.queue(
+            message=QueuedMessage(
+                recipient=email,
+                subject=f"Delivery Challan / Invoice - {sale.invoice_number}",
+                body_text=(
+                    f"Dear {name},\n\nThank you for your purchase from {shop_name}.\n\n"
+                    f"Invoice: {sale.invoice_number}\nTotal: {sale.total}\n"
+                    f"Payment status: {payment_status_text}\n\n"
+                    "Your delivery challan / invoice is attached as a PDF."
+                ),
+            ),
+            template=template,
+            entity_type="Sale",
+            entity_id=sale.id,
+        )

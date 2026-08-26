@@ -15,9 +15,8 @@ from app.email.email_service import EmailAttachment, EmailService, OutgoingEmail
 from app.models.email_history import EmailHistory
 from app.models.enums import EmailStatus, PaymentDirection
 from app.models.payment import Payment
-from app.models.return_record import SaleReturn
 from app.models.sale import Sale
-from app.printing.receipt_generator import ReceiptGenerator, ReturnReceiptData, SaleReceiptData
+from app.printing.receipt_generator import ReceiptGenerator, SaleReceiptData
 from app.printing.shop_profile import load_shop_profile
 from app.utils.exceptions import ConflictError, NotFoundError
 
@@ -106,20 +105,6 @@ class OutboxDeliveryService:
     def _build_attachment(self, email: ClaimedEmail) -> EmailAttachment | None:
         if email.attachment_name and email.attachment_data:
             return EmailAttachment(email.attachment_name, email.attachment_data)
-        if email.entity_type == "SaleReturn":
-            with self._session_factory() as session:
-                document = session.execute(
-                    select(SaleReturn)
-                    .options(selectinload(SaleReturn.items))
-                    .where(SaleReturn.id == email.entity_id)
-                ).scalar_one_or_none()
-                if document is None:
-                    raise NotFoundError("The return for this email no longer exists.")
-                payload = ReceiptGenerator().generate_return_a4(
-                    ReturnReceiptData.from_return(document),
-                    load_shop_profile(session, self._settings),
-                )
-                return EmailAttachment(f"{document.return_number}.pdf", payload)
         if email.entity_type != "Sale":
             return None
         with self._session_factory() as session:

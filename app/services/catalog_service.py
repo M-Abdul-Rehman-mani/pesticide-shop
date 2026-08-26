@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.customer import Customer
+from app.models.dealer import Dealer
 from app.models.product import Product
 from app.models.supplier import Supplier
 from app.security.authentication import AuthenticatedUser
@@ -94,6 +95,107 @@ class CustomerService:
             new_value={"name": customer.name, "phone": customer.phone, "email": customer.email},
         )
         return customer
+
+
+class DealerService:
+    """Create and maintain trade dealer accounts."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+        self._audit = AuditService(session)
+
+    def create(
+        self,
+        *,
+        actor: AuthenticatedUser,
+        name: str,
+        phone: str,
+        business_name: str | None = None,
+        email: str | None = None,
+        address: str | None = None,
+        cnic: str | None = None,
+        tax_number: str | None = None,
+        territory: str | None = None,
+        credit_limit: Decimal = Decimal("0.00"),
+        notes: str | None = None,
+    ) -> Dealer:
+        require_permission(actor.role, Permission.MANAGE_DEALERS)
+        if not name.strip():
+            raise ValidationError("Dealer name is required.")
+        dealer = Dealer(
+            name=name.strip(),
+            business_name=business_name.strip() if business_name else None,
+            phone=normalize_phone(phone),
+            email=normalize_email(email),
+            address=address.strip() if address else None,
+            cnic=cnic.strip() if cnic else None,
+            tax_number=tax_number.strip() if tax_number else None,
+            territory=territory.strip() if territory else None,
+            credit_limit=nonnegative_money(credit_limit, field="Credit limit"),
+            balance=Decimal("0.00"),
+            notes=notes.strip() if notes else None,
+            is_active=True,
+        )
+        self._session.add(dealer)
+        try:
+            self._session.flush()
+        except IntegrityError as exc:
+            raise ConflictError("A dealer with that CNIC or tax number already exists.") from exc
+        self._audit.record(
+            actor_id=actor.id,
+            action="DEALER_CREATED",
+            entity_type="Dealer",
+            entity_id=dealer.id,
+            new_value={"name": dealer.name, "business_name": dealer.business_name},
+        )
+        return dealer
+
+    def update(
+        self,
+        dealer_id: uuid.UUID,
+        *,
+        actor: AuthenticatedUser,
+        name: str,
+        phone: str,
+        business_name: str | None = None,
+        email: str | None = None,
+        address: str | None = None,
+        cnic: str | None = None,
+        tax_number: str | None = None,
+        territory: str | None = None,
+        credit_limit: Decimal = Decimal("0.00"),
+        notes: str | None = None,
+    ) -> Dealer:
+        require_permission(actor.role, Permission.MANAGE_DEALERS)
+        dealer = self._session.get(Dealer, dealer_id)
+        if dealer is None:
+            raise NotFoundError("Dealer was not found.")
+        if not name.strip():
+            raise ValidationError("Dealer name is required.")
+        old = {"name": dealer.name, "phone": dealer.phone, "email": dealer.email}
+        dealer.name = name.strip()
+        dealer.business_name = business_name.strip() if business_name else None
+        dealer.phone = normalize_phone(phone)
+        dealer.email = normalize_email(email)
+        dealer.address = address.strip() if address else None
+        dealer.cnic = cnic.strip() if cnic else None
+        dealer.tax_number = tax_number.strip() if tax_number else None
+        dealer.territory = territory.strip() if territory else None
+        dealer.credit_limit = nonnegative_money(credit_limit, field="Credit limit")
+        dealer.notes = notes.strip() if notes else None
+        try:
+            self._session.flush()
+        except IntegrityError as exc:
+            raise ConflictError("A dealer with that CNIC or tax number already exists.") from exc
+        self._audit.record(
+            actor_id=actor.id,
+            action="DEALER_UPDATED",
+            entity_type="Dealer",
+            entity_id=dealer.id,
+            old_value=old,
+            new_value={"name": dealer.name, "phone": dealer.phone, "email": dealer.email},
+        )
+        return dealer
 
 
 class SupplierService:
@@ -207,31 +309,33 @@ class ProductService:
         self,
         *,
         actor: AuthenticatedUser,
-        brand: str,
-        model: str,
-        variant: str = "",
-        storage: str = "",
-        ram: str = "",
-        color: str = "",
-        category: str = "PHONE",
+        manufacturer: str,
+        name: str,
+        category: str = "PESTICIDE",
+        active_ingredient: str = "",
+        formulation: str = "",
+        pack_size: str = "",
+        registration_number: str = "",
+        unit: str = "PACK",
         description: str | None = None,
         default_purchase_price: Decimal = Decimal("0.00"),
         default_sale_price: Decimal = Decimal("0.00"),
         minimum_stock: int = 0,
     ) -> Product:
         require_permission(actor.role, Permission.MANAGE_INVENTORY)
-        if not brand.strip() or not model.strip():
-            raise ValidationError("Brand and model are required.")
+        if not manufacturer.strip() or not name.strip():
+            raise ValidationError("Manufacturer and product name are required.")
         if minimum_stock < 0:
             raise ValidationError("Minimum stock cannot be negative.")
         product = Product(
-            brand=brand.strip(),
-            model=model.strip(),
-            variant=variant.strip(),
-            storage=storage.strip(),
-            ram=ram.strip(),
-            color=color.strip(),
-            category=category.strip().upper() or "PHONE",
+            manufacturer=manufacturer.strip(),
+            name=name.strip(),
+            active_ingredient=active_ingredient.strip(),
+            formulation=formulation.strip(),
+            pack_size=pack_size.strip(),
+            registration_number=registration_number.strip(),
+            unit=unit.strip().upper() or "PACK",
+            category=category.strip().upper() or "PESTICIDE",
             description=description.strip() if description else None,
             default_purchase_price=nonnegative_money(
                 default_purchase_price, field="Default purchase price"

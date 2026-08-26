@@ -24,7 +24,6 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-from app.models.return_record import SaleReturn
 from app.models.sale import Sale
 
 
@@ -45,11 +44,13 @@ class ShopProfile:
 @dataclass(frozen=True, slots=True)
 class ReceiptLine:
     product: str
-    imei: str
+    batch_number: str
     quantity: int
     price: Decimal
     discount: Decimal
     total: Decimal
+    cartons: int = 0
+    loose_packs: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,22 +68,46 @@ class SaleReceiptData:
     remaining: Decimal
     payment_methods: str
     salesperson: str
+    recipient_type: str = "Customer"
+    customer_address: str = ""
+    customer_identity: str = ""
+    order_number: str = ""
+    territory: str = ""
+    policy: str = ""
+    store: str = ""
 
     @classmethod
     def from_sale(cls, sale: Sale, payment_methods: str = "See payment record") -> SaleReceiptData:
+        recipient = sale.dealer or sale.customer
         return cls(
             invoice_number=sale.invoice_number,
             sold_at=sale.sale_date,
-            customer_name=sale.customer.name if sale.customer else "Walk-in Customer",
-            customer_phone=sale.customer.phone if sale.customer else "",
+            customer_name=(
+                sale.dealer.display_name
+                if sale.dealer
+                else sale.customer.name
+                if sale.customer
+                else "Walk-in Customer"
+            ),
+            customer_phone=recipient.phone if recipient else "",
             lines=tuple(
                 ReceiptLine(
                     product=item.product.display_name,
-                    imei=item.imei,
-                    quantity=1,
-                    price=item.price,
+                    batch_number=item.batch_number,
+                    quantity=item.quantity,
+                    price=item.unit_price,
                     discount=item.discount,
                     total=item.total,
+                    cartons=(
+                        item.quantity // item.stock_batch.packs_per_carton
+                        if item.stock_batch and item.stock_batch.packs_per_carton
+                        else 0
+                    ),
+                    loose_packs=(
+                        item.quantity % item.stock_batch.packs_per_carton
+                        if item.stock_batch and item.stock_batch.packs_per_carton
+                        else item.quantity
+                    ),
                 )
                 for item in sale.items
             ),
@@ -94,42 +119,21 @@ class SaleReceiptData:
             remaining=sale.remaining_amount,
             payment_methods=payment_methods,
             salesperson=sale.creator.full_name,
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class ReturnReceiptData:
-    return_number: str
-    invoice_number: str
-    returned_at: datetime
-    customer_name: str
-    customer_phone: str
-    product: str
-    imei: str
-    reason: str
-    condition: str
-    refund: Decimal
-    refund_method: str
-    approved_by: str
-
-    @classmethod
-    def from_return(cls, document: SaleReturn) -> ReturnReceiptData:
-        if len(document.items) != 1:
-            raise ValueError("A return receipt requires exactly one serialized return item")
-        item = document.items[0]
-        return cls(
-            return_number=document.return_number,
-            invoice_number=document.sale.invoice_number,
-            returned_at=document.return_date,
-            customer_name=document.customer.name if document.customer else "Walk-in Customer",
-            customer_phone=document.customer.phone if document.customer else "",
-            product=item.sale_item.product.display_name,
-            imei=item.sale_item.imei,
-            reason=document.reason.value.replace("_", " ").title(),
-            condition=document.condition.value.title(),
-            refund=item.refund_amount,
-            refund_method=document.refund_method.value.replace("_", " ").title(),
-            approved_by=document.approver.full_name,
+            recipient_type=sale.recipient_type.title(),
+            customer_address=sale.delivery_address
+            or (recipient.address if recipient else "")
+            or "",
+            customer_identity=(
+                (sale.dealer.cnic or sale.dealer.tax_number or "")
+                if sale.dealer
+                else (sale.customer.cnic or "")
+                if sale.customer
+                else ""
+            ),
+            order_number=sale.order_number or "",
+            territory=sale.territory or "",
+            policy=sale.policy or "",
+            store=sale.store or "",
         )
 
 
@@ -146,7 +150,7 @@ class ReceiptGenerator:
             topMargin=14 * mm,
             bottomMargin=14 * mm,
             title=f"Invoice {receipt.invoice_number}",
-            author=shop.name or "Mobile Shop Manager",
+            author=shop.name or "Pesticide Shop Manager",
         )
         styles = getSampleStyleSheet()
         brand_style = ParagraphStyle(
@@ -167,13 +171,18 @@ class ReceiptGenerator:
             story.append(Paragraph(details, styles["Normal"]))
         story.extend(
             [
-                Spacer(1, 7 * mm),
+                Spacer(1, 3 * mm),
+                Paragraph("<b><u>DELIVERY CHALLAN / INVOICE</u></b>", brand_style),
+                Spacer(1, 5 * mm),
                 Table(
                     [
                         [
                             Paragraph(
-                                f"<b>Bill To</b><br/>{receipt.customer_name}"
-                                f"<br/>{receipt.customer_phone}",
+                                f"<b>{escape(receipt.recipient_type)}:</b> "
+                                f"{escape(receipt.customer_name)}"
+                                f"<br/><b>Phone:</b> {escape(receipt.customer_phone)}"
+                                f"<br/><b>Address:</b> {escape(receipt.customer_address)}"
+                                f"<br/><b>NIC/Tax No:</b> {escape(receipt.customer_identity)}",
                                 styles["Normal"],
                             ),
                             Paragraph(
@@ -187,24 +196,64 @@ class ReceiptGenerator:
                     colWidths=[85 * mm, 85 * mm],
                 ),
                 Spacer(1, 7 * mm),
+                Table(
+                    [
+                        [
+                            "Territory",
+                            receipt.territory or "—",
+                            "Order #",
+                            receipt.order_number or "—",
+                            "Store",
+                            receipt.store or "—",
+                        ]
+                    ],
+                    colWidths=[20 * mm, 38 * mm, 20 * mm, 35 * mm, 16 * mm, 35 * mm],
+                ),
+                Spacer(1, 4 * mm),
             ]
         )
-        table_data: list[list[object]] = [["Product", "IMEI", "Qty", "Price", "Discount", "Total"]]
+        item_cell = ParagraphStyle(
+            "InvoiceItemCell", parent=styles["Normal"], fontSize=6.5, leading=8
+        )
+        item_header = ParagraphStyle(
+            "InvoiceItemHeader",
+            parent=item_cell,
+            fontName="Helvetica-Bold",
+            textColor=colors.white,
+            alignment=TA_CENTER,
+        )
+        table_data: list[list[object]] = [
+            [
+                Paragraph(label, item_header)
+                for label in (
+                    "Product",
+                    "Policy",
+                    "Batch No.",
+                    "Qty",
+                    "Cartons / Packs",
+                    "Unit Price",
+                    "Discount",
+                    "Total",
+                )
+            ]
+        ]
         table_data.extend(
             [
-                line.product,
-                line.imei,
-                str(line.quantity),
-                self._amount(line.price, shop.currency),
-                self._amount(line.discount, shop.currency),
-                self._amount(line.total, shop.currency),
+                Paragraph(escape(line.product), item_cell),
+                Paragraph(escape(receipt.policy or "NET SALE"), item_cell),
+                Paragraph(escape(line.batch_number), item_cell),
+                Paragraph(str(line.quantity), item_cell),
+                Paragraph(f"{line.cartons} / {line.loose_packs}", item_cell),
+                Paragraph(self._amount(line.price, shop.currency), item_cell),
+                Paragraph(self._amount(line.discount, shop.currency), item_cell),
+                Paragraph(self._amount(line.total, shop.currency), item_cell),
             ]
             for line in receipt.lines
         )
         item_table = Table(
             table_data,
             repeatRows=1,
-            colWidths=[50 * mm, 35 * mm, 10 * mm, 25 * mm, 25 * mm, 25 * mm],
+            colWidths=[35 * mm, 20 * mm, 24 * mm, 10 * mm, 20 * mm, 22 * mm, 20 * mm, 24 * mm],
         )
         item_table.setStyle(self._invoice_table_style())
         story.extend([item_table, Spacer(1, 7 * mm)])
@@ -236,6 +285,19 @@ class ReceiptGenerator:
             [
                 totals,
                 Spacer(1, 12 * mm),
+                Table(
+                    [["Prepared By", "Approved By", "Dealer / Customer Signature & Stamp"]],
+                    colWidths=[50 * mm, 50 * mm, 70 * mm],
+                    style=TableStyle(
+                        [
+                            ("LINEABOVE", (0, 0), (-1, 0), 0.8, colors.black),
+                            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                            ("FONTNAME", (0, 0), (-1, -1), "Helvetica-Oblique"),
+                            ("TOPPADDING", (0, 0), (-1, -1), 5),
+                        ]
+                    ),
+                ),
+                Spacer(1, 5 * mm),
             ]
         )
         if shop.footer:
@@ -260,7 +322,7 @@ class ReceiptGenerator:
             topMargin=3 * mm,
             bottomMargin=3 * mm,
             title=f"Receipt {receipt.invoice_number}",
-            author=shop.name or "Mobile Shop Manager",
+            author=shop.name or "Pesticide Shop Manager",
         )
         base_size = 7 if width_mm == 58 else 8
         normal = ParagraphStyle(
@@ -297,9 +359,9 @@ class ReceiptGenerator:
             story.extend(
                 [
                     Paragraph(line.product, left),
-                    Paragraph(f"IMEI: {line.imei}", left),
+                    Paragraph(f"Batch: {line.batch_number}", left),
                     Table(
-                        [[f"1 x {line.price:,.2f}", f"{line.total:,.2f}"]],
+                        [[f"{line.quantity} x {line.price:,.2f}", f"{line.total:,.2f}"]],
                         colWidths=[usable_width * 0.6, usable_width * 0.4],
                         style=TableStyle(
                             [
@@ -332,147 +394,6 @@ class ReceiptGenerator:
         story.extend(
             [
                 Paragraph(f"Payment: {receipt.payment_methods}", left),
-                Spacer(1, 3 * mm),
-            ]
-        )
-        if shop.footer:
-            story.append(Paragraph(escape(shop.footer), center))
-        document.build(story)
-        return buffer.getvalue()
-
-    def generate_return_a4(self, receipt: ReturnReceiptData, shop: ShopProfile) -> bytes:
-        """Render a customer-safe A4 return/refund receipt."""
-
-        buffer = BytesIO()
-        document = SimpleDocTemplate(
-            buffer,
-            pagesize=A4,
-            leftMargin=18 * mm,
-            rightMargin=18 * mm,
-            topMargin=14 * mm,
-            bottomMargin=14 * mm,
-            title=f"Return {receipt.return_number}",
-            author=shop.name or "Mobile Shop Manager",
-        )
-        styles = getSampleStyleSheet()
-        heading = ParagraphStyle(
-            "ReturnBrand",
-            parent=styles["Title"],
-            textColor=colors.HexColor("#17324D"),
-            alignment=TA_CENTER,
-            fontSize=20,
-        )
-        story: list[Flowable] = []
-        if shop.logo_path and shop.logo_path.is_file():
-            story.append(Image(str(shop.logo_path), width=30 * mm, height=30 * mm))
-        if shop.name:
-            story.append(Paragraph(escape(shop.name), heading))
-        if details := self._shop_details(shop):
-            story.append(Paragraph(details, styles["Normal"]))
-        story.extend(
-            [
-                Spacer(1, 5 * mm),
-                Paragraph("<b>RETURN / REFUND RECEIPT</b>", styles["Heading2"]),
-                Table(
-                    [
-                        ["Return number", receipt.return_number],
-                        ["Original invoice", receipt.invoice_number],
-                        ["Date", receipt.returned_at.strftime("%d-%b-%Y %H:%M")],
-                        ["Customer", receipt.customer_name],
-                        ["Customer phone", receipt.customer_phone],
-                        ["Approved by", receipt.approved_by],
-                    ],
-                    colWidths=[45 * mm, 125 * mm],
-                ),
-                Spacer(1, 6 * mm),
-            ]
-        )
-        item_table = Table(
-            [
-                ["Product", "IMEI", "Reason", "Condition", "Refund"],
-                [
-                    receipt.product,
-                    receipt.imei,
-                    receipt.reason,
-                    receipt.condition,
-                    self._amount(receipt.refund, shop.currency),
-                ],
-            ],
-            colWidths=[45 * mm, 35 * mm, 35 * mm, 25 * mm, 30 * mm],
-        )
-        item_table.setStyle(self._invoice_table_style())
-        story.extend(
-            [
-                item_table,
-                Spacer(1, 7 * mm),
-                Paragraph(f"<b>Refund method:</b> {receipt.refund_method}", styles["Normal"]),
-                Spacer(1, 12 * mm),
-            ]
-        )
-        if shop.footer:
-            story.append(Paragraph(escape(shop.footer), styles["Italic"]))
-        document.build(story)
-        return buffer.getvalue()
-
-    def generate_return_thermal(
-        self,
-        receipt: ReturnReceiptData,
-        shop: ShopProfile,
-        width_mm: int = 80,
-    ) -> bytes:
-        """Render a 58 mm or 80 mm thermal return receipt."""
-
-        if width_mm not in {58, 80}:
-            raise ValueError("Thermal receipt width must be 58 mm or 80 mm")
-        buffer = BytesIO()
-        width = width_mm * mm
-        logo_height = 22 if shop.logo_path and shop.logo_path.is_file() else 0
-        document = SimpleDocTemplate(
-            buffer,
-            pagesize=(width, (165 + logo_height) * mm),
-            leftMargin=3 * mm,
-            rightMargin=3 * mm,
-            topMargin=3 * mm,
-            bottomMargin=3 * mm,
-            title=f"Return {receipt.return_number}",
-            author=shop.name or "Mobile Shop Manager",
-        )
-        size = 7 if width_mm == 58 else 8
-        normal = ParagraphStyle(
-            "ReturnThermalNormal", fontName="Helvetica", fontSize=size, leading=size + 2
-        )
-        center = ParagraphStyle("ReturnThermalCenter", parent=normal, alignment=TA_CENTER)
-        heading = ParagraphStyle(
-            "ReturnThermalHeading",
-            parent=center,
-            fontName="Helvetica-Bold",
-            fontSize=size + 4,
-            leading=size + 6,
-        )
-        usable_width = width - 6 * mm
-        story: list[Flowable] = []
-        if shop.logo_path and shop.logo_path.is_file():
-            story.append(Image(str(shop.logo_path), width=18 * mm, height=18 * mm))
-        if shop.name:
-            story.append(Paragraph(escape(shop.name), heading))
-        if details := self._shop_details(shop):
-            story.append(Paragraph(details, center))
-        story.extend(
-            [
-                Paragraph("RETURN / REFUND RECEIPT", center),
-                Paragraph(f"Return: {receipt.return_number}", normal),
-                Paragraph(f"Invoice: {receipt.invoice_number}", normal),
-                Paragraph(f"Date: {receipt.returned_at:%d-%b-%Y %H:%M}", normal),
-                Paragraph(f"Customer: {receipt.customer_name}", normal),
-                self._thermal_rule(usable_width),
-                Paragraph(receipt.product, normal),
-                Paragraph(f"IMEI: {receipt.imei}", normal),
-                Paragraph(f"Reason: {receipt.reason}", normal),
-                Paragraph(f"Condition: {receipt.condition}", normal),
-                self._thermal_rule(usable_width),
-                Paragraph(f"REFUND: {shop.currency} {receipt.refund:,.2f}", heading),
-                Paragraph(f"Method: {receipt.refund_method}", normal),
-                Paragraph(f"Approved by: {receipt.approved_by}", normal),
                 Spacer(1, 3 * mm),
             ]
         )

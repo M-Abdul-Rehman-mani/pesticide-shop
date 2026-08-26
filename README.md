@@ -1,13 +1,20 @@
-# Mobile Shop Manager
+# Pesticide Shop Manager
 
-Mobile Shop Manager is a native PySide6 desktop point-of-sale, serialized inventory,
-and reporting application for mobile phone retailers. PostgreSQL is the only supported
-primary database; Redis and Celery provide reliable asynchronous email, reporting, and
-backup work.
+Pesticide Shop Manager is a native PySide6 desktop point-of-sale, batch inventory,
+dealer/customer account, invoice, and reporting application for pesticide and crop-care shops.
+PostgreSQL is the primary database; Redis and Celery provide reliable asynchronous email,
+reporting, and backup work.
 
-The system tracks every physical handset and both IMEI slots, performs purchase/sale/return/
-damage workflows in database transactions, preserves immutable inventory and audit history,
-supports split payments, and produces A4/58 mm/80 mm receipts plus PDF and Excel reports.
+The system tracks products by manufacturer, active ingredient, formulation, pack size, batch,
+manufacture/expiry date, cartons, packs, and available quantity. Purchases, sales, stock changes,
+payments, and dealer balances run in database transactions and preserve immutable audit and stock
+movement history. It supports split payments and produces A4 delivery challans/invoices plus
+58 mm/80 mm receipts and PDF/Excel reports.
+
+The invoice layout follows the supplied Hanan Spray Center reference: invoice/order number,
+recipient, address, NIC/tax identity, territory, policy, store, product, batch number, quantity,
+totals, and prepared/approved/recipient signature areas. A completed sale can queue the PDF for
+the customer or dealer and a separate copy for the owner.
 
 > **Development credential only:** the seed command creates `admin` / `admin` and marks
 > the account for a mandatory password change. Never seed demo credentials in production.
@@ -70,6 +77,23 @@ Startup validates configuration, PostgreSQL connectivity, and the exact Alembic 
 showing login. If the database is unavailable it stops with a friendly connection message; it
 never creates or switches to a local database.
 
+## Main workflow
+
+1. Enter the business name, owner, address, contact, tax/registration, logo, and invoice footer in
+   **Shop Settings**. Configure owner and SMTP email under **Settings**.
+2. Add pesticide products with active ingredient, formulation, pack size, category, stock unit,
+   prices, and low-stock threshold.
+3. Add upstream suppliers, retail customers, and trade dealers. Dealer records include business
+   name, NIC/tax number, territory, credit limit, balance, address, and email.
+4. Receive supplier purchases with batch number, manufacture/expiry dates, quantity, cartons,
+   packs per carton, purchase/sale prices, and split payments.
+5. Create a sale for a walk-in customer, saved customer, or dealer. Select exact stock batches,
+   enter quantities, prices, discounts, policy/order/territory/store details, and payments.
+6. Save or preview the PDF invoice. Email delivery to the recipient and owner continues through
+   the reliable outbox. Review every previous line sale under **Reports → Sales History**.
+7. Use **Inventory** for search, low-stock and expiry filters, movement history, stock value, and
+   audited count adjustments.
+
 ## Quality gates
 
 ```bash
@@ -101,7 +125,7 @@ PyInstaller builds must run on the target operating system; a Windows executable
 therefore be built on Windows and a Linux executable on Linux.
 
 ```bash
-pyinstaller mobile_shop.spec --clean --noconfirm
+pyinstaller pesticide_shop.spec --clean --noconfirm
 ```
 
 The executable still requires reachable PostgreSQL and Redis services. It bundles Python
@@ -127,7 +151,7 @@ worker stopped. See [Backup and restore](docs/backup.md) for the full rehearsal 
 
 Install printers through the operating system, then select the printer/receipt format in Settings.
 SMTP can be configured in `.env` or through the encrypted Settings screen. Failed messages remain
-in Email History with attempt counts and can be retried without reversing the sale or return.
+in Email History with attempt counts and can be retried without reversing the sale.
 
 ## Operations and documentation
 
@@ -143,7 +167,7 @@ in Email History with attempt counts and can be retried without reversing the sa
 
 Application logs rotate under `logs/`. Generated exports are written only when selected
 by a user. Business documents, payments, inventory ledger entries, and audit events are
-append-only; corrections use explicit return, void, or adjustment workflows.
+append-only; corrections use explicit void or audited stock-adjustment workflows.
 
 ## Troubleshooting
 

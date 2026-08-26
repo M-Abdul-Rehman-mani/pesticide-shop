@@ -32,7 +32,7 @@ def generate_daily_owner_report(report_date: str | None = None) -> str | None:
         owner_email = stored.get(SettingCategory.EMAIL, "owner_email", settings.owner_email)
         if not owner_email:
             return None
-        shop_name = stored.get(SettingCategory.SHOP, "name", "Mobile Shop") or "Mobile Shop"
+        shop_name = stored.get(SettingCategory.SHOP, "name", "Pesticide Shop") or "Pesticide Shop"
         currency = (
             stored.get(SettingCategory.GENERAL, "currency", settings.app_currency)
             or settings.app_currency
@@ -44,15 +44,11 @@ def generate_daily_owner_report(report_date: str | None = None) -> str | None:
         low_stock = reports.low_stock_models(limit=10)
         rows = [
             ("Total Sales", f"{currency} {metrics.sales:,.2f}"),
-            ("Total Returns", f"{currency} {metrics.returns:,.2f}"),
-            ("Total Damage", f"{currency} {metrics.damage:,.2f}"),
-            ("Net Sales", f"{currency} {metrics.sales - metrics.returns:,.2f}"),
             ("Total Profit", f"{currency} {metrics.profit:,.2f}"),
-            ("Phones Sold", metrics.phones_sold),
-            ("Phones Returned", metrics.phones_returned),
-            ("Phones Damaged", metrics.damaged_phones),
+            ("Units Sold", metrics.units_sold),
             ("Current Inventory", metrics.current_inventory),
-            ("Low Stock Models", metrics.low_stock_models),
+            ("Low Stock Products", metrics.low_stock_products),
+            ("Expiring in 90 Days", metrics.expiring_units),
             ("Outstanding Payments", f"{currency} {metrics.outstanding_payments:,.2f}"),
         ]
         rows.extend(
@@ -62,7 +58,7 @@ def generate_daily_owner_report(report_date: str | None = None) -> str | None:
         rows.extend(
             (
                 f"Top Model — {model.product}",
-                f"{model.units} phone(s), {currency} {model.revenue:,.2f}",
+                f"{model.units} unit(s), {currency} {model.revenue:,.2f}",
             )
             for model in top_models
         )
@@ -80,7 +76,7 @@ def generate_daily_owner_report(report_date: str | None = None) -> str | None:
             rows=rows,
             landscape_page=False,
         )
-        report_id = uuid.uuid5(uuid.NAMESPACE_URL, f"mobile-shop-daily-report:{selected_date}")
+        report_id = uuid.uuid5(uuid.NAMESPACE_URL, f"pesticide-shop-daily-report:{selected_date}")
         history = EmailHistory(
             recipient=owner_email,
             subject=f"Daily Shop Report - {selected_date:%d-%b-%Y}",

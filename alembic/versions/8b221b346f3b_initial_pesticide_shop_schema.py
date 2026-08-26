@@ -1,8 +1,8 @@
-"""initial production schema
+"""initial pesticide shop schema
 
-Revision ID: ea15859304a4
+Revision ID: 8b221b346f3b
 Revises:
-Create Date: 2026-08-14 15:23:57.497123
+Create Date: 2026-08-22 13:35:14.233922
 """
 
 from collections.abc import Sequence
@@ -11,7 +11,7 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-revision: str = "ea15859304a4"
+revision: str = "8b221b346f3b"
 down_revision: str | None = None
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
@@ -82,6 +82,45 @@ def upgrade() -> None:
     op.create_index("ix_customers_name", "customers", ["name"], unique=False)
     op.create_index("ix_customers_phone", "customers", ["phone"], unique=False)
     op.create_table(
+        "dealers",
+        sa.Column("name", sa.String(length=160), nullable=False),
+        sa.Column("business_name", sa.String(length=200), nullable=True),
+        sa.Column("phone", sa.String(length=32), nullable=False),
+        sa.Column("email", sa.String(length=254), nullable=True),
+        sa.Column("address", sa.Text(), nullable=True),
+        sa.Column("cnic", sa.String(length=32), nullable=True),
+        sa.Column("tax_number", sa.String(length=80), nullable=True),
+        sa.Column("territory", sa.String(length=120), nullable=True),
+        sa.Column(
+            "credit_limit", sa.Numeric(precision=16, scale=2), server_default="0.00", nullable=False
+        ),
+        sa.Column(
+            "balance", sa.Numeric(precision=16, scale=2), server_default="0.00", nullable=False
+        ),
+        sa.Column("notes", sa.Text(), nullable=True),
+        sa.Column("is_active", sa.Boolean(), server_default="true", nullable=False),
+        sa.Column("id", sa.UUID(), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.CheckConstraint("credit_limit >= 0", name=op.f("ck_dealers_credit_limit_nonnegative")),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_dealers")),
+        sa.UniqueConstraint("cnic", name=op.f("uq_dealers_cnic")),
+        sa.UniqueConstraint("tax_number", name=op.f("uq_dealers_tax_number")),
+    )
+    op.create_index("ix_dealers_name", "dealers", ["name"], unique=False)
+    op.create_index("ix_dealers_phone", "dealers", ["phone"], unique=False)
+    op.create_index("ix_dealers_territory", "dealers", ["territory"], unique=False)
+    op.create_table(
         "document_sequences",
         sa.Column("name", sa.String(length=50), nullable=False),
         sa.Column("prefix", sa.String(length=20), nullable=False),
@@ -139,13 +178,14 @@ def upgrade() -> None:
     )
     op.create_table(
         "products",
-        sa.Column("brand", sa.String(length=100), nullable=False),
-        sa.Column("model", sa.String(length=140), nullable=False),
-        sa.Column("variant", sa.String(length=100), server_default="", nullable=False),
-        sa.Column("storage", sa.String(length=50), server_default="", nullable=False),
-        sa.Column("ram", sa.String(length=50), server_default="", nullable=False),
-        sa.Column("color", sa.String(length=80), server_default="", nullable=False),
-        sa.Column("category", sa.String(length=80), server_default="PHONE", nullable=False),
+        sa.Column("manufacturer", sa.String(length=140), nullable=False),
+        sa.Column("name", sa.String(length=160), nullable=False),
+        sa.Column("active_ingredient", sa.String(length=180), server_default="", nullable=False),
+        sa.Column("formulation", sa.String(length=100), server_default="", nullable=False),
+        sa.Column("pack_size", sa.String(length=80), server_default="", nullable=False),
+        sa.Column("registration_number", sa.String(length=100), server_default="", nullable=False),
+        sa.Column("unit", sa.String(length=30), server_default="PACK", nullable=False),
+        sa.Column("category", sa.String(length=80), server_default="PESTICIDE", nullable=False),
         sa.Column("description", sa.Text(), nullable=True),
         sa.Column(
             "default_purchase_price",
@@ -185,10 +225,12 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_products")),
         sa.UniqueConstraint(
-            "brand", "model", "variant", "storage", "ram", "color", name="uq_product_variant"
+            "manufacturer", "name", "formulation", "pack_size", name="uq_product_variant"
         ),
     )
-    op.create_index("ix_products_brand_model", "products", ["brand", "model"], unique=False)
+    op.create_index(
+        "ix_products_manufacturer_name", "products", ["manufacturer", "name"], unique=False
+    )
     op.create_table(
         "suppliers",
         sa.Column("name", sa.String(length=160), nullable=False),
@@ -249,8 +291,12 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_users")),
     )
-    op.create_index("ix_users_email_lower", "users", [sa.text("lower(email)")], unique=True)
-    op.create_index("ix_users_username_lower", "users", [sa.text("lower(username)")], unique=True)
+    op.create_index(
+        "ix_users_email_lower", "users", [sa.literal_column("lower(email)")], unique=True
+    )
+    op.create_index(
+        "ix_users_username_lower", "users", [sa.literal_column("lower(username)")], unique=True
+    )
     op.create_table(
         "audit_logs",
         sa.Column("user_id", sa.UUID(), nullable=True),
@@ -363,6 +409,13 @@ def upgrade() -> None:
         "sales",
         sa.Column("invoice_number", sa.String(length=40), nullable=False),
         sa.Column("customer_id", sa.UUID(), nullable=True),
+        sa.Column("dealer_id", sa.UUID(), nullable=True),
+        sa.Column("recipient_type", sa.String(length=20), nullable=False),
+        sa.Column("order_number", sa.String(length=60), nullable=True),
+        sa.Column("territory", sa.String(length=120), nullable=True),
+        sa.Column("delivery_address", sa.Text(), nullable=True),
+        sa.Column("policy", sa.String(length=120), nullable=True),
+        sa.Column("store", sa.String(length=120), nullable=True),
         sa.Column("sale_date", sa.DateTime(timezone=True), nullable=False),
         sa.Column(
             "subtotal", sa.Numeric(precision=16, scale=2), server_default="0.00", nullable=False
@@ -405,18 +458,22 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.CheckConstraint(
-            "discount >= 0 AND discount <= subtotal", name=op.f("ck_sales_discount_within_subtotal")
+            "NOT (customer_id IS NOT NULL AND dealer_id IS NOT NULL)",
+            name=op.f("ck_sales_ck_sales_one_recipient"),
         ),
         sa.CheckConstraint(
-            "paid_amount >= 0 AND paid_amount <= total", name=op.f("ck_sales_paid_within_total")
+            "discount >= 0 AND discount <= subtotal", name=op.f("ck_sales_ck_sales_discount")
         ),
         sa.CheckConstraint(
-            "remaining_amount = total - paid_amount", name=op.f("ck_sales_remaining_matches_total")
+            "paid_amount >= 0 AND paid_amount <= total", name=op.f("ck_sales_ck_sales_paid")
         ),
-        sa.CheckConstraint("subtotal >= 0", name=op.f("ck_sales_subtotal_nonnegative")),
-        sa.CheckConstraint("tax >= 0", name=op.f("ck_sales_tax_nonnegative")),
         sa.CheckConstraint(
-            "total = subtotal - discount + tax", name=op.f("ck_sales_total_matches_components")
+            "remaining_amount = total - paid_amount", name=op.f("ck_sales_ck_sales_remaining")
+        ),
+        sa.CheckConstraint("subtotal >= 0", name=op.f("ck_sales_ck_sales_subtotal")),
+        sa.CheckConstraint("tax >= 0", name=op.f("ck_sales_ck_sales_tax")),
+        sa.CheckConstraint(
+            "total = subtotal - discount + tax", name=op.f("ck_sales_ck_sales_total")
         ),
         sa.ForeignKeyConstraint(
             ["created_by"],
@@ -430,12 +487,70 @@ def upgrade() -> None:
             name=op.f("fk_sales_customer_id_customers"),
             ondelete="RESTRICT",
         ),
+        sa.ForeignKeyConstraint(
+            ["dealer_id"],
+            ["dealers.id"],
+            name=op.f("fk_sales_dealer_id_dealers"),
+            ondelete="RESTRICT",
+        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_sales")),
         sa.UniqueConstraint("invoice_number", name=op.f("uq_sales_invoice_number")),
     )
     op.create_index("ix_sales_created_by_date", "sales", ["created_by", "sale_date"], unique=False)
     op.create_index("ix_sales_customer_date", "sales", ["customer_id", "sale_date"], unique=False)
     op.create_index("ix_sales_date", "sales", ["sale_date"], unique=False)
+    op.create_index("ix_sales_dealer_date", "sales", ["dealer_id", "sale_date"], unique=False)
+    op.create_table(
+        "payments",
+        sa.Column("sale_id", sa.UUID(), nullable=True),
+        sa.Column("purchase_id", sa.UUID(), nullable=True),
+        sa.Column(
+            "method",
+            sa.Enum(
+                "CASH", "CARD", "BANK_TRANSFER", "MOBILE_WALLET", "OTHER", name="payment_method"
+            ),
+            nullable=False,
+        ),
+        sa.Column(
+            "direction", sa.Enum("INCOMING", "OUTGOING", name="payment_direction"), nullable=False
+        ),
+        sa.Column(
+            "amount", sa.Numeric(precision=16, scale=2), server_default="0.00", nullable=False
+        ),
+        sa.Column("reference", sa.String(length=160), nullable=True),
+        sa.Column("received_by", sa.UUID(), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column("notes", sa.Text(), nullable=True),
+        sa.Column("id", sa.UUID(), nullable=False),
+        sa.CheckConstraint("amount > 0", name=op.f("ck_payments_amount_positive")),
+        sa.CheckConstraint(
+            "num_nonnulls(sale_id, purchase_id) = 1", name=op.f("ck_payments_exactly_one_document")
+        ),
+        sa.ForeignKeyConstraint(
+            ["purchase_id"],
+            ["purchases.id"],
+            name=op.f("fk_payments_purchase_id_purchases"),
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["received_by"],
+            ["users.id"],
+            name=op.f("fk_payments_received_by_users"),
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["sale_id"], ["sales.id"], name=op.f("fk_payments_sale_id_sales"), ondelete="RESTRICT"
+        ),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_payments")),
+    )
+    op.create_index("ix_payments_created", "payments", ["created_at"], unique=False)
+    op.create_index("ix_payments_purchase", "payments", ["purchase_id"], unique=False)
+    op.create_index("ix_payments_sale", "payments", ["sale_id"], unique=False)
     op.create_table(
         "purchase_items",
         sa.Column("purchase_id", sa.UUID(), nullable=False),
@@ -485,157 +600,18 @@ def upgrade() -> None:
     )
     op.create_index("ix_purchase_items_purchase", "purchase_items", ["purchase_id"], unique=False)
     op.create_table(
-        "sale_returns",
-        sa.Column("return_number", sa.String(length=40), nullable=False),
-        sa.Column("sale_id", sa.UUID(), nullable=False),
-        sa.Column("customer_id", sa.UUID(), nullable=True),
-        sa.Column("return_date", sa.DateTime(timezone=True), nullable=False),
-        sa.Column(
-            "reason",
-            sa.Enum(
-                "CUSTOMER_CHANGED_MIND",
-                "DEFECTIVE",
-                "WRONG_PRODUCT",
-                "WARRANTY",
-                "OTHER",
-                name="return_reason",
-            ),
-            nullable=False,
-        ),
-        sa.Column(
-            "condition",
-            sa.Enum("GOOD", "DAMAGED", "OPENED", "USED", name="return_condition"),
-            nullable=False,
-        ),
-        sa.Column(
-            "refund_amount",
-            sa.Numeric(precision=16, scale=2),
-            server_default="0.00",
-            nullable=False,
-        ),
-        sa.Column(
-            "refund_method",
-            sa.Enum(
-                "CASH", "CARD", "BANK_TRANSFER", "MOBILE_WALLET", "OTHER", name="payment_method"
-            ),
-            nullable=False,
-        ),
-        sa.Column("approved_by", sa.UUID(), nullable=False),
-        sa.Column("created_by", sa.UUID(), nullable=False),
-        sa.Column(
-            "status", sa.Enum("COMPLETED", "CANCELLED", name="return_status"), nullable=False
-        ),
-        sa.Column("notes", sa.Text(), nullable=True),
-        sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.CheckConstraint("refund_amount >= 0", name=op.f("ck_sale_returns_refund_nonnegative")),
-        sa.ForeignKeyConstraint(
-            ["approved_by"],
-            ["users.id"],
-            name=op.f("fk_sale_returns_approved_by_users"),
-            ondelete="RESTRICT",
-        ),
-        sa.ForeignKeyConstraint(
-            ["created_by"],
-            ["users.id"],
-            name=op.f("fk_sale_returns_created_by_users"),
-            ondelete="RESTRICT",
-        ),
-        sa.ForeignKeyConstraint(
-            ["customer_id"],
-            ["customers.id"],
-            name=op.f("fk_sale_returns_customer_id_customers"),
-            ondelete="RESTRICT",
-        ),
-        sa.ForeignKeyConstraint(
-            ["sale_id"],
-            ["sales.id"],
-            name=op.f("fk_sale_returns_sale_id_sales"),
-            ondelete="RESTRICT",
-        ),
-        sa.PrimaryKeyConstraint("id", name=op.f("pk_sale_returns")),
-        sa.UniqueConstraint("return_number", name=op.f("uq_sale_returns_return_number")),
-    )
-    op.create_index("ix_sale_returns_date", "sale_returns", ["return_date"], unique=False)
-    op.create_index("ix_sale_returns_sale", "sale_returns", ["sale_id"], unique=False)
-    op.create_table(
-        "payments",
-        sa.Column("sale_id", sa.UUID(), nullable=True),
-        sa.Column("purchase_id", sa.UUID(), nullable=True),
-        sa.Column("sale_return_id", sa.UUID(), nullable=True),
-        sa.Column(
-            "method",
-            sa.Enum(
-                "CASH", "CARD", "BANK_TRANSFER", "MOBILE_WALLET", "OTHER", name="payment_method"
-            ),
-            nullable=False,
-        ),
-        sa.Column(
-            "direction", sa.Enum("INCOMING", "OUTGOING", name="payment_direction"), nullable=False
-        ),
-        sa.Column(
-            "amount", sa.Numeric(precision=16, scale=2), server_default="0.00", nullable=False
-        ),
-        sa.Column("reference", sa.String(length=160), nullable=True),
-        sa.Column("received_by", sa.UUID(), nullable=False),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.Column("notes", sa.Text(), nullable=True),
-        sa.Column("id", sa.UUID(), nullable=False),
-        sa.CheckConstraint("amount > 0", name=op.f("ck_payments_amount_positive")),
-        sa.CheckConstraint(
-            "num_nonnulls(sale_id, purchase_id, sale_return_id) = 1",
-            name=op.f("ck_payments_exactly_one_document"),
-        ),
-        sa.ForeignKeyConstraint(
-            ["purchase_id"],
-            ["purchases.id"],
-            name=op.f("fk_payments_purchase_id_purchases"),
-            ondelete="RESTRICT",
-        ),
-        sa.ForeignKeyConstraint(
-            ["received_by"],
-            ["users.id"],
-            name=op.f("fk_payments_received_by_users"),
-            ondelete="RESTRICT",
-        ),
-        sa.ForeignKeyConstraint(
-            ["sale_id"], ["sales.id"], name=op.f("fk_payments_sale_id_sales"), ondelete="RESTRICT"
-        ),
-        sa.ForeignKeyConstraint(
-            ["sale_return_id"],
-            ["sale_returns.id"],
-            name=op.f("fk_payments_sale_return_id_sale_returns"),
-            ondelete="RESTRICT",
-        ),
-        sa.PrimaryKeyConstraint("id", name=op.f("pk_payments")),
-    )
-    op.create_index("ix_payments_created", "payments", ["created_at"], unique=False)
-    op.create_index("ix_payments_purchase", "payments", ["purchase_id"], unique=False)
-    op.create_index("ix_payments_sale", "payments", ["sale_id"], unique=False)
-    op.create_table(
-        "phone_inventory",
+        "stock_batches",
         sa.Column("product_id", sa.UUID(), nullable=False),
-        sa.Column("imei_1", sa.String(length=15), nullable=False),
-        sa.Column("imei_2", sa.String(length=15), nullable=True),
-        sa.Column("serial_number", sa.String(length=100), nullable=True),
+        sa.Column("supplier_id", sa.UUID(), nullable=False),
         sa.Column("purchase_id", sa.UUID(), nullable=False),
         sa.Column("purchase_item_id", sa.UUID(), nullable=False),
+        sa.Column("batch_number", sa.String(length=100), nullable=False),
+        sa.Column("manufacture_date", sa.Date(), nullable=True),
+        sa.Column("expiry_date", sa.Date(), nullable=True),
+        sa.Column("quantity_received", sa.Integer(), nullable=False),
+        sa.Column("quantity_available", sa.Integer(), nullable=False),
+        sa.Column("cartons", sa.Integer(), server_default="0", nullable=False),
+        sa.Column("packs_per_carton", sa.Integer(), server_default="0", nullable=False),
         sa.Column(
             "purchase_price",
             sa.Numeric(precision=16, scale=2),
@@ -648,32 +624,9 @@ def upgrade() -> None:
             server_default="0.00",
             nullable=False,
         ),
-        sa.Column(
-            "status",
-            sa.Enum(
-                "IN_STOCK",
-                "RESERVED",
-                "SOLD",
-                "RETURNED",
-                "DAMAGED",
-                "SENT_FOR_REPAIR",
-                "REPAIRED",
-                "LOST",
-                "CANCELLED",
-                name="phone_status",
-            ),
-            nullable=False,
-        ),
-        sa.Column("supplier_id", sa.UUID(), nullable=False),
-        sa.Column(
-            "condition",
-            sa.Enum("NEW", "USED", "REFURBISHED", "OPEN_BOX", name="phone_condition"),
-            nullable=False,
-        ),
-        sa.Column("warranty_start", sa.Date(), nullable=True),
-        sa.Column("warranty_end", sa.Date(), nullable=True),
         sa.Column("location", sa.String(length=160), nullable=True),
         sa.Column("notes", sa.Text(), nullable=True),
+        sa.Column("is_active", sa.Boolean(), server_default="true", nullable=False),
         sa.Column("id", sa.UUID(), nullable=False),
         sa.Column(
             "created_at",
@@ -687,262 +640,75 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
             nullable=False,
         ),
-        sa.CheckConstraint("imei_1 ~ '^[0-9]{15}$'", name=op.f("ck_phone_inventory_imei_1_format")),
+        sa.CheckConstraint("cartons >= 0", name=op.f("ck_stock_batches_ck_stock_batches_cartons")),
         sa.CheckConstraint(
-            "imei_2 IS NULL OR imei_2 ~ '^[0-9]{15}$'",
-            name=op.f("ck_phone_inventory_imei_2_format"),
+            "expiry_date IS NULL OR manufacture_date IS NULL OR expiry_date >= manufacture_date",
+            name=op.f("ck_stock_batches_ck_stock_batches_dates"),
         ),
         sa.CheckConstraint(
-            "imei_2 IS NULL OR imei_1 <> imei_2", name=op.f("ck_phone_inventory_imeis_different")
+            "packs_per_carton >= 0", name=op.f("ck_stock_batches_ck_stock_batches_packs")
         ),
         sa.CheckConstraint(
-            "purchase_price >= 0", name=op.f("ck_phone_inventory_purchase_price_nonnegative")
+            "purchase_price >= 0", name=op.f("ck_stock_batches_ck_stock_batches_purchase_price")
         ),
         sa.CheckConstraint(
-            "selling_price >= 0", name=op.f("ck_phone_inventory_selling_price_nonnegative")
+            "quantity_available >= 0 AND quantity_available <= quantity_received",
+            name=op.f("ck_stock_batches_ck_stock_batches_available_valid"),
         ),
         sa.CheckConstraint(
-            "warranty_end IS NULL OR warranty_start IS NULL OR warranty_end >= warranty_start",
-            name=op.f("ck_phone_inventory_warranty_dates_valid"),
+            "quantity_received > 0",
+            name=op.f("ck_stock_batches_ck_stock_batches_received_positive"),
+        ),
+        sa.CheckConstraint(
+            "selling_price >= 0", name=op.f("ck_stock_batches_ck_stock_batches_selling_price")
         ),
         sa.ForeignKeyConstraint(
             ["product_id"],
             ["products.id"],
-            name=op.f("fk_phone_inventory_product_id_products"),
+            name=op.f("fk_stock_batches_product_id_products"),
             ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
             ["purchase_id"],
             ["purchases.id"],
-            name=op.f("fk_phone_inventory_purchase_id_purchases"),
+            name=op.f("fk_stock_batches_purchase_id_purchases"),
             ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
             ["purchase_item_id"],
             ["purchase_items.id"],
-            name=op.f("fk_phone_inventory_purchase_item_id_purchase_items"),
+            name=op.f("fk_stock_batches_purchase_item_id_purchase_items"),
             ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
             ["supplier_id"],
             ["suppliers.id"],
-            name=op.f("fk_phone_inventory_supplier_id_suppliers"),
+            name=op.f("fk_stock_batches_supplier_id_suppliers"),
             ondelete="RESTRICT",
         ),
-        sa.PrimaryKeyConstraint("id", name=op.f("pk_phone_inventory")),
-        sa.UniqueConstraint("imei_1", name=op.f("uq_phone_inventory_imei_1")),
-        sa.UniqueConstraint("imei_2", name=op.f("uq_phone_inventory_imei_2")),
-        sa.UniqueConstraint("serial_number", name=op.f("uq_phone_inventory_serial_number")),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_stock_batches")),
+        sa.UniqueConstraint("product_id", "batch_number", name="uq_stock_batches_product_batch"),
     )
-    op.create_index("ix_phone_inventory_created", "phone_inventory", ["created_at"], unique=False)
     op.create_index(
-        "ix_phone_inventory_product_status",
-        "phone_inventory",
-        ["product_id", "status"],
+        "ix_stock_batches_available", "stock_batches", ["quantity_available"], unique=False
+    )
+    op.create_index(
+        "ix_stock_batches_product_expiry",
+        "stock_batches",
+        ["product_id", "expiry_date"],
         unique=False,
     )
-    op.create_index(op.f("ix_phone_inventory_status"), "phone_inventory", ["status"], unique=False)
-    op.create_index("ix_phone_inventory_supplier", "phone_inventory", ["supplier_id"], unique=False)
-    op.create_table(
-        "phone_imeis",
-        sa.Column("imei", sa.String(length=15), nullable=False),
-        sa.Column("phone_id", sa.UUID(), nullable=False),
-        sa.Column("slot", sa.SmallInteger(), nullable=False),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.CheckConstraint("slot IN (1, 2)", name=op.f("ck_phone_imeis_valid_slot")),
-        sa.ForeignKeyConstraint(
-            ["phone_id"],
-            ["phone_inventory.id"],
-            name=op.f("fk_phone_imeis_phone_id_phone_inventory"),
-            ondelete="RESTRICT",
-        ),
-        sa.PrimaryKeyConstraint("imei", name=op.f("pk_phone_imeis")),
-        sa.UniqueConstraint("phone_id", "slot", name="uq_phone_imei_slot"),
-    )
-    op.create_index(op.f("ix_phone_imeis_phone_id"), "phone_imeis", ["phone_id"], unique=False)
-    op.create_table(
-        "damage_records",
-        sa.Column("damage_number", sa.String(length=40), nullable=False),
-        sa.Column("phone_id", sa.UUID(), nullable=False),
-        sa.Column("imei", sa.String(length=15), nullable=False),
-        sa.Column(
-            "damage_type",
-            sa.Enum(
-                "SCREEN",
-                "BODY",
-                "CAMERA",
-                "BATTERY",
-                "WATER",
-                "SOFTWARE",
-                "MOTHERBOARD",
-                "OTHER",
-                name="damage_type",
-            ),
-            nullable=False,
-        ),
-        sa.Column("description", sa.Text(), nullable=False),
-        sa.Column(
-            "estimated_loss",
-            sa.Numeric(precision=16, scale=2),
-            server_default="0.00",
-            nullable=False,
-        ),
-        sa.Column(
-            "repair_cost", sa.Numeric(precision=16, scale=2), server_default="0.00", nullable=False
-        ),
-        sa.Column("reported_by", sa.UUID(), nullable=False),
-        sa.Column("damage_date", sa.DateTime(timezone=True), nullable=False),
-        sa.Column(
-            "status",
-            sa.Enum(
-                "REPORTED",
-                "UNDER_REPAIR",
-                "REPAIRED",
-                "WRITTEN_OFF",
-                "RESOLVED",
-                name="damage_status",
-            ),
-            nullable=False,
-        ),
-        sa.Column("resolution", sa.Text(), nullable=True),
-        sa.Column("notes", sa.Text(), nullable=True),
-        sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.CheckConstraint(
-            "estimated_loss >= 0", name=op.f("ck_damage_records_estimated_loss_nonnegative")
-        ),
-        sa.CheckConstraint(
-            "repair_cost >= 0", name=op.f("ck_damage_records_repair_cost_nonnegative")
-        ),
-        sa.ForeignKeyConstraint(
-            ["phone_id"],
-            ["phone_inventory.id"],
-            name=op.f("fk_damage_records_phone_id_phone_inventory"),
-            ondelete="RESTRICT",
-        ),
-        sa.ForeignKeyConstraint(
-            ["reported_by"],
-            ["users.id"],
-            name=op.f("fk_damage_records_reported_by_users"),
-            ondelete="RESTRICT",
-        ),
-        sa.PrimaryKeyConstraint("id", name=op.f("pk_damage_records")),
-        sa.UniqueConstraint("damage_number", name=op.f("uq_damage_records_damage_number")),
-    )
-    op.create_index("ix_damage_records_date", "damage_records", ["damage_date"], unique=False)
-    op.create_index(op.f("ix_damage_records_imei"), "damage_records", ["imei"], unique=False)
-    op.create_index(
-        "ix_damage_records_phone_status", "damage_records", ["phone_id", "status"], unique=False
-    )
-    op.create_table(
-        "inventory_transactions",
-        sa.Column("phone_id", sa.UUID(), nullable=False),
-        sa.Column(
-            "transaction_type",
-            sa.Enum(
-                "PURCHASE",
-                "SALE",
-                "RETURN",
-                "DAMAGE",
-                "REPAIR",
-                "ADJUSTMENT",
-                "TRANSFER",
-                name="inventory_transaction_type",
-            ),
-            nullable=False,
-        ),
-        sa.Column("quantity", sa.Integer(), nullable=False),
-        sa.Column("reference_id", sa.UUID(), nullable=False),
-        sa.Column("reference_type", sa.String(length=50), nullable=False),
-        sa.Column(
-            "previous_status",
-            sa.Enum(
-                "IN_STOCK",
-                "RESERVED",
-                "SOLD",
-                "RETURNED",
-                "DAMAGED",
-                "SENT_FOR_REPAIR",
-                "REPAIRED",
-                "LOST",
-                "CANCELLED",
-                name="phone_status",
-            ),
-            nullable=True,
-        ),
-        sa.Column(
-            "new_status",
-            sa.Enum(
-                "IN_STOCK",
-                "RESERVED",
-                "SOLD",
-                "RETURNED",
-                "DAMAGED",
-                "SENT_FOR_REPAIR",
-                "REPAIRED",
-                "LOST",
-                "CANCELLED",
-                name="phone_status",
-            ),
-            nullable=False,
-        ),
-        sa.Column("performed_by", sa.UUID(), nullable=False),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.text("now()"),
-            nullable=False,
-        ),
-        sa.Column("notes", sa.Text(), nullable=True),
-        sa.Column("id", sa.UUID(), nullable=False),
-        sa.ForeignKeyConstraint(
-            ["performed_by"],
-            ["users.id"],
-            name=op.f("fk_inventory_transactions_performed_by_users"),
-            ondelete="RESTRICT",
-        ),
-        sa.ForeignKeyConstraint(
-            ["phone_id"],
-            ["phone_inventory.id"],
-            name=op.f("fk_inventory_transactions_phone_id_phone_inventory"),
-            ondelete="RESTRICT",
-        ),
-        sa.PrimaryKeyConstraint("id", name=op.f("pk_inventory_transactions")),
-    )
-    op.create_index(
-        "ix_inventory_transactions_phone_created",
-        "inventory_transactions",
-        ["phone_id", "created_at"],
-        unique=False,
-    )
-    op.create_index(
-        "ix_inventory_transactions_reference",
-        "inventory_transactions",
-        ["reference_type", "reference_id"],
-        unique=False,
-    )
+    op.create_index("ix_stock_batches_supplier", "stock_batches", ["supplier_id"], unique=False)
     op.create_table(
         "sale_items",
         sa.Column("sale_id", sa.UUID(), nullable=False),
-        sa.Column("phone_id", sa.UUID(), nullable=False),
+        sa.Column("stock_batch_id", sa.UUID(), nullable=False),
         sa.Column("product_id", sa.UUID(), nullable=False),
-        sa.Column("imei", sa.String(length=15), nullable=False),
+        sa.Column("batch_number", sa.String(length=100), nullable=False),
+        sa.Column("quantity", sa.Integer(), nullable=False),
+        sa.Column(
+            "unit_price", sa.Numeric(precision=16, scale=2), server_default="0.00", nullable=False
+        ),
         sa.Column(
             "price", sa.Numeric(precision=16, scale=2), server_default="0.00", nullable=False
         ),
@@ -975,18 +741,16 @@ def upgrade() -> None:
             nullable=False,
         ),
         sa.CheckConstraint(
-            "discount >= 0 AND discount <= price", name=op.f("ck_sale_items_discount_within_price")
+            "discount >= 0 AND discount <= price", name=op.f("ck_sale_items_ck_sale_items_discount")
         ),
-        sa.CheckConstraint("price >= 0", name=op.f("ck_sale_items_price_nonnegative")),
         sa.CheckConstraint(
-            "total = price - discount", name=op.f("ck_sale_items_total_matches_components")
+            "price = unit_price * quantity", name=op.f("ck_sale_items_ck_sale_items_gross")
         ),
-        sa.ForeignKeyConstraint(
-            ["phone_id"],
-            ["phone_inventory.id"],
-            name=op.f("fk_sale_items_phone_id_phone_inventory"),
-            ondelete="RESTRICT",
+        sa.CheckConstraint("quantity > 0", name=op.f("ck_sale_items_ck_sale_items_quantity")),
+        sa.CheckConstraint(
+            "total = price - discount", name=op.f("ck_sale_items_ck_sale_items_total")
         ),
+        sa.CheckConstraint("unit_price >= 0", name=op.f("ck_sale_items_ck_sale_items_unit_price")),
         sa.ForeignKeyConstraint(
             ["product_id"],
             ["products.id"],
@@ -996,138 +760,116 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["sale_id"], ["sales.id"], name=op.f("fk_sale_items_sale_id_sales"), ondelete="RESTRICT"
         ),
+        sa.ForeignKeyConstraint(
+            ["stock_batch_id"],
+            ["stock_batches.id"],
+            name=op.f("fk_sale_items_stock_batch_id_stock_batches"),
+            ondelete="RESTRICT",
+        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_sale_items")),
-        sa.UniqueConstraint("sale_id", "phone_id", name="uq_sale_phone"),
+        sa.UniqueConstraint("sale_id", "stock_batch_id", name="uq_sale_items_batch"),
     )
-    op.create_index("ix_sale_items_phone", "sale_items", ["phone_id"], unique=False)
+    op.create_index("ix_sale_items_product", "sale_items", ["product_id"], unique=False)
+    op.create_index("ix_sale_items_stock_batch", "sale_items", ["stock_batch_id"], unique=False)
     op.create_table(
-        "return_items",
-        sa.Column("return_id", sa.UUID(), nullable=False),
-        sa.Column("sale_item_id", sa.UUID(), nullable=False),
+        "stock_movements",
+        sa.Column("batch_id", sa.UUID(), nullable=False),
         sa.Column(
-            "refund_amount",
-            sa.Numeric(precision=16, scale=2),
-            server_default="0.00",
+            "transaction_type",
+            sa.Enum(
+                "PURCHASE", "SALE", "ADJUSTMENT", "TRANSFER", name="inventory_transaction_type"
+            ),
             nullable=False,
         ),
+        sa.Column("quantity_change", sa.Integer(), nullable=False),
+        sa.Column("balance_after", sa.Integer(), nullable=False),
+        sa.Column("reference_id", sa.UUID(), nullable=False),
+        sa.Column("reference_type", sa.String(length=50), nullable=False),
+        sa.Column("performed_by", sa.UUID(), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column("notes", sa.Text(), nullable=True),
         sa.Column("id", sa.UUID(), nullable=False),
-        sa.CheckConstraint("refund_amount >= 0", name=op.f("ck_return_items_refund_nonnegative")),
+        sa.CheckConstraint(
+            "balance_after >= 0", name=op.f("ck_stock_movements_ck_stock_movements_balance")
+        ),
+        sa.CheckConstraint(
+            "quantity_change <> 0", name=op.f("ck_stock_movements_ck_stock_movements_nonzero")
+        ),
         sa.ForeignKeyConstraint(
-            ["return_id"],
-            ["sale_returns.id"],
-            name=op.f("fk_return_items_return_id_sale_returns"),
+            ["batch_id"],
+            ["stock_batches.id"],
+            name=op.f("fk_stock_movements_batch_id_stock_batches"),
             ondelete="RESTRICT",
         ),
         sa.ForeignKeyConstraint(
-            ["sale_item_id"],
-            ["sale_items.id"],
-            name=op.f("fk_return_items_sale_item_id_sale_items"),
+            ["performed_by"],
+            ["users.id"],
+            name=op.f("fk_stock_movements_performed_by_users"),
             ondelete="RESTRICT",
         ),
-        sa.PrimaryKeyConstraint("id", name=op.f("pk_return_items")),
-        sa.UniqueConstraint("sale_item_id", name="uq_returned_sale_item"),
+        sa.PrimaryKeyConstraint("id", name=op.f("pk_stock_movements")),
+    )
+    op.create_index(
+        "ix_stock_movements_batch_created",
+        "stock_movements",
+        ["batch_id", "created_at"],
+        unique=False,
+    )
+    op.create_index(
+        "ix_stock_movements_reference",
+        "stock_movements",
+        ["reference_type", "reference_id"],
+        unique=False,
     )
     op.execute(
         """
-        CREATE FUNCTION sync_phone_imeis() RETURNS trigger AS $$
+        CREATE FUNCTION reject_immutable_row_change() RETURNS trigger AS $$
         BEGIN
-            DELETE FROM phone_imeis WHERE phone_id = NEW.id;
-            INSERT INTO phone_imeis (imei, phone_id, slot)
-            VALUES (NEW.imei_1, NEW.id, 1);
-            IF NEW.imei_2 IS NOT NULL THEN
-                INSERT INTO phone_imeis (imei, phone_id, slot)
-                VALUES (NEW.imei_2, NEW.id, 2);
-            END IF;
-            RETURN NEW;
+            RAISE EXCEPTION '% rows are immutable', TG_TABLE_NAME;
         END;
         $$ LANGUAGE plpgsql;
+
+        CREATE TRIGGER audit_logs_immutable
+        BEFORE UPDATE OR DELETE ON audit_logs
+        FOR EACH ROW EXECUTE FUNCTION reject_immutable_row_change();
+
+        CREATE TRIGGER payments_immutable
+        BEFORE UPDATE OR DELETE ON payments
+        FOR EACH ROW EXECUTE FUNCTION reject_immutable_row_change();
+
+        CREATE TRIGGER stock_movements_immutable
+        BEFORE UPDATE OR DELETE ON stock_movements
+        FOR EACH ROW EXECUTE FUNCTION reject_immutable_row_change();
         """
     )
-    op.execute(
-        """
-        CREATE TRIGGER trg_sync_phone_imeis
-        AFTER INSERT OR UPDATE OF imei_1, imei_2 ON phone_inventory
-        FOR EACH ROW EXECUTE FUNCTION sync_phone_imeis();
-        """
-    )
-    op.execute(
-        """
-        CREATE FUNCTION reject_immutable_change() RETURNS trigger AS $$
-        BEGIN
-            RAISE EXCEPTION '% is append-only; % is not allowed', TG_TABLE_NAME, TG_OP
-                USING ERRCODE = 'integrity_constraint_violation';
-        END;
-        $$ LANGUAGE plpgsql;
-        """
-    )
-    for table_name in (
-        "audit_logs",
-        "inventory_transactions",
-        "payments",
-        "purchase_items",
-        "return_items",
-        "sale_items",
-    ):
-        op.execute(
-            f"CREATE TRIGGER trg_{table_name}_immutable "
-            f"BEFORE UPDATE OR DELETE ON {table_name} "
-            "FOR EACH ROW EXECUTE FUNCTION reject_immutable_change();"
-        )
-    op.execute(
-        """
-        CREATE FUNCTION reject_hard_delete() RETURNS trigger AS $$
-        BEGIN
-            RAISE EXCEPTION '% is a retained business record; DELETE is not allowed', TG_TABLE_NAME
-                USING ERRCODE = 'integrity_constraint_violation';
-        END;
-        $$ LANGUAGE plpgsql;
-        """
-    )
-    for table_name in (
-        "damage_records",
-        "phone_inventory",
-        "purchases",
-        "sale_returns",
-        "sales",
-    ):
-        op.execute(
-            f"CREATE TRIGGER trg_{table_name}_no_delete BEFORE DELETE ON {table_name} "
-            "FOR EACH ROW EXECUTE FUNCTION reject_hard_delete();"
-        )
     # ### end Alembic commands ###
 
 
 def downgrade() -> None:
     # ### commands auto generated by Alembic - please adjust! ###
-    op.execute("DROP FUNCTION reject_hard_delete() CASCADE")
-    op.execute("DROP FUNCTION reject_immutable_change() CASCADE")
-    op.execute("DROP FUNCTION sync_phone_imeis() CASCADE")
-    op.drop_table("return_items")
-    op.drop_index("ix_sale_items_phone", table_name="sale_items")
+    op.execute("DROP FUNCTION reject_immutable_row_change() CASCADE")
+    op.drop_index("ix_stock_movements_reference", table_name="stock_movements")
+    op.drop_index("ix_stock_movements_batch_created", table_name="stock_movements")
+    op.drop_table("stock_movements")
+    op.drop_index("ix_sale_items_stock_batch", table_name="sale_items")
+    op.drop_index("ix_sale_items_product", table_name="sale_items")
     op.drop_table("sale_items")
-    op.drop_index("ix_inventory_transactions_reference", table_name="inventory_transactions")
-    op.drop_index("ix_inventory_transactions_phone_created", table_name="inventory_transactions")
-    op.drop_table("inventory_transactions")
-    op.drop_index("ix_damage_records_phone_status", table_name="damage_records")
-    op.drop_index(op.f("ix_damage_records_imei"), table_name="damage_records")
-    op.drop_index("ix_damage_records_date", table_name="damage_records")
-    op.drop_table("damage_records")
-    op.drop_index(op.f("ix_phone_imeis_phone_id"), table_name="phone_imeis")
-    op.drop_table("phone_imeis")
-    op.drop_index("ix_phone_inventory_supplier", table_name="phone_inventory")
-    op.drop_index(op.f("ix_phone_inventory_status"), table_name="phone_inventory")
-    op.drop_index("ix_phone_inventory_product_status", table_name="phone_inventory")
-    op.drop_index("ix_phone_inventory_created", table_name="phone_inventory")
-    op.drop_table("phone_inventory")
+    op.drop_index("ix_stock_batches_supplier", table_name="stock_batches")
+    op.drop_index("ix_stock_batches_product_expiry", table_name="stock_batches")
+    op.drop_index("ix_stock_batches_available", table_name="stock_batches")
+    op.drop_table("stock_batches")
+    op.drop_index("ix_purchase_items_purchase", table_name="purchase_items")
+    op.drop_table("purchase_items")
     op.drop_index("ix_payments_sale", table_name="payments")
     op.drop_index("ix_payments_purchase", table_name="payments")
     op.drop_index("ix_payments_created", table_name="payments")
     op.drop_table("payments")
-    op.drop_index("ix_sale_returns_sale", table_name="sale_returns")
-    op.drop_index("ix_sale_returns_date", table_name="sale_returns")
-    op.drop_table("sale_returns")
-    op.drop_index("ix_purchase_items_purchase", table_name="purchase_items")
-    op.drop_table("purchase_items")
+    op.drop_index("ix_sales_dealer_date", table_name="sales")
     op.drop_index("ix_sales_date", table_name="sales")
     op.drop_index("ix_sales_customer_date", table_name="sales")
     op.drop_index("ix_sales_created_by_date", table_name="sales")
@@ -1144,13 +886,17 @@ def downgrade() -> None:
     op.drop_index("ix_suppliers_phone", table_name="suppliers")
     op.drop_index("ix_suppliers_name", table_name="suppliers")
     op.drop_table("suppliers")
-    op.drop_index("ix_products_brand_model", table_name="products")
+    op.drop_index("ix_products_manufacturer_name", table_name="products")
     op.drop_table("products")
     op.drop_index("ix_email_history_status_created", table_name="email_history")
     op.drop_index(op.f("ix_email_history_status"), table_name="email_history")
     op.drop_index("ix_email_history_entity", table_name="email_history")
     op.drop_table("email_history")
     op.drop_table("document_sequences")
+    op.drop_index("ix_dealers_territory", table_name="dealers")
+    op.drop_index("ix_dealers_phone", table_name="dealers")
+    op.drop_index("ix_dealers_name", table_name="dealers")
+    op.drop_table("dealers")
     op.drop_index("ix_customers_phone", table_name="customers")
     op.drop_index("ix_customers_name", table_name="customers")
     op.drop_table("customers")

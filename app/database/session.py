@@ -21,7 +21,7 @@ def create_database_engine(settings: Settings | None = None) -> Engine:
         pool_size=config.database_pool_size,
         max_overflow=config.database_max_overflow,
         pool_recycle=1800,
-        connect_args={"connect_timeout": 10, "application_name": "mobile_shop_desktop"},
+        connect_args={"connect_timeout": 10, "application_name": "pesticide_shop_desktop"},
     )
 
 

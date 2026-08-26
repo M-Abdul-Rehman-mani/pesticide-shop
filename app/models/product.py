@@ -1,4 +1,4 @@
-"""Mobile product/model catalog."""
+"""Pesticide and crop-care product catalog."""
 
 from decimal import Decimal
 
@@ -12,22 +12,33 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "products"
     __table_args__ = (
         UniqueConstraint(
-            "brand", "model", "variant", "storage", "ram", "color", name="uq_product_variant"
+            "manufacturer", "name", "formulation", "pack_size", name="uq_product_variant"
         ),
         CheckConstraint("minimum_stock >= 0", name="minimum_stock_nonnegative"),
         CheckConstraint("default_purchase_price >= 0", name="purchase_price_nonnegative"),
         CheckConstraint("default_sale_price >= 0", name="sale_price_nonnegative"),
-        Index("ix_products_brand_model", "brand", "model"),
+        Index("ix_products_manufacturer_name", "manufacturer", "name"),
     )
 
-    brand: Mapped[str] = mapped_column(String(100), nullable=False)
-    model: Mapped[str] = mapped_column(String(140), nullable=False)
-    variant: Mapped[str] = mapped_column(String(100), nullable=False, default="", server_default="")
-    storage: Mapped[str] = mapped_column(String(50), nullable=False, default="", server_default="")
-    ram: Mapped[str] = mapped_column(String(50), nullable=False, default="", server_default="")
-    color: Mapped[str] = mapped_column(String(80), nullable=False, default="", server_default="")
+    manufacturer: Mapped[str] = mapped_column(String(140), nullable=False)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    active_ingredient: Mapped[str] = mapped_column(
+        String(180), nullable=False, default="", server_default=""
+    )
+    formulation: Mapped[str] = mapped_column(
+        String(100), nullable=False, default="", server_default=""
+    )
+    pack_size: Mapped[str] = mapped_column(
+        String(80), nullable=False, default="", server_default=""
+    )
+    registration_number: Mapped[str] = mapped_column(
+        String(100), nullable=False, default="", server_default=""
+    )
+    unit: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="PACK", server_default="PACK"
+    )
     category: Mapped[str] = mapped_column(
-        String(80), nullable=False, default="PHONE", server_default="PHONE"
+        String(80), nullable=False, default="PESTICIDE", server_default="PESTICIDE"
     )
     description: Mapped[str | None] = mapped_column(Text)
     default_purchase_price: Mapped[Decimal] = money_column()
@@ -41,6 +52,8 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     @property
     def display_name(self) -> str:
-        return " ".join(
-            filter(None, (self.brand, self.model, self.variant, self.storage, self.color))
-        )
+        return " ".join(filter(None, (self.name, self.formulation, self.pack_size)))
+
+    @property
+    def product_name(self) -> str:
+        return self.name

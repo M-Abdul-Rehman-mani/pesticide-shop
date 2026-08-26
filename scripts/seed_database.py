@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 
 from sqlalchemy import func, select
@@ -9,20 +10,21 @@ from sqlalchemy import func, select
 from app.config.settings import get_settings
 from app.database.session import SessionFactory
 from app.models.customer import Customer
+from app.models.dealer import Dealer
 from app.models.enums import PaymentMethod, UserRole
 from app.models.product import Product
 from app.models.supplier import Supplier
 from app.models.user import User
 from app.security.authentication import AuthenticatedUser
 from app.services.dto import (
-    CreatePurchaseCommand,
-    CreateSaleCommand,
+    CreatePesticideSaleCommand,
+    CreateStockPurchaseCommand,
     PaymentInput,
-    PurchasedPhoneInput,
-    SaleLineInput,
+    PesticideSaleLineInput,
+    PurchasedBatchInput,
 )
-from app.services.purchase_service import PurchaseService
-from app.services.sale_service import SaleService
+from app.services.pesticide_sale_service import PesticideSaleService
+from app.services.stock_purchase_service import StockPurchaseService
 from app.utils.security import hash_password
 
 
@@ -90,91 +92,127 @@ def main() -> int:
             email="customer@example.invalid",
             address="Fictional Customer Address",
         )
+        dealer = Dealer(
+            name="Hanan",
+            business_name="Hanan Spray Center",
+            phone="0307-6558192",
+            email="dealer@example.invalid",
+            address="Baba Market 90/F, Tehsil Hasilpur",
+            cnic="31203-1726076-1",
+            territory="HSP",
+            credit_limit=Decimal("100000.00"),
+            balance=Decimal("0.00"),
+            is_active=True,
+        )
         products = (
             Product(
-                brand="Apple",
-                model="iPhone 15",
-                variant="Standard",
-                storage="128GB",
-                ram="6GB",
-                color="Black",
-                category="PHONE",
-                default_purchase_price=Decimal("210000.00"),
-                default_sale_price=Decimal("230000.00"),
-                minimum_stock=2,
+                manufacturer="Avenex Crop Sciences",
+                name="Gazonner",
+                active_ingredient="Quizalofop-P-Ethyl",
+                formulation="15% EC",
+                pack_size="500-ML",
+                unit="PACK",
+                category="HERBICIDE",
+                default_purchase_price=Decimal("920.00"),
+                default_sale_price=Decimal("1050.00"),
+                minimum_stock=10,
                 is_active=True,
             ),
             Product(
-                brand="Samsung",
-                model="Galaxy S24",
-                variant="Standard",
-                storage="256GB",
-                ram="8GB",
-                color="Gray",
-                category="PHONE",
-                default_purchase_price=Decimal("190000.00"),
-                default_sale_price=Decimal("215000.00"),
-                minimum_stock=2,
+                manufacturer="Demo Agro Chemicals",
+                name="Crop Shield",
+                active_ingredient="Chlorantraniliprole",
+                formulation="20% SC",
+                pack_size="1-L",
+                unit="BOTTLE",
+                category="INSECTICIDE",
+                default_purchase_price=Decimal("1800.00"),
+                default_sale_price=Decimal("2100.00"),
+                minimum_stock=8,
                 is_active=True,
             ),
             Product(
-                brand="Xiaomi",
-                model="Redmi Note 13",
-                variant="Standard",
-                storage="128GB",
-                ram="8GB",
-                color="Blue",
-                category="PHONE",
-                default_purchase_price=Decimal("52000.00"),
-                default_sale_price=Decimal("59000.00"),
-                minimum_stock=3,
+                manufacturer="Demo Crop Care",
+                name="Fungi Stop",
+                active_ingredient="Mancozeb",
+                formulation="80% WP",
+                pack_size="250-G",
+                unit="PACK",
+                category="FUNGICIDE",
+                default_purchase_price=Decimal("540.00"),
+                default_sale_price=Decimal("650.00"),
+                minimum_stock=12,
                 is_active=True,
             ),
         )
-        session.add_all((supplier, customer, *products))
+        session.add_all((supplier, customer, dealer, *products))
         session.flush()
-        purchase = PurchaseService(session).create(
-            CreatePurchaseCommand(
+        purchase = StockPurchaseService(session).create(
+            CreateStockPurchaseCommand(
                 supplier_id=supplier.id,
-                phones=(
-                    PurchasedPhoneInput(
+                batches=(
+                    PurchasedBatchInput(
                         product_id=products[0].id,
-                        imei_1="356123456789012",
-                        imei_2="356123456789013",
-                        purchase_price=Decimal("210000.00"),
-                        selling_price=Decimal("230000.00"),
+                        batch_number="AGX-GZNR-2603",
+                        quantity=40,
+                        cartons=2,
+                        packs_per_carton=20,
+                        manufacture_date=date(2026, 3, 1),
+                        expiry_date=date(2028, 2, 29),
+                        purchase_price=Decimal("920.00"),
+                        selling_price=Decimal("1050.00"),
                     ),
-                    PurchasedPhoneInput(
+                    PurchasedBatchInput(
                         product_id=products[1].id,
-                        imei_1="356123456789014",
-                        imei_2="356123456789015",
-                        purchase_price=Decimal("190000.00"),
-                        selling_price=Decimal("215000.00"),
+                        batch_number="CSC-2607",
+                        quantity=24,
+                        cartons=2,
+                        packs_per_carton=12,
+                        manufacture_date=date(2026, 7, 1),
+                        expiry_date=date(2028, 6, 30),
+                        purchase_price=Decimal("1800.00"),
+                        selling_price=Decimal("2100.00"),
                     ),
-                    PurchasedPhoneInput(
+                    PurchasedBatchInput(
                         product_id=products[2].id,
-                        imei_1="356123456789016",
-                        imei_2="356123456789017",
-                        purchase_price=Decimal("52000.00"),
-                        selling_price=Decimal("59000.00"),
+                        batch_number="FSWP-2605",
+                        quantity=60,
+                        cartons=3,
+                        packs_per_carton=20,
+                        manufacture_date=date(2026, 5, 1),
+                        expiry_date=date(2028, 4, 30),
+                        purchase_price=Decimal("540.00"),
+                        selling_price=Decimal("650.00"),
                     ),
                 ),
-                payments=(PaymentInput(PaymentMethod.BANK_TRANSFER, Decimal("452000.00")),),
+                payments=(PaymentInput(PaymentMethod.BANK_TRANSFER, Decimal("100000.00")),),
             ),
             owner,
         )
-        SaleService(session).create(
-            CreateSaleCommand(
-                customer_id=customer.id,
-                lines=(SaleLineInput("356123456789016"),),
-                payments=(PaymentInput(PaymentMethod.CASH, Decimal("59000.00")),),
+        from app.models.inventory import StockBatch
+
+        stock = session.scalar(
+            select(StockBatch)
+            .where(StockBatch.purchase_id == purchase.id)
+            .order_by(StockBatch.created_at)
+        )
+        assert stock is not None
+        PesticideSaleService(session).create(
+            CreatePesticideSaleCommand(
+                dealer_id=dealer.id,
+                lines=(PesticideSaleLineInput(stock.id, 5),),
+                payments=(PaymentInput(PaymentMethod.CASH, Decimal("5000.00")),),
+                order_number="0421",
+                territory="HSP",
+                policy="NET SALE",
+                store="FINISHED",
             ),
             owner,
             owner_email=None,
         )
         print(
-            f"Seeded {purchase.purchase_number}, four demo roles, three products, "
-            "three serialized phones, and one sale."
+            f"Seeded {purchase.purchase_number}, four demo roles, three pesticide products, "
+            "three stock batches, one dealer, one customer, and one sale."
         )
         print("DEVELOPMENT ONLY: admin / admin (password change required on first login)")
     return 0

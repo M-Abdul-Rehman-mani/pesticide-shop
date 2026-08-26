@@ -47,7 +47,7 @@ executable = EXE(
     analysis.binaries,
     analysis.datas,
     [],
-    name="MobileShopManager",
+    name="PesticideShopManager",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
