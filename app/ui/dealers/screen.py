@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import cast
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -29,7 +30,7 @@ from app.models.sale import Sale
 from app.security.authentication import AuthenticatedUser
 from app.services.catalog_service import DealerService
 from app.ui.forms import MoneyEdit
-from app.ui.widgets import RowsTableModel, show_error
+from app.ui.widgets import RowsTableModel, populate_row_actions, show_error, show_record_details
 from app.ui.workers import FunctionWorker, start_worker
 from app.utils.formatting import format_date
 
@@ -135,7 +136,16 @@ class DealersScreen(QWidget):
         header.addWidget(edit)
         header.addWidget(add)
         self.model = RowsTableModel(
-            ("Dealer", "Contact", "Phone", "Email", "Territory", "Balance", "Credit Limit"),
+            (
+                "Dealer",
+                "Contact",
+                "Phone",
+                "Email",
+                "Territory",
+                "Balance",
+                "Credit Limit",
+                "Actions",
+            ),
             self,
         )
         self.table = QTableView()
@@ -149,6 +159,11 @@ class DealersScreen(QWidget):
         edit.clicked.connect(self._edit)
         history.clicked.connect(self._history)
         self.search.returnPressed.connect(self.refresh)
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(300)
+        self._search_timer.timeout.connect(self.refresh)
+        self.search.textChanged.connect(lambda _text: self._search_timer.start())
         self.refresh()
 
     def refresh(self) -> None:
@@ -156,7 +171,7 @@ class DealersScreen(QWidget):
 
         def operation() -> tuple[list[tuple[object, ...]], list[uuid.UUID], list[DealerFormData]]:
             with self._session_factory() as session:
-                statement = select(Dealer)
+                statement = select(Dealer).where(Dealer.is_active.is_(True))
                 if query:
                     pattern = f"%{query}%"
                     statement = statement.where(
@@ -164,6 +179,9 @@ class DealersScreen(QWidget):
                             Dealer.name.ilike(pattern),
                             Dealer.business_name.ilike(pattern),
                             Dealer.phone.ilike(pattern),
+                            Dealer.email.ilike(pattern),
+                            Dealer.address.ilike(pattern),
+                            Dealer.tax_number.ilike(pattern),
                             Dealer.territory.ilike(pattern),
                         )
                     )
@@ -178,6 +196,7 @@ class DealersScreen(QWidget):
                             dealer.territory or "—",
                             f"{self._currency} {dealer.balance:,.2f}",
                             f"{self._currency} {dealer.credit_limit:,.2f}",
+                            "",
                         )
                         for dealer in dealers
                     ],
@@ -208,6 +227,12 @@ class DealersScreen(QWidget):
             tuple[list[tuple[object, ...]], list[uuid.UUID], list[DealerFormData]], result
         )
         self.model.set_rows(rows)
+        populate_row_actions(
+            self.table,
+            7,
+            len(rows),
+            (("View", self._view), ("Edit", self._edit_row), ("Delete", self._delete)),
+        )
 
     def _selected(self) -> int | None:
         rows = self.table.selectionModel().selectedRows()
@@ -226,6 +251,58 @@ class DealersScreen(QWidget):
         dialog = DealerDialog(self._data[row], self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._save(self._ids[row], dialog.values())
+
+    def _edit_row(self, row: int) -> None:
+        if row >= len(self._data):
+            return
+        dialog = DealerDialog(self._data[row], self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._save(self._ids[row], dialog.values())
+
+    def _view(self, row: int) -> None:
+        if row >= len(self._data):
+            return
+        data = self._data[row]
+        show_record_details(
+            self,
+            data.business_name or data.name,
+            (
+                ("Contact", data.name),
+                ("Phone", data.phone),
+                ("Email", data.email),
+                ("Address", data.address),
+                ("CNIC", data.cnic),
+                ("Tax number", data.tax_number),
+                ("Territory", data.territory),
+                ("Credit limit", f"{self._currency} {data.credit_limit:,.2f}"),
+                ("Notes", data.notes),
+            ),
+        )
+
+    def _delete(self, row: int) -> None:
+        if row >= len(self._ids):
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "Delete dealer",
+                "Remove this dealer from active lists? Existing sales history is preserved.",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+
+        def operation() -> None:
+            with self._session_factory.begin() as session:
+                DealerService(session).set_active(
+                    self._ids[row], actor=self._actor, is_active=False
+                )
+
+        self._worker = start_worker(
+            operation,
+            succeeded=lambda _result: self.refresh(),
+            failed=lambda error: show_error(self, error),
+        )
 
     def _save(self, dealer_id: uuid.UUID | None, data: DealerFormData) -> None:
         def operation() -> None:

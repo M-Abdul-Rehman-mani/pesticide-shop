@@ -67,7 +67,6 @@ class InventoryScreen(QWidget):
         self.search.setPlaceholderText("Product, batch, ingredient, supplier")
         self.search.setProperty("search", True)
         self.search.setClearButtonEnabled(True)
-        self.search.setMinimumWidth(290)
         self.filter = QComboBox()
         self.filter.addItems(
             ("All", "In Stock", "Low Stock", "Expiring in 90 Days", "Expired", "Out of Stock")

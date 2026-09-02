@@ -10,9 +10,12 @@ from decimal import Decimal
 from pathlib import Path
 from typing import cast
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import (
+    QBoxLayout,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -22,12 +25,14 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QTableView,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from app.config.settings import Settings
@@ -36,18 +41,29 @@ from app.models.dealer import Dealer
 from app.models.enums import PaymentDirection, SettingCategory
 from app.models.inventory import StockBatch
 from app.models.payment import Payment
-from app.models.sale import Sale
+from app.models.product import Product
+from app.models.sale import Sale, SaleItem
 from app.printing.printer_service import PrinterService
 from app.printing.receipt_generator import ReceiptGenerator, SaleReceiptData
 from app.printing.shop_profile import load_shop_profile
 from app.security.authentication import AuthenticatedUser
+from app.services.catalog_service import CustomerService
 from app.services.dto import CreatePesticideSaleCommand, PesticideSaleLineInput
 from app.services.pesticide_sale_service import PesticideSaleService
 from app.services.settings_service import SettingsService
 from app.ui.forms import MoneyEdit, PaymentEditor
-from app.ui.widgets import PageHeader, configure_table, show_error
+from app.ui.widgets import (
+    PageHeader,
+    RowsTableModel,
+    configure_searchable_combo,
+    configure_table,
+    populate_row_actions,
+    show_error,
+    show_record_details,
+)
 from app.ui.workers import FunctionWorker, start_worker
 from app.utils.exceptions import ConflictError
+from app.utils.formatting import format_date
 
 
 @dataclass(slots=True)
@@ -58,6 +74,44 @@ class CartEntry:
     available: int = 1
     quantity: int = 1
     unit_price: Decimal = Decimal("0.00")
+
+
+class WalkInCustomerDialog(QDialog):
+    """Small counter-sale form; only the customer name is required."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Add walk-in customer")
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.name, self.phone, self.email, self.address = (
+            QLineEdit(),
+            QLineEdit(),
+            QLineEdit(),
+            QLineEdit(),
+        )
+        self.name.setPlaceholderText("Required")
+        self.phone.setPlaceholderText("Optional")
+        self.email.setPlaceholderText("Optional")
+        self.address.setPlaceholderText("Optional")
+        form.addRow("Name *", self.name)
+        form.addRow("Phone", self.phone)
+        form.addRow("Email", self.email)
+        form.addRow("Address", self.address)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._accept_if_valid)
+        buttons.rejected.connect(self.reject)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+
+    def _accept_if_valid(self) -> None:
+        if not self.name.text().strip():
+            QMessageBox.information(self, "Name required", "Enter the walk-in customer's name.")
+            self.name.setFocus()
+            return
+        self.accept()
 
 
 class SalesScreen(QWidget):
@@ -77,24 +131,34 @@ class SalesScreen(QWidget):
         self._customers: list[tuple[uuid.UUID, str, str | None, str | None]] = []
         self._dealers: list[tuple[uuid.UUID, str, str | None, str | None]] = []
         self._last_sale_id: uuid.UUID | None = None
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(26, 24, 26, 20)
-        layout.setSpacing(14)
-        layout.addWidget(
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(26, 24, 26, 20)
+        root_layout.setSpacing(14)
+        root_layout.addWidget(
             PageHeader(
-                "New pesticide sale",
-                "Select a recipient, add stock by batch, and record one or more payments.",
+                "Sales",
+                "Create a sale or search and review previous invoices.",
             )
         )
+        self.tabs = QTabWidget()
+        root_layout.addWidget(self.tabs, 1)
+        sale_page = QWidget()
+        layout = QVBoxLayout(sale_page)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(14)
+        self.tabs.addTab(sale_page, "New Sale")
 
         top = QHBoxLayout()
         recipient_group, recipient_form = QGroupBox("Invoice Recipient"), QFormLayout()
         recipient_group.setLayout(recipient_form)
         self.recipient_type, self.recipient = QComboBox(), QComboBox()
         self.recipient_type.addItems(("Customer", "Dealer"))
-        self.recipient.setMinimumWidth(300)
+        configure_searchable_combo(self.recipient, "Type to find a customer or dealer")
+        add_walk_in = QPushButton("+ Add walk-in customer")
+        add_walk_in.setProperty("secondary", True)
         recipient_form.addRow("Type", self.recipient_type)
         recipient_form.addRow("Name", self.recipient)
+        recipient_form.addRow("", add_walk_in)
         details_group, details_form = QGroupBox("Delivery Details"), QFormLayout()
         details_group.setLayout(details_form)
         self.order_number, self.territory = QLineEdit(), QLineEdit()
@@ -115,12 +179,13 @@ class SalesScreen(QWidget):
             details_form.addRow(field_label, field_widget)
         top.addWidget(recipient_group)
         top.addWidget(details_group, 1)
+        self._top_layout = top
         layout.addLayout(top)
 
         stock_group, stock_layout = QGroupBox("Add Product Batch"), QHBoxLayout()
         stock_group.setLayout(stock_layout)
         self.batch, self.quantity, self.unit_price = QComboBox(), QSpinBox(), MoneyEdit()
-        self.batch.setMinimumWidth(440)
+        configure_searchable_combo(self.batch, "Type a product or batch number")
         self.quantity.setRange(1, 1_000_000)
         add = QPushButton("+  Add batch")
         add.setToolTip("Add this batch and quantity to the invoice")
@@ -166,6 +231,7 @@ class SalesScreen(QWidget):
             totals_form.addRow(total_label, total_widget)
         bottom.addWidget(payment_group, 2)
         bottom.addWidget(totals_group, 1)
+        self._bottom_layout = bottom
         layout.addLayout(bottom)
         actions = QHBoxLayout()
         self.save_pdf, self.preview = QPushButton("Save PDF"), QPushButton("Print Preview")
@@ -191,8 +257,20 @@ class SalesScreen(QWidget):
         self.complete.clicked.connect(self.save)
         self.save_pdf.clicked.connect(self._save_last_pdf)
         self.preview.clicked.connect(self._preview_last)
+        add_walk_in.clicked.connect(self._add_walk_in_customer)
+        self._build_sales_history_tab()
         self._load_choices()
         self._update_cart_state()
+
+    def resizeEvent(self, event: object) -> None:
+        super().resizeEvent(event)  # type: ignore[arg-type]
+        direction = (
+            QBoxLayout.Direction.TopToBottom
+            if self.width() < 940
+            else QBoxLayout.Direction.LeftToRight
+        )
+        self._top_layout.setDirection(direction)
+        self._bottom_layout.setDirection(direction)
 
     def _load_choices(self) -> None:
         def operation() -> tuple[
@@ -215,7 +293,9 @@ class SalesScreen(QWidget):
                 batches = list(
                     session.scalars(
                         select(StockBatch)
+                        .join(StockBatch.product)
                         .where(
+                            Product.is_active.is_(True),
                             StockBatch.is_active.is_(True),
                             StockBatch.quantity_available > 0,
                             (
@@ -227,7 +307,15 @@ class SalesScreen(QWidget):
                     )
                 )
                 return (
-                    [(c.id, f"{c.name} — {c.phone}", c.address, None) for c in customers],
+                    [
+                        (
+                            c.id,
+                            f"{c.name} — {c.phone}" if c.phone else c.name,
+                            c.address,
+                            None,
+                        )
+                        for c in customers
+                    ],
                     [
                         (d.id, f"{d.display_name} — {d.phone}", d.address, d.territory)
                         for d in dealers
@@ -246,6 +334,52 @@ class SalesScreen(QWidget):
 
         self._worker = start_worker(
             operation, succeeded=self._choices_loaded, failed=lambda error: show_error(self, error)
+        )
+
+    def refresh(self) -> None:
+        self._load_choices()
+        if self.tabs.currentIndex() == 1:
+            self._refresh_sales_history()
+
+    def _add_walk_in_customer(self) -> None:
+        if self.recipient_type.currentText() != "Customer":
+            self.recipient_type.setCurrentText("Customer")
+        dialog = WalkInCustomerDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        name = dialog.name.text().strip()
+        phone = dialog.phone.text().strip()
+        email = dialog.email.text().strip() or None
+        address = dialog.address.text().strip() or None
+
+        def operation() -> tuple[uuid.UUID, str, str | None]:
+            with self._session_factory.begin() as session:
+                customer = CustomerService(session).create(
+                    actor=self._actor,
+                    name=name,
+                    phone=phone,
+                    email=email,
+                    address=address,
+                    notes="Added during walk-in sale",
+                )
+                return customer.id, customer.phone, customer.address
+
+        def added(result: object) -> None:
+            customer_id, stored_phone, stored_address = cast(
+                tuple[uuid.UUID, str, str | None], result
+            )
+            label = f"{name} — {stored_phone}" if stored_phone else name
+            self._customers.append((customer_id, label, stored_address, None))
+            self._customers.sort(key=lambda customer: customer[1].casefold())
+            self._set_recipients()
+            for index in range(self.recipient.count()):
+                data = self.recipient.itemData(index)
+                if data and data[0] == customer_id:
+                    self.recipient.setCurrentIndex(index)
+                    break
+
+        self._worker = start_worker(
+            operation, succeeded=added, failed=lambda error: show_error(self, error)
         )
 
     def _choices_loaded(self, result: object) -> None:
@@ -270,7 +404,7 @@ class SalesScreen(QWidget):
         self.recipient.clear()
         is_dealer = self.recipient_type.currentText() == "Dealer"
         if not is_dealer:
-            self.recipient.addItem("Walk-in Customer", None)
+            self.recipient.addItem("Walk-in (no details)", None)
         for item_id, label, address, territory in self._dealers if is_dealer else self._customers:
             self.recipient.addItem(label, (item_id, address, territory))
         self._recipient_changed()
@@ -377,6 +511,13 @@ class SalesScreen(QWidget):
         self.total_label.setText(f"{self._settings.app_currency} {total:,.2f}")
 
     def save(self) -> None:
+        if self.recipient.currentIndex() < 0:
+            QMessageBox.information(
+                self,
+                "Select recipient",
+                "Choose a recipient from the list, or add a walk-in customer.",
+            )
+            return
         recipient = self.recipient.currentData()
         recipient_id = recipient[0] if recipient else None
         is_dealer = self.recipient_type.currentText() == "Dealer"
@@ -439,6 +580,176 @@ class SalesScreen(QWidget):
         self._calculate()
         self._update_cart_state()
         self._load_choices()
+        self._refresh_sales_history()
+
+    def _build_sales_history_tab(self) -> None:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(12, 12, 12, 12)
+        search_row = QHBoxLayout()
+        self.sales_search = QLineEdit()
+        self.sales_search.setPlaceholderText(
+            "Search invoice, customer, dealer, phone, order, or product"
+        )
+        self.sales_search.setClearButtonEnabled(True)
+        refresh = QPushButton("Refresh")
+        refresh.setProperty("secondary", True)
+        search_row.addWidget(QLabel("Search"))
+        search_row.addWidget(self.sales_search, 1)
+        search_row.addWidget(refresh)
+        self.sales_model = RowsTableModel(
+            (
+                "Invoice",
+                "Date",
+                "Recipient",
+                "Products",
+                "Total",
+                "Paid",
+                "Balance",
+                "Status",
+                "Actions",
+            ),
+            page,
+        )
+        self.sales_table = QTableView()
+        self.sales_table.setModel(self.sales_model)
+        configure_table(self.sales_table, stretch_column=3, minimum_section_size=76)
+        self.sales_count = QLabel("Loading sales…")
+        self.sales_count.setObjectName("RecordCount")
+        layout.addLayout(search_row)
+        layout.addWidget(self.sales_table, 1)
+        layout.addWidget(self.sales_count)
+        self.tabs.addTab(page, "All Sales")
+        self._history_sales: list[Sale] = []
+        self._sales_search_timer = QTimer(self)
+        self._sales_search_timer.setSingleShot(True)
+        self._sales_search_timer.setInterval(300)
+        self._sales_search_timer.timeout.connect(self._refresh_sales_history)
+        self.sales_search.textChanged.connect(lambda _text: self._sales_search_timer.start())
+        self.sales_search.returnPressed.connect(self._refresh_sales_history)
+        refresh.clicked.connect(self._refresh_sales_history)
+        self.tabs.currentChanged.connect(
+            lambda index: self._refresh_sales_history() if index == 1 else None
+        )
+
+    def _refresh_sales_history(self) -> None:
+        query = self.sales_search.text().strip()
+
+        def operation() -> list[Sale]:
+            with self._session_factory() as session:
+                statement = select(Sale).options(selectinload(Sale.items))
+                if query:
+                    pattern = f"%{query}%"
+                    statement = statement.where(
+                        or_(
+                            Sale.invoice_number.ilike(pattern),
+                            Sale.order_number.ilike(pattern),
+                            Sale.customer.has(
+                                or_(Customer.name.ilike(pattern), Customer.phone.ilike(pattern))
+                            ),
+                            Sale.dealer.has(
+                                or_(
+                                    Dealer.name.ilike(pattern),
+                                    Dealer.business_name.ilike(pattern),
+                                    Dealer.phone.ilike(pattern),
+                                )
+                            ),
+                            Sale.items.any(
+                                SaleItem.product.has(
+                                    or_(
+                                        Product.name.ilike(pattern),
+                                        Product.manufacturer.ilike(pattern),
+                                    )
+                                )
+                            ),
+                        )
+                    )
+                sales = list(session.scalars(statement.order_by(Sale.sale_date.desc()).limit(500)))
+                for sale in sales:
+                    _ = [(item.product.display_name, item.quantity) for item in sale.items]
+                session.expunge_all()
+                return sales
+
+        self._worker = start_worker(
+            operation,
+            succeeded=self._display_sales_history,
+            failed=lambda error: show_error(self, error),
+        )
+
+    def _display_sales_history(self, result: object) -> None:
+        self._history_sales = cast(list[Sale], result)
+        rows: list[tuple[object, ...]] = []
+        for sale in self._history_sales:
+            recipient = (
+                sale.dealer.display_name
+                if sale.dealer
+                else sale.customer.name
+                if sale.customer
+                else "Walk-in"
+            )
+            products = ", ".join(
+                f"{item.product.display_name} x {item.quantity}" for item in sale.items
+            )
+            rows.append(
+                (
+                    sale.invoice_number,
+                    format_date(sale.sale_date),
+                    recipient,
+                    products,
+                    f"{self._settings.app_currency} {sale.total:,.2f}",
+                    f"{self._settings.app_currency} {sale.paid_amount:,.2f}",
+                    f"{self._settings.app_currency} {sale.remaining_amount:,.2f}",
+                    sale.status.value,
+                    "",
+                )
+            )
+        self.sales_model.set_rows(rows)
+        populate_row_actions(
+            self.sales_table,
+            8,
+            len(rows),
+            (("View details", self._view_sale), ("Print preview", self._preview_sale)),
+        )
+        self.sales_count.setText(f"{len(rows)} sale{'s' if len(rows) != 1 else ''}")
+
+    def _view_sale(self, row: int) -> None:
+        if row >= len(self._history_sales):
+            return
+        sale = self._history_sales[row]
+        recipient = (
+            sale.dealer.display_name
+            if sale.dealer
+            else sale.customer.name
+            if sale.customer
+            else "Walk-in"
+        )
+        products = "\n".join(
+            f"{item.product.display_name} — {item.quantity} x {item.unit_price:,.2f}"
+            for item in sale.items
+        )
+        show_record_details(
+            self,
+            f"Sale {sale.invoice_number}",
+            (
+                ("Invoice", sale.invoice_number),
+                ("Date", format_date(sale.sale_date)),
+                ("Recipient", recipient),
+                ("Products", products),
+                ("Total", f"{self._settings.app_currency} {sale.total:,.2f}"),
+                ("Paid", f"{self._settings.app_currency} {sale.paid_amount:,.2f}"),
+                ("Balance", f"{self._settings.app_currency} {sale.remaining_amount:,.2f}"),
+                ("Payment", sale.payment_status.value),
+                ("Status", sale.status.value),
+                ("Address", sale.delivery_address),
+                ("Notes", sale.notes),
+            ),
+        )
+
+    def _preview_sale(self, row: int) -> None:
+        if row >= len(self._history_sales):
+            return
+        self._last_sale_id = self._history_sales[row].id
+        self._preview_last()
 
     def _receipt_payload(self) -> bytes:
         if self._last_sale_id is None:

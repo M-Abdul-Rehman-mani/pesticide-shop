@@ -88,7 +88,8 @@ class MainWindow(QMainWindow):
         self._nav_buttons: dict[str, QPushButton] = {}
         self.setWindowTitle("Pesticide Shop Management System")
         self.resize(1480, 900)
-        self.setMinimumSize(1180, 720)
+        self.setMinimumSize(900, 600)
+        self._compact_shell = False
         central = QWidget()
         central.setObjectName("PageBackground")
         root = QVBoxLayout(central)
@@ -99,6 +100,7 @@ class MainWindow(QMainWindow):
         content.setContentsMargins(0, 0, 0, 0)
         content.setSpacing(0)
         sidebar, sidebar_layout = self._sidebar()
+        self._sidebar_frame = sidebar
         self.stack = QStackedWidget()
         self.stack.setObjectName("ContentStack")
         content.addWidget(sidebar)
@@ -112,6 +114,7 @@ class MainWindow(QMainWindow):
         status.addPermanentWidget(shortcuts)
         self.setStatusBar(status)
         self._build_pages(sidebar_layout)
+        self._connect_data_refreshes()
         self._install_shortcuts()
         self._session_monitor = SessionTimeoutMonitor(settings.app_session_timeout_minutes, self)
         self._session_monitor.timed_out.connect(self._timed_out)
@@ -158,6 +161,7 @@ class MainWindow(QMainWindow):
         logout.setProperty("quiet", True)
         logout.setToolTip("Sign out of this workstation")
         logout.clicked.connect(self._logout)
+        self._user_name_label, self._user_role_label = user_name, user_role
         layout.addLayout(page_copy)
         layout.addStretch()
         layout.addWidget(quick_sale)
@@ -167,8 +171,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(logout)
         return frame
 
-    @staticmethod
-    def _sidebar() -> tuple[QFrame, QVBoxLayout]:
+    def _sidebar(self) -> tuple[QFrame, QVBoxLayout]:
         frame = QFrame()
         frame.setObjectName("Sidebar")
         frame.setFixedWidth(238)
@@ -187,6 +190,7 @@ class MainWindow(QMainWindow):
         brand.setObjectName("Brand")
         caption = QLabel("PESTICIDE OPERATIONS")
         caption.setObjectName("BrandCaption")
+        self._brand_name, self._brand_caption = brand, caption
         brand_copy.addWidget(brand)
         brand_copy.addWidget(caption)
         brand_row.addWidget(mark)
@@ -309,6 +313,27 @@ class MainWindow(QMainWindow):
         hint.setObjectName("SidebarHint")
         sidebar.addWidget(hint)
 
+    def _connect_data_refreshes(self) -> None:
+        dashboard = self._pages.get("Dashboard")
+        sales = self._pages.get("Sales")
+        purchases = self._pages.get("Purchases")
+        if sales is not None and hasattr(sales, "sale_completed"):
+            sales.sale_completed.connect(self._refresh_transaction_pages)
+        if purchases is not None and hasattr(purchases, "purchase_completed"):
+            purchases.purchase_completed.connect(self._refresh_transaction_pages)
+            refresh_sales = getattr(sales, "refresh", None)
+            if callable(refresh_sales):
+                purchases.purchase_completed.connect(lambda _reference: refresh_sales())
+        if dashboard is not None:
+            dashboard.setProperty("refreshesAfterTransactions", True)
+
+    def _refresh_transaction_pages(self, _reference: str) -> None:
+        for name in ("Dashboard", "Inventory", "Products", "Customers", "Dealers", "Suppliers"):
+            page = self._pages.get(name)
+            refresh = getattr(page, "refresh", None)
+            if callable(refresh):
+                refresh()
+
     def navigate(self, name: str) -> None:
         page = self._pages.get(name)
         if page is None:
@@ -317,6 +342,25 @@ class MainWindow(QMainWindow):
         self._nav_buttons[name].setChecked(True)
         self._page_label.setText(name)
         self.statusBar().showMessage(self._PAGE_CONTEXT.get(name, f"{name} ready"), 3500)
+        refresh = getattr(page, "refresh", None)
+        if callable(refresh):
+            refresh()
+
+    def resizeEvent(self, event: object) -> None:
+        super().resizeEvent(event)  # type: ignore[arg-type]
+        compact = self.width() < 1120
+        if compact == self._compact_shell:
+            return
+        self._compact_shell = compact
+        self._sidebar_frame.setFixedWidth(76 if compact else 238)
+        self._brand_name.setVisible(not compact)
+        self._brand_caption.setVisible(not compact)
+        self._user_name_label.setVisible(not compact)
+        self._user_role_label.setVisible(not compact)
+        for name, button in self._nav_buttons.items():
+            glyph = self._NAV_GLYPHS.get(name, "•")
+            button.setText(glyph if compact else f"{glyph}   {name}")
+            button.setToolTip(name if compact else "")
 
     def _install_shortcuts(self) -> None:
         bindings = {

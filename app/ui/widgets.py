@@ -4,18 +4,25 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QPersistentModelIndex, Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
+    QCompleter,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
     QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMenu,
     QMessageBox,
     QTableView,
     QTableWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -117,6 +124,72 @@ def configure_table(
     header.setHighlightSections(False)
     if stretch_column is not None and stretch_column < header.count():
         header.setSectionResizeMode(stretch_column, QHeaderView.ResizeMode.Stretch)
+
+
+def configure_searchable_combo(combo: QComboBox, placeholder: str) -> None:
+    """Turn a normal choice list into a type-to-filter selector."""
+
+    combo.setEditable(True)
+    combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+    combo.setMaxVisibleItems(14)
+    line_edit = combo.lineEdit()
+    if line_edit is not None:
+        line_edit.setPlaceholderText(placeholder)
+        line_edit.setClearButtonEnabled(True)
+    completer = combo.completer()
+    if completer is not None:
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+
+
+def populate_row_actions(
+    table: QTableView,
+    action_column: int,
+    row_count: int,
+    actions: Sequence[tuple[str, Callable[[int], None]]],
+) -> None:
+    """Place a compact three-dot menu in each row of an actions column."""
+
+    for row in range(row_count):
+        button = QToolButton(table)
+        button.setText("⋮")
+        button.setAccessibleName(f"Actions for row {row + 1}")
+        button.setToolTip("View or manage this record")
+        button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        menu = QMenu(button)
+        for label, callback in actions:
+            action = menu.addAction(label)
+            action.triggered.connect(
+                lambda _checked=False, selected_row=row, handler=callback: handler(selected_row)
+            )
+        button.setMenu(menu)
+        table.setIndexWidget(table.model().index(row, action_column), button)
+
+
+def show_record_details(
+    parent: QWidget,
+    title: str,
+    fields: Sequence[tuple[str, object]],
+) -> None:
+    """Show a simple, readable record details popup."""
+
+    dialog = QDialog(parent)
+    dialog.setWindowTitle(title)
+    dialog.setMinimumWidth(420)
+    layout = QVBoxLayout(dialog)
+    form = QFormLayout()
+    form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+    for label, value in fields:
+        value_label = QLabel(str(value) if value not in (None, "") else "—")
+        value_label.setWordWrap(True)
+        value_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        form.addRow(label, value_label)
+    buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+    buttons.rejected.connect(dialog.reject)
+    layout.addLayout(form)
+    layout.addWidget(buttons)
+    dialog.exec()
 
 
 class RowsTableModel(QAbstractTableModel):

@@ -21,7 +21,13 @@ class CustomerRepository:
         if value := query.strip():
             pattern = f"%{value}%"
             statement = statement.where(
-                or_(Customer.name.ilike(pattern), Customer.phone.ilike(pattern))
+                or_(
+                    Customer.name.ilike(pattern),
+                    Customer.phone.ilike(pattern),
+                    Customer.email.ilike(pattern),
+                    Customer.address.ilike(pattern),
+                    Customer.cnic.ilike(pattern),
+                )
             )
         return paginate(self._session, statement.order_by(Customer.name), page, page_size)
 

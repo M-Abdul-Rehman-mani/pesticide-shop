@@ -26,7 +26,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.repositories.customer_repository import CustomerRepository
 from app.security.authentication import AuthenticatedUser
 from app.services.catalog_service import CustomerService
-from app.ui.widgets import RowsTableModel, show_error
+from app.ui.widgets import RowsTableModel, populate_row_actions, show_error, show_record_details
 from app.ui.workers import FunctionWorker, start_worker
 from app.utils.formatting import format_date
 
@@ -56,6 +56,7 @@ class CustomerDialog(QDialog):
         self.notes = QTextEdit(data.notes or "" if data else "")
         self.notes.setMaximumHeight(70)
         form.addRow("Name", self.name)
+        self.phone.setPlaceholderText("Optional")
         form.addRow("Phone", self.phone)
         form.addRow("Email", self.email)
         form.addRow("Address", self.address)
@@ -101,7 +102,7 @@ class CustomersScreen(QWidget):
         title = QLabel("Customers")
         title.setObjectName("PageTitle")
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Search customer name or phone")
+        self.search.setPlaceholderText("Search name, phone, email, address, or CNIC")
         add = QPushButton("Add Customer")
         edit = QPushButton("Edit")
         edit.setProperty("secondary", True)
@@ -113,7 +114,7 @@ class CustomersScreen(QWidget):
         header.addWidget(history)
         header.addWidget(edit)
         header.addWidget(add)
-        self.model = RowsTableModel(("Name", "Phone", "Email", "CNIC", "Created"), self)
+        self.model = RowsTableModel(("Name", "Phone", "Email", "CNIC", "Created", "Actions"), self)
         self.table = QTableView()
         self.table.setModel(self.model)
         self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
@@ -163,10 +164,11 @@ class CustomersScreen(QWidget):
                     [
                         (
                             customer.name,
-                            customer.phone,
+                            customer.phone or "—",
                             customer.email or "—",
                             customer.cnic or "—",
                             format_date(customer.created_at),
+                            "",
                         )
                         for customer in result.items
                     ],
@@ -200,6 +202,12 @@ class CustomersScreen(QWidget):
             result,
         )
         self.model.set_rows(rows)
+        populate_row_actions(
+            self.table,
+            5,
+            len(rows),
+            (("View", self._view), ("Edit", self._edit_row), ("Delete", self._delete)),
+        )
         self.page_label.setText(f"Page {self._page} of {pages}")
 
     def _selected(self) -> int | None:
@@ -219,6 +227,53 @@ class CustomersScreen(QWidget):
         dialog = CustomerDialog(self._data[row], self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._save(self._ids[row], dialog.values())
+
+    def _edit_row(self, row: int) -> None:
+        if row >= len(self._data):
+            return
+        dialog = CustomerDialog(self._data[row], self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._save(self._ids[row], dialog.values())
+
+    def _view(self, row: int) -> None:
+        if row >= len(self._data):
+            return
+        data = self._data[row]
+        show_record_details(
+            self,
+            data.name,
+            (
+                ("Phone", data.phone),
+                ("Email", data.email),
+                ("Address", data.address),
+                ("CNIC", data.cnic),
+                ("Notes", data.notes),
+            ),
+        )
+
+    def _delete(self, row: int) -> None:
+        if row >= len(self._ids):
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "Delete customer",
+                "Delete this customer? Customers with sales history will be kept "
+                "for invoice records.",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+
+        def operation() -> None:
+            with self._session_factory.begin() as session:
+                CustomerService(session).delete(self._ids[row], actor=self._actor)
+
+        self._worker = start_worker(
+            operation,
+            succeeded=lambda _result: self.refresh(),
+            failed=lambda error: show_error(self, error),
+        )
 
     def _save(self, customer_id: uuid.UUID | None, data: CustomerFormData) -> None:
         def operation() -> None:

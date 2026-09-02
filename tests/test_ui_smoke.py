@@ -76,6 +76,12 @@ def test_owner_window_contains_complete_pesticide_workflow(
     }
     assert expected == set(window._pages)
     assert window.windowTitle() == "Pesticide Shop Management System"
+    assert window.minimumWidth() == 900
+    window.resize(1000, 700)
+    window.show()
+    qtbot.wait(20)
+    assert window._sidebar_frame.width() == 76
+    assert window._pages["Dashboard"].property("refreshesAfterTransactions") is True
     window.navigate("Dealers")
     assert window.stack.currentWidget() is window._pages["Dealers"]
     assert window._page_label.text() == "Dealers"
@@ -85,4 +91,8 @@ def test_owner_window_contains_complete_pesticide_workflow(
     sales = window._pages["Sales"]
     assert sales.complete.isEnabled() is False  # type: ignore[attr-defined]
     assert sales.cart_count.text() == "0 items in invoice"  # type: ignore[attr-defined]
+    assert sales.tabs.count() == 2  # type: ignore[attr-defined]
+    assert sales.recipient.isEditable()  # type: ignore[attr-defined]
+    assert sales.batch.isEditable()  # type: ignore[attr-defined]
+    assert window._pages["Products"].search is not None  # type: ignore[attr-defined]
     assert QThreadPool.globalInstance().waitForDone(10_000)

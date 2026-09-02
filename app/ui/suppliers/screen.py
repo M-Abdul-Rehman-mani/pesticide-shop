@@ -6,6 +6,7 @@ import uuid
 from dataclasses import dataclass
 from typing import cast
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -133,6 +134,11 @@ class SuppliersScreen(QWidget):
         edit.clicked.connect(self._edit)
         history.clicked.connect(self._history)
         self.search.returnPressed.connect(self.refresh)
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(300)
+        self._search_timer.timeout.connect(self.refresh)
+        self.search.textChanged.connect(lambda _text: self._search_timer.start())
         self.refresh()
 
     def refresh(self) -> None:
@@ -144,7 +150,14 @@ class SuppliersScreen(QWidget):
                 if query:
                     pattern = f"%{query}%"
                     statement = statement.where(
-                        or_(Supplier.name.ilike(pattern), Supplier.company_name.ilike(pattern))
+                        or_(
+                            Supplier.name.ilike(pattern),
+                            Supplier.company_name.ilike(pattern),
+                            Supplier.phone.ilike(pattern),
+                            Supplier.email.ilike(pattern),
+                            Supplier.address.ilike(pattern),
+                            Supplier.tax_number.ilike(pattern),
+                        )
                     )
                 suppliers = list(session.scalars(statement.order_by(Supplier.name).limit(500)))
                 return (

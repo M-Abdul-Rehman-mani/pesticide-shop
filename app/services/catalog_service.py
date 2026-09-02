@@ -12,9 +12,10 @@ from sqlalchemy.orm import Session
 from app.models.customer import Customer
 from app.models.dealer import Dealer
 from app.models.product import Product
+from app.models.sale import Sale
 from app.models.supplier import Supplier
 from app.security.authentication import AuthenticatedUser
-from app.security.permissions import Permission, require_permission
+from app.security.permissions import Permission, has_permission, require_permission
 from app.services.audit_service import AuditService
 from app.utils.exceptions import ConflictError, NotFoundError, ValidationError
 from app.utils.validators import nonnegative_money, normalize_email, normalize_phone
@@ -36,12 +37,13 @@ class CustomerService:
         cnic: str | None = None,
         notes: str | None = None,
     ) -> Customer:
-        require_permission(actor.role, Permission.MANAGE_CUSTOMERS)
+        if not has_permission(actor.role, Permission.MANAGE_CUSTOMERS):
+            require_permission(actor.role, Permission.CREATE_SALE)
         if not name.strip():
             raise ValidationError("Customer name is required.")
         customer = Customer(
             name=name.strip(),
-            phone=normalize_phone(phone),
+            phone=normalize_phone(phone, required=False),
             email=normalize_email(email),
             address=address.strip() if address else None,
             cnic=cnic.strip() if cnic else None,
@@ -81,7 +83,7 @@ class CustomerService:
         if not name.strip():
             raise ValidationError("Customer name is required.")
         customer.name = name.strip()
-        customer.phone = normalize_phone(phone)
+        customer.phone = normalize_phone(phone, required=False)
         customer.email = normalize_email(email)
         customer.address = address.strip() if address else None
         customer.cnic = cnic.strip() if cnic else None
@@ -95,6 +97,25 @@ class CustomerService:
             new_value={"name": customer.name, "phone": customer.phone, "email": customer.email},
         )
         return customer
+
+    def delete(self, customer_id: uuid.UUID, *, actor: AuthenticatedUser) -> None:
+        require_permission(actor.role, Permission.MANAGE_CUSTOMERS)
+        customer = self._session.get(Customer, customer_id)
+        if customer is None:
+            raise NotFoundError("Customer was not found.")
+        if self._session.scalar(select(Sale.id).where(Sale.customer_id == customer_id).limit(1)):
+            raise ConflictError(
+                "This customer has sales history and cannot be deleted. "
+                "Keep the record for invoices."
+            )
+        self._audit.record(
+            actor_id=actor.id,
+            action="CUSTOMER_DELETED",
+            entity_type="Customer",
+            entity_id=customer.id,
+            old_value={"name": customer.name, "phone": customer.phone},
+        )
+        self._session.delete(customer)
 
 
 class DealerService:
@@ -147,6 +168,23 @@ class DealerService:
             entity_type="Dealer",
             entity_id=dealer.id,
             new_value={"name": dealer.name, "business_name": dealer.business_name},
+        )
+        return dealer
+
+    def set_active(
+        self, dealer_id: uuid.UUID, *, actor: AuthenticatedUser, is_active: bool
+    ) -> Dealer:
+        require_permission(actor.role, Permission.MANAGE_DEALERS)
+        dealer = self._session.get(Dealer, dealer_id)
+        if dealer is None:
+            raise NotFoundError("Dealer was not found.")
+        dealer.is_active = is_active
+        self._audit.record(
+            actor_id=actor.id,
+            action="DEALER_ACTIVATED" if is_active else "DEALER_DEACTIVATED",
+            entity_type="Dealer",
+            entity_id=dealer.id,
+            new_value={"is_active": is_active},
         )
         return dealer
 
@@ -390,5 +428,79 @@ class ProductService:
                 "default_purchase_price": str(product.default_purchase_price),
                 "default_sale_price": str(product.default_sale_price),
             },
+        )
+        return product
+
+    def update(
+        self,
+        product_id: uuid.UUID,
+        *,
+        actor: AuthenticatedUser,
+        manufacturer: str,
+        name: str,
+        category: str,
+        active_ingredient: str,
+        formulation: str,
+        pack_size: str,
+        registration_number: str,
+        unit: str,
+        description: str | None,
+        default_purchase_price: Decimal,
+        default_sale_price: Decimal,
+        minimum_stock: int,
+    ) -> Product:
+        require_permission(actor.role, Permission.MANAGE_INVENTORY)
+        product = self._session.get(Product, product_id)
+        if product is None:
+            raise NotFoundError("Product was not found.")
+        if not manufacturer.strip() or not name.strip():
+            raise ValidationError("Manufacturer and product name are required.")
+        if minimum_stock < 0:
+            raise ValidationError("Minimum stock cannot be negative.")
+        old = {"name": product.display_name, "manufacturer": product.manufacturer}
+        product.manufacturer = manufacturer.strip()
+        product.name = name.strip()
+        product.category = category.strip().upper() or "PESTICIDE"
+        product.active_ingredient = active_ingredient.strip()
+        product.formulation = formulation.strip()
+        product.pack_size = pack_size.strip()
+        product.registration_number = registration_number.strip()
+        product.unit = unit.strip().upper() or "PACK"
+        product.description = description.strip() if description else None
+        product.default_purchase_price = nonnegative_money(
+            default_purchase_price, field="Default purchase price"
+        )
+        product.default_sale_price = nonnegative_money(
+            default_sale_price, field="Default sale price"
+        )
+        product.minimum_stock = minimum_stock
+        try:
+            self._session.flush()
+        except IntegrityError as exc:
+            raise ConflictError("That product variant already exists.") from exc
+        self._audit.record(
+            actor_id=actor.id,
+            action="PRODUCT_UPDATED",
+            entity_type="Product",
+            entity_id=product.id,
+            old_value=old,
+            new_value={"name": product.display_name, "manufacturer": product.manufacturer},
+        )
+        return product
+
+    def set_active(
+        self, product_id: uuid.UUID, *, actor: AuthenticatedUser, is_active: bool
+    ) -> Product:
+        require_permission(actor.role, Permission.MANAGE_INVENTORY)
+        product = self._session.get(Product, product_id)
+        if product is None:
+            raise NotFoundError("Product was not found.")
+        product.is_active = is_active
+        self._audit.record(
+            actor_id=actor.id,
+            action="PRODUCT_ACTIVATED" if is_active else "PRODUCT_DEACTIVATED",
+            entity_type="Product",
+            entity_id=product.id,
+            new_value={"is_active": is_active},
         )
         return product

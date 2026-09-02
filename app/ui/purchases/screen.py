@@ -8,7 +8,7 @@ from datetime import date
 from decimal import Decimal
 from typing import cast
 
-from PySide6.QtCore import QDate
+from PySide6.QtCore import QDate, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDateEdit,
@@ -35,7 +35,7 @@ from app.security.authentication import AuthenticatedUser
 from app.services.dto import CreateStockPurchaseCommand, PurchasedBatchInput
 from app.services.stock_purchase_service import StockPurchaseService
 from app.ui.forms import MoneyEdit, PaymentEditor
-from app.ui.widgets import show_error
+from app.ui.widgets import configure_searchable_combo, show_error
 from app.ui.workers import FunctionWorker, start_worker
 
 
@@ -54,6 +54,8 @@ class PurchaseCartEntry:
 
 
 class PurchasesScreen(QWidget):
+    purchase_completed = Signal(str)
+
     def __init__(
         self,
         session_factory: sessionmaker[Session],
@@ -72,13 +74,14 @@ class PurchasesScreen(QWidget):
         supplier_group, supplier_form = QGroupBox("Supplier"), QFormLayout()
         supplier_group.setLayout(supplier_form)
         self.supplier = QComboBox()
-        self.supplier.setMinimumWidth(350)
+        configure_searchable_combo(self.supplier, "Type to find a supplier")
         supplier_form.addRow("Supplier", self.supplier)
         layout.addWidget(supplier_group)
 
         entry_group, entry_form = QGroupBox("Batch Details"), QFormLayout()
         entry_group.setLayout(entry_form)
         self.product, self.batch_number = QComboBox(), QLineEdit()
+        configure_searchable_combo(self.product, "Type to find a product")
         self.quantity, self.cartons, self.packs = QSpinBox(), QSpinBox(), QSpinBox()
         for field in (self.quantity, self.cartons, self.packs):
             field.setRange(0, 1_000_000)
@@ -178,6 +181,9 @@ class PurchasesScreen(QWidget):
         self._worker = start_worker(
             operation, succeeded=self._set_choices, failed=lambda error: show_error(self, error)
         )
+
+    def refresh(self) -> None:
+        self._load_choices()
 
     def _set_choices(self, result: object) -> None:
         suppliers, products = cast(
@@ -299,3 +305,5 @@ class PurchasesScreen(QWidget):
         self.discount.setText("0.00")
         self.tax.setText("0.00")
         self._calculate()
+        self.purchase_completed.emit(str(purchase_number))
+        self._load_choices()

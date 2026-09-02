@@ -92,6 +92,17 @@ QPushButton[quiet="true"]:hover { background: #edf5f1; color: #185f42; }
 QPushButton[danger="true"] { background: #fff5f4; color: #b33b32; border: 1px solid #efc8c4; }
 QPushButton[danger="true"]:hover { background: #b84238; color: #ffffff; border-color: #b84238; }
 QPushButton#QuickSaleButton { padding-left: 18px; padding-right: 18px; }
+QToolButton {
+    background: transparent; color: #315447; border: 1px solid transparent;
+    border-radius: 7px; padding: 4px 10px; font-size: 15pt; font-weight: 700;
+}
+QToolButton:hover, QToolButton::menu-button:hover { background: #e7f2ec; }
+QMenu {
+    background: #ffffff; color: #1c2b25; border: 1px solid #cbd9d2;
+    padding: 5px; border-radius: 7px;
+}
+QMenu::item { padding: 7px 24px 7px 12px; border-radius: 5px; }
+QMenu::item:selected { background: #dff2e8; color: #17382c; }
 
 /* Inputs */
 QLineEdit, QComboBox, QDateEdit, QSpinBox, QDoubleSpinBox, QTextEdit {

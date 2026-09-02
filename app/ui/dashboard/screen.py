@@ -92,6 +92,7 @@ class DashboardScreen(QWidget):
         }
         for index, card in enumerate(self.cards.values()):
             card_layout.addWidget(card, index // 4, index % 4)
+        self._card_layout = card_layout
         layout.addLayout(card_layout)
         chart_card = QFrame()
         chart_card.setObjectName("MetricCard")
@@ -104,6 +105,15 @@ class DashboardScreen(QWidget):
         self.canvas = FigureCanvasQTAgg(self.figure)
         chart_layout.addWidget(self.canvas, 1)
         layout.addWidget(chart_card, 1)
+
+    def resizeEvent(self, event: object) -> None:
+        super().resizeEvent(event)  # type: ignore[arg-type]
+        columns = 1 if self.width() < 560 else 2 if self.width() < 980 else 4
+        if getattr(self, "_card_columns", None) == columns:
+            return
+        self._card_columns = columns
+        for index, card in enumerate(self.cards.values()):
+            self._card_layout.addWidget(card, index // columns, index % columns)
 
     def showEvent(self, event: object) -> None:
         super().showEvent(event)  # type: ignore[arg-type]
