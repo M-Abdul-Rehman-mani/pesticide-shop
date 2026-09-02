@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMainWindow,
     QMenu,
     QMessageBox,
     QTableView,
@@ -190,6 +191,16 @@ def show_record_details(
     layout.addLayout(form)
     layout.addWidget(buttons)
     dialog.exec()
+
+
+def show_success(parent: QWidget, message: str) -> None:
+    """Show a consistent, non-blocking success message in the application status bar."""
+
+    window = parent.window()
+    if isinstance(window, QMainWindow):
+        window.statusBar().showMessage(message, 5000)
+    else:
+        QMessageBox.information(parent, "Saved", message)
 
 
 class RowsTableModel(QAbstractTableModel):

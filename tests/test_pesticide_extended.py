@@ -8,7 +8,7 @@ from openpyxl import load_workbook
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.enums import PaymentMethod
+from app.models.enums import PaymentMethod, PurchaseStatus
 from app.models.inventory import StockBatch
 from app.models.product import Product
 from app.models.supplier import Supplier
@@ -157,6 +157,41 @@ def test_catalog_crud_and_audited_price_changes(
 
     with pytest.raises(ValidationError):
         product_service.create(actor=owner, manufacturer="", name="Missing")
+
+
+def test_duplicate_customer_identity_and_safe_purchase_cancellation(
+    db_session: Session,
+    owner: AuthenticatedUser,
+    supplier: Supplier,
+    product: Product,
+) -> None:
+    customers = CustomerService(db_session)
+    customers.create(actor=owner, name="Counter Customer", phone="0300-7777777")
+    with pytest.raises(ConflictError):
+        customers.create(actor=owner, name="Duplicate", phone="0300-7777777")
+
+    purchase = StockPurchaseService(db_session).create(
+        CreateStockPurchaseCommand(
+            supplier_id=supplier.id,
+            batches=(
+                PurchasedBatchInput(
+                    product_id=product.id,
+                    batch_number="CANCEL-1",
+                    quantity=5,
+                    purchase_price=Decimal("100.00"),
+                    selling_price=Decimal("140.00"),
+                ),
+            ),
+        ),
+        owner,
+    )
+    db_session.flush()
+    StockPurchaseService(db_session).cancel(purchase.id, owner)
+    db_session.flush()
+    batch = db_session.scalar(select(StockBatch).where(StockBatch.purchase_id == purchase.id))
+    assert purchase.status is PurchaseStatus.CANCELLED
+    assert batch is not None and batch.quantity_available == 0 and not batch.is_active
+    assert supplier.balance == Decimal("0.00")
 
 
 def test_payments_inventory_and_reports_cover_full_trade_cycle(

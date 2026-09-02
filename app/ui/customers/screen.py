@@ -26,7 +26,13 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.repositories.customer_repository import CustomerRepository
 from app.security.authentication import AuthenticatedUser
 from app.services.catalog_service import CustomerService
-from app.ui.widgets import RowsTableModel, populate_row_actions, show_error, show_record_details
+from app.ui.widgets import (
+    RowsTableModel,
+    populate_row_actions,
+    show_error,
+    show_record_details,
+    show_success,
+)
 from app.ui.workers import FunctionWorker, start_worker
 from app.utils.formatting import format_date
 
@@ -154,6 +160,7 @@ class CustomersScreen(QWidget):
 
     def refresh(self) -> None:
         query, page = self.search.text(), self._page
+        self.page_label.setText("Loading customers…")
 
         def operation() -> tuple[
             list[tuple[object, ...]], list[uuid.UUID], list[CustomerFormData], int
@@ -208,7 +215,9 @@ class CustomersScreen(QWidget):
             len(rows),
             (("View", self._view), ("Edit", self._edit_row), ("Delete", self._delete)),
         )
-        self.page_label.setText(f"Page {self._page} of {pages}")
+        self.page_label.setText(
+            "No customers found." if not rows else f"Page {self._page} of {pages}"
+        )
 
     def _selected(self) -> int | None:
         rows = self.table.selectionModel().selectedRows()
@@ -271,7 +280,7 @@ class CustomersScreen(QWidget):
 
         self._worker = start_worker(
             operation,
-            succeeded=lambda _result: self.refresh(),
+            succeeded=lambda _result: self._saved("Customer deleted."),
             failed=lambda error: show_error(self, error),
         )
 
@@ -303,9 +312,13 @@ class CustomersScreen(QWidget):
 
         self._worker = start_worker(
             operation,
-            succeeded=lambda _result: self.refresh(),
+            succeeded=lambda _result: self._saved("Customer saved."),
             failed=lambda error: show_error(self, error),
         )
+
+    def _saved(self, message: str) -> None:
+        show_success(self, message)
+        self.refresh()
 
     def _history(self) -> None:
         row = self._selected()

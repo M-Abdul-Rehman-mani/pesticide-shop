@@ -8,10 +8,12 @@ from datetime import date
 from decimal import Decimal
 from typing import cast
 
-from PySide6.QtCore import QDate, Signal
+from PySide6.QtCore import QDate, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDateEdit,
+    QDialog,
+    QDialogButtonBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -20,23 +22,40 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QTableView,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config.settings import Settings
+from app.models.enums import PaymentMethod
+from app.models.inventory import StockBatch
 from app.models.product import Product
+from app.models.purchase import Purchase, PurchaseItem
 from app.models.supplier import Supplier
 from app.security.authentication import AuthenticatedUser
 from app.services.dto import CreateStockPurchaseCommand, PurchasedBatchInput
+from app.services.payment_service import PaymentService
+from app.services.stock_inventory_service import StockInventoryService
 from app.services.stock_purchase_service import StockPurchaseService
 from app.ui.forms import MoneyEdit, PaymentEditor
-from app.ui.widgets import configure_searchable_combo, show_error
+from app.ui.widgets import (
+    PageHeader,
+    RowsTableModel,
+    configure_searchable_combo,
+    configure_table,
+    populate_row_actions,
+    show_error,
+    show_record_details,
+    show_success,
+)
 from app.ui.workers import FunctionWorker, start_worker
+from app.utils.formatting import format_date
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +72,30 @@ class PurchaseCartEntry:
     selling_price: Decimal
 
 
+@dataclass(frozen=True, slots=True)
+class PurchaseBatchSummary:
+    id: uuid.UUID
+    product: str
+    batch_number: str
+    received: int
+    available: int
+
+
+@dataclass(frozen=True, slots=True)
+class PurchaseHistoryEntry:
+    id: uuid.UUID
+    number: str
+    supplier: str
+    date_text: str
+    total: Decimal
+    paid: Decimal
+    remaining: Decimal
+    payment_status: str
+    status: str
+    notes: str | None
+    batches: tuple[PurchaseBatchSummary, ...]
+
+
 class PurchasesScreen(QWidget):
     purchase_completed = Signal(str)
 
@@ -67,10 +110,17 @@ class PurchasesScreen(QWidget):
         self._session_factory, self._actor, self._settings = session_factory, actor, settings
         self._worker: FunctionWorker | None = None
         self._cart: list[PurchaseCartEntry] = []
-        layout = QVBoxLayout(self)
-        title = QLabel("Receive Pesticide Stock")
-        title.setObjectName("PageTitle")
-        layout.addWidget(title)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(26, 24, 26, 20)
+        root.addWidget(
+            PageHeader("Purchases", "Receive stock or search and manage previous purchases.")
+        )
+        self.tabs = QTabWidget()
+        root.addWidget(self.tabs, 1)
+        entry_page = QWidget()
+        layout = QVBoxLayout(entry_page)
+        layout.setContentsMargins(12, 12, 12, 12)
+        self.tabs.addTab(entry_page, "Receive Stock")
         supplier_group, supplier_form = QGroupBox("Supplier"), QFormLayout()
         supplier_group.setLayout(supplier_form)
         self.supplier = QComboBox()
@@ -155,6 +205,7 @@ class PurchasesScreen(QWidget):
         self.product.currentIndexChanged.connect(self._product_changed)
         self.discount.textChanged.connect(self._calculate)
         self.tax.textChanged.connect(self._calculate)
+        self._build_history_tab()
         self._load_choices()
 
     def _load_choices(self) -> None:
@@ -184,6 +235,8 @@ class PurchasesScreen(QWidget):
 
     def refresh(self) -> None:
         self._load_choices()
+        if self.tabs.currentIndex() == 1:
+            self._refresh_history()
 
     def _set_choices(self, result: object) -> None:
         suppliers, products = cast(
@@ -307,3 +360,340 @@ class PurchasesScreen(QWidget):
         self._calculate()
         self.purchase_completed.emit(str(purchase_number))
         self._load_choices()
+        self._refresh_history()
+
+    def _build_history_tab(self) -> None:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(12, 12, 12, 12)
+        controls = QHBoxLayout()
+        self.history_search = QLineEdit()
+        self.history_search.setPlaceholderText(
+            "Search purchase, supplier, product, or batch number"
+        )
+        self.history_search.setClearButtonEnabled(True)
+        refresh = QPushButton("Refresh")
+        refresh.setProperty("secondary", True)
+        controls.addWidget(QLabel("Search"))
+        controls.addWidget(self.history_search, 1)
+        controls.addWidget(refresh)
+        self.history_model = RowsTableModel(
+            (
+                "Purchase",
+                "Date",
+                "Supplier",
+                "Batches",
+                "Total",
+                "Paid",
+                "Remaining",
+                "Payment",
+                "Status",
+                "Actions",
+            ),
+            page,
+        )
+        self.history_table = QTableView()
+        self.history_table.setModel(self.history_model)
+        configure_table(self.history_table, stretch_column=3, minimum_section_size=74)
+        self.history_state = QLabel("Open this tab to load purchases.")
+        self.history_state.setObjectName("RecordCount")
+        layout.addLayout(controls)
+        layout.addWidget(self.history_table, 1)
+        layout.addWidget(self.history_state)
+        self.tabs.addTab(page, "All Purchases")
+        self._history_entries: list[PurchaseHistoryEntry] = []
+        self._history_timer = QTimer(self)
+        self._history_timer.setSingleShot(True)
+        self._history_timer.setInterval(300)
+        self._history_timer.timeout.connect(self._refresh_history)
+        self.history_search.textChanged.connect(lambda _text: self._history_timer.start())
+        self.history_search.returnPressed.connect(self._refresh_history)
+        refresh.clicked.connect(self._refresh_history)
+        self.tabs.currentChanged.connect(
+            lambda index: self._refresh_history() if index == 1 else None
+        )
+
+    def _refresh_history(self) -> None:
+        query = self.history_search.text().strip()
+        self.history_state.setText("Loading purchases…")
+
+        def operation() -> list[PurchaseHistoryEntry]:
+            with self._session_factory() as session:
+                statement = select(Purchase)
+                if query:
+                    pattern = f"%{query}%"
+                    statement = statement.where(
+                        or_(
+                            Purchase.purchase_number.ilike(pattern),
+                            Purchase.supplier.has(
+                                or_(
+                                    Supplier.name.ilike(pattern),
+                                    Supplier.company_name.ilike(pattern),
+                                    Supplier.phone.ilike(pattern),
+                                )
+                            ),
+                            Purchase.items.any(
+                                PurchaseItem.product.has(
+                                    or_(
+                                        Product.name.ilike(pattern),
+                                        Product.manufacturer.ilike(pattern),
+                                    )
+                                )
+                            ),
+                            Purchase.id.in_(
+                                select(StockBatch.purchase_id).where(
+                                    StockBatch.batch_number.ilike(pattern)
+                                )
+                            ),
+                        )
+                    )
+                purchases = list(
+                    session.scalars(statement.order_by(Purchase.purchase_date.desc()).limit(500))
+                )
+                purchase_ids = [purchase.id for purchase in purchases]
+                batches = (
+                    list(
+                        session.scalars(
+                            select(StockBatch)
+                            .where(StockBatch.purchase_id.in_(purchase_ids))
+                            .order_by(StockBatch.batch_number)
+                        )
+                    )
+                    if purchase_ids
+                    else []
+                )
+                by_purchase: dict[uuid.UUID, list[PurchaseBatchSummary]] = {}
+                for batch in batches:
+                    by_purchase.setdefault(batch.purchase_id, []).append(
+                        PurchaseBatchSummary(
+                            batch.id,
+                            batch.product.display_name,
+                            batch.batch_number,
+                            batch.quantity_received,
+                            batch.quantity_available,
+                        )
+                    )
+                return [
+                    PurchaseHistoryEntry(
+                        purchase.id,
+                        purchase.purchase_number,
+                        purchase.supplier.company_name or purchase.supplier.name,
+                        format_date(purchase.purchase_date),
+                        purchase.total,
+                        purchase.paid_amount,
+                        purchase.remaining_amount,
+                        purchase.payment_status.value,
+                        purchase.status.value,
+                        purchase.notes,
+                        tuple(by_purchase.get(purchase.id, [])),
+                    )
+                    for purchase in purchases
+                ]
+
+        self._worker = start_worker(
+            operation,
+            succeeded=self._display_history,
+            failed=self._history_failed,
+        )
+
+    def _history_failed(self, error: Exception) -> None:
+        self.history_state.setText("Unable to load purchases")
+        show_error(self, error)
+
+    def _display_history(self, result: object) -> None:
+        self._history_entries = cast(list[PurchaseHistoryEntry], result)
+        rows = [
+            (
+                entry.number,
+                entry.date_text,
+                entry.supplier,
+                ", ".join(f"{batch.product} [{batch.batch_number}]" for batch in entry.batches),
+                f"{self._settings.app_currency} {entry.total:,.2f}",
+                f"{self._settings.app_currency} {entry.paid:,.2f}",
+                f"{self._settings.app_currency} {entry.remaining:,.2f}",
+                entry.payment_status,
+                entry.status,
+                "",
+            )
+            for entry in self._history_entries
+        ]
+        self.history_model.set_rows(rows)
+        populate_row_actions(
+            self.history_table,
+            9,
+            len(rows),
+            (
+                ("View details", self._view_purchase),
+                ("Pay supplier", self._pay_purchase),
+                ("Correct stock", self._correct_purchase_stock),
+                ("Cancel purchase", self._cancel_purchase),
+            ),
+        )
+        self.history_state.setText(
+            "No purchases found." if not rows else f"{len(rows)} purchases shown"
+        )
+
+    def _view_purchase(self, row: int) -> None:
+        if row >= len(self._history_entries):
+            return
+        entry = self._history_entries[row]
+        batches = "\n".join(
+            f"{batch.product} | {batch.batch_number} | "
+            f"received {batch.received}, available {batch.available}"
+            for batch in entry.batches
+        )
+        show_record_details(
+            self,
+            f"Purchase {entry.number}",
+            (
+                ("Date", entry.date_text),
+                ("Supplier", entry.supplier),
+                ("Batches", batches),
+                ("Total", f"{self._settings.app_currency} {entry.total:,.2f}"),
+                ("Paid", f"{self._settings.app_currency} {entry.paid:,.2f}"),
+                ("Remaining", f"{self._settings.app_currency} {entry.remaining:,.2f}"),
+                ("Payment", entry.payment_status),
+                ("Status", entry.status),
+                ("Notes", entry.notes),
+            ),
+        )
+
+    def _pay_purchase(self, row: int) -> None:
+        if row >= len(self._history_entries):
+            return
+        entry = self._history_entries[row]
+        if entry.remaining <= 0 or entry.status != "COMPLETED":
+            QMessageBox.information(self, "Nothing due", "This purchase has no payable balance.")
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Pay supplier — {entry.number}")
+        form = QFormLayout(dialog)
+        method = QComboBox()
+        for candidate in PaymentMethod:
+            method.addItem(candidate.value.replace("_", " ").title(), candidate)
+        amount = MoneyEdit(f"{entry.remaining:.2f}")
+        reference = QLineEdit()
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow("Outstanding", QLabel(f"{self._settings.app_currency} {entry.remaining:,.2f}"))
+        form.addRow("Method", method)
+        form.addRow("Amount", amount)
+        form.addRow("Reference", reference)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        selected_method = cast(PaymentMethod, method.currentData())
+        payment_amount = amount.decimal_value("Payment")
+        payment_reference = reference.text()
+
+        def operation() -> None:
+            with self._session_factory.begin() as session:
+                PaymentService(session).pay_supplier(
+                    entry.id,
+                    actor=self._actor,
+                    method=selected_method,
+                    amount=payment_amount,
+                    reference=payment_reference,
+                )
+
+        self._worker = start_worker(
+            operation,
+            succeeded=lambda _result: self._operation_succeeded("Supplier payment recorded."),
+            failed=lambda error: show_error(self, error),
+        )
+
+    def _correct_purchase_stock(self, row: int) -> None:
+        if row >= len(self._history_entries):
+            return
+        entry = self._history_entries[row]
+        if entry.status != "COMPLETED":
+            QMessageBox.information(
+                self, "Purchase closed", "Cancelled purchases cannot be corrected."
+            )
+            return
+        if not entry.batches:
+            QMessageBox.information(self, "No batches", "No stock batches belong to this purchase.")
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Correct stock — {entry.number}")
+        form = QFormLayout(dialog)
+        batch_choice = QComboBox()
+        for batch in entry.batches:
+            batch_choice.addItem(
+                f"{batch.product} | {batch.batch_number} | available {batch.available}", batch
+            )
+        quantity = QSpinBox()
+        reason = QLineEdit()
+        reason.setPlaceholderText("Required correction reason")
+
+        def selected() -> None:
+            batch = cast(PurchaseBatchSummary, batch_choice.currentData())
+            quantity.setRange(0, batch.received)
+            quantity.setValue(batch.available)
+
+        batch_choice.currentIndexChanged.connect(selected)
+        selected()
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow("Batch", batch_choice)
+        form.addRow("Available quantity", quantity)
+        form.addRow("Reason", reason)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        batch = cast(PurchaseBatchSummary, batch_choice.currentData())
+        corrected_quantity = quantity.value()
+        correction_reason = reason.text()
+
+        def operation() -> None:
+            with self._session_factory.begin() as session:
+                StockInventoryService(session).adjust(
+                    batch.id,
+                    quantity=corrected_quantity,
+                    reason=correction_reason,
+                    actor=self._actor,
+                )
+
+        self._worker = start_worker(
+            operation,
+            succeeded=lambda _result: self._operation_succeeded("Stock correction saved."),
+            failed=lambda error: show_error(self, error),
+        )
+
+    def _cancel_purchase(self, row: int) -> None:
+        if row >= len(self._history_entries):
+            return
+        entry = self._history_entries[row]
+        if entry.status != "COMPLETED":
+            QMessageBox.information(self, "Already cancelled", "This purchase is already closed.")
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "Cancel purchase",
+                "Cancel this purchase and remove its untouched stock? This cannot be undone.",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+
+        def operation() -> None:
+            with self._session_factory.begin() as session:
+                StockPurchaseService(session).cancel(entry.id, self._actor)
+
+        self._worker = start_worker(
+            operation,
+            succeeded=lambda _result: self._operation_succeeded("Purchase cancelled."),
+            failed=lambda error: show_error(self, error),
+        )
+
+    def _operation_succeeded(self, message: str) -> None:
+        show_success(self, message)
+        self._refresh_history()
+        self.purchase_completed.emit(message)

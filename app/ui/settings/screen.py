@@ -83,6 +83,8 @@ class SettingsScreen(QWidget):
         tab = QWidget()
         form = QFormLayout(tab)
         form.setContentsMargins(24, 24, 24, 24)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         return tab, form
 
     def _build_general(self) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import cast
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -19,14 +20,20 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from sqlalchemy import select
+from sqlalchemy import String, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.models.enums import UserRole
 from app.models.user import User
 from app.security.authentication import AuthenticatedUser, AuthenticationService
 from app.security.permissions import Permission, has_permission
-from app.ui.widgets import RowsTableModel, show_error
+from app.ui.widgets import (
+    RowsTableModel,
+    populate_row_actions,
+    show_error,
+    show_record_details,
+    show_success,
+)
 from app.ui.workers import FunctionWorker, start_worker
 from app.utils.formatting import format_date
 
@@ -71,19 +78,36 @@ class UsersScreen(QWidget):
         self._worker: FunctionWorker | None = None
         self._ids: list[uuid.UUID] = []
         self._active: list[bool] = []
+        self._details: list[tuple[object, ...]] = []
         layout = QVBoxLayout(self)
         header = QHBoxLayout()
         title = QLabel("Users")
         title.setObjectName("PageTitle")
         add = QPushButton("Create User")
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search username, name, email, or role")
+        self.status_filter = QComboBox()
+        self.status_filter.addItems(("All", "Active", "Inactive"))
         toggle = QPushButton("Enable / Disable")
         toggle.setProperty("secondary", True)
         header.addWidget(title)
         header.addStretch()
+        header.addWidget(self.search)
+        header.addWidget(self.status_filter)
         header.addWidget(toggle)
         header.addWidget(add)
         self.model = RowsTableModel(
-            ("Username", "Full Name", "Email", "Role", "Active", "Last Login", "Created"), self
+            (
+                "Username",
+                "Full Name",
+                "Email",
+                "Role",
+                "Active",
+                "Last Login",
+                "Created",
+                "Actions",
+            ),
+            self,
         )
         self.table = QTableView()
         self.table.setModel(self.model)
@@ -91,15 +115,57 @@ class UsersScreen(QWidget):
         self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
         layout.addLayout(header)
         layout.addWidget(self.table)
+        self.state_label = QLabel("Loading users…")
+        self.state_label.setObjectName("RecordCount")
+        layout.addWidget(self.state_label)
         add.clicked.connect(self._add)
         toggle.clicked.connect(self._toggle)
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(300)
+        self._search_timer.timeout.connect(self.refresh)
+        self.search.textChanged.connect(lambda _text: self._search_timer.start())
+        self.status_filter.currentIndexChanged.connect(self.refresh)
         self.refresh()
 
     def refresh(self) -> None:
-        def operation() -> tuple[list[tuple[object, ...]], list[uuid.UUID], list[bool]]:
+        query, status = self.search.text().strip(), self.status_filter.currentText()
+        self.state_label.setText("Loading users…")
+
+        def operation() -> tuple[
+            list[tuple[object, ...]], list[uuid.UUID], list[bool], list[tuple[object, ...]]
+        ]:
             with self._session_factory() as session:
-                users = list(session.scalars(select(User).order_by(User.username)))
+                statement = select(User)
+                if status != "All":
+                    statement = statement.where(User.is_active.is_(status == "Active"))
+                if query:
+                    pattern = f"%{query}%"
+                    statement = statement.where(
+                        or_(
+                            User.username.ilike(pattern),
+                            User.full_name.ilike(pattern),
+                            User.email.ilike(pattern),
+                            User.role.cast(String).ilike(pattern),
+                        )
+                    )
+                users = list(session.scalars(statement.order_by(User.username)))
                 return (
+                    [
+                        (
+                            user.username,
+                            user.full_name,
+                            user.email,
+                            user.role.value,
+                            "Yes" if user.is_active else "No",
+                            format_date(user.last_login_at),
+                            format_date(user.created_at),
+                            "",
+                        )
+                        for user in users
+                    ],
+                    [user.id for user in users],
+                    [user.is_active for user in users],
                     [
                         (
                             user.username,
@@ -112,8 +178,6 @@ class UsersScreen(QWidget):
                         )
                         for user in users
                     ],
-                    [user.id for user in users],
-                    [user.is_active for user in users],
                 )
 
         self._worker = start_worker(
@@ -121,30 +185,48 @@ class UsersScreen(QWidget):
         )
 
     def _display(self, result: object) -> None:
-        rows, self._ids, self._active = cast(
-            tuple[list[tuple[object, ...]], list[uuid.UUID], list[bool]], result
+        rows, self._ids, self._active, self._details = cast(
+            tuple[
+                list[tuple[object, ...]],
+                list[uuid.UUID],
+                list[bool],
+                list[tuple[object, ...]],
+            ],
+            result,
         )
         self.model.set_rows(rows)
+        self.state_label.setText("No users found." if not rows else f"{len(rows)} users shown")
+        populate_row_actions(
+            self.table,
+            7,
+            len(rows),
+            (("View", self._view), ("Enable / disable", self._toggle_row)),
+        )
 
     def _add(self) -> None:
         dialog = UserDialog(has_permission(self._actor.role, Permission.MANAGE_OWNER_USERS), self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        username = dialog.username.text()
+        full_name = dialog.full_name.text()
+        email = dialog.email.text()
+        password = dialog.password.text()
+        role = cast(UserRole, dialog.role.currentData())
 
         def operation() -> None:
             with self._session_factory.begin() as session:
                 AuthenticationService(session).create_user(
                     actor=self._actor,
-                    username=dialog.username.text(),
-                    full_name=dialog.full_name.text(),
-                    email=dialog.email.text(),
-                    password=dialog.password.text(),
-                    role=dialog.role.currentData(),
+                    username=username,
+                    full_name=full_name,
+                    email=email,
+                    password=password,
+                    role=role,
                 )
 
         self._worker = start_worker(
             operation,
-            succeeded=lambda _result: self.refresh(),
+            succeeded=lambda _result: self._saved("User created."),
             failed=lambda error: show_error(self, error),
         )
 
@@ -154,6 +236,11 @@ class UsersScreen(QWidget):
             QMessageBox.information(self, "Select user", "Select a user first.")
             return
         row = selected[0].row()
+        self._toggle_row(row)
+
+    def _toggle_row(self, row: int) -> None:
+        if row >= len(self._ids):
+            return
         new_state = not self._active[row]
         action = "enable" if new_state else "disable"
         if (
@@ -172,6 +259,27 @@ class UsersScreen(QWidget):
 
         self._worker = start_worker(
             operation,
-            succeeded=lambda _result: self.refresh(),
+            succeeded=lambda _result: self._saved("User status updated."),
             failed=lambda error: show_error(self, error),
+        )
+
+    def _saved(self, message: str) -> None:
+        show_success(self, message)
+        self.refresh()
+
+    def _view(self, row: int) -> None:
+        if row >= len(self._details):
+            return
+        username, full_name, email, role, active, last_login, created = self._details[row]
+        show_record_details(
+            self,
+            str(full_name),
+            (
+                ("Username", username),
+                ("Email", email),
+                ("Role", role),
+                ("Active", active),
+                ("Last login", last_login),
+                ("Created", created),
+            ),
         )

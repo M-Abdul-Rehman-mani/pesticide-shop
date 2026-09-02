@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -41,12 +41,23 @@ class CustomerService:
             require_permission(actor.role, Permission.CREATE_SALE)
         if not name.strip():
             raise ValidationError("Customer name is required.")
+        clean_phone = normalize_phone(phone, required=False)
+        clean_cnic = cnic.strip() if cnic else None
+        identifiers = []
+        if clean_phone:
+            identifiers.append(Customer.phone == clean_phone)
+        if clean_cnic:
+            identifiers.append(Customer.cnic == clean_cnic)
+        if identifiers and self._session.scalar(
+            select(Customer.id).where(or_(*identifiers)).limit(1)
+        ):
+            raise ConflictError("A customer with that phone number or CNIC already exists.")
         customer = Customer(
             name=name.strip(),
-            phone=normalize_phone(phone, required=False),
+            phone=clean_phone,
             email=normalize_email(email),
             address=address.strip() if address else None,
-            cnic=cnic.strip() if cnic else None,
+            cnic=clean_cnic,
             notes=notes.strip() if notes else None,
         )
         self._session.add(customer)
@@ -82,11 +93,22 @@ class CustomerService:
         old = {"name": customer.name, "phone": customer.phone, "email": customer.email}
         if not name.strip():
             raise ValidationError("Customer name is required.")
+        clean_phone = normalize_phone(phone, required=False)
+        clean_cnic = cnic.strip() if cnic else None
+        identifiers = []
+        if clean_phone:
+            identifiers.append(Customer.phone == clean_phone)
+        if clean_cnic:
+            identifiers.append(Customer.cnic == clean_cnic)
+        if identifiers and self._session.scalar(
+            select(Customer.id).where(Customer.id != customer_id, or_(*identifiers)).limit(1)
+        ):
+            raise ConflictError("Another customer already uses that phone number or CNIC.")
         customer.name = name.strip()
-        customer.phone = normalize_phone(phone, required=False)
+        customer.phone = clean_phone
         customer.email = normalize_email(email)
         customer.address = address.strip() if address else None
-        customer.cnic = cnic.strip() if cnic else None
+        customer.cnic = clean_cnic
         customer.notes = notes.strip() if notes else None
         self._audit.record(
             actor_id=actor.id,

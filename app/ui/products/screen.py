@@ -32,7 +32,13 @@ from app.models.product import Product
 from app.security.authentication import AuthenticatedUser
 from app.services.catalog_service import ProductService
 from app.ui.forms import MoneyEdit
-from app.ui.widgets import RowsTableModel, populate_row_actions, show_error, show_record_details
+from app.ui.widgets import (
+    RowsTableModel,
+    populate_row_actions,
+    show_error,
+    show_record_details,
+    show_success,
+)
 from app.ui.workers import FunctionWorker, start_worker
 
 
@@ -166,6 +172,7 @@ class ProductsScreen(QWidget):
         self._ids: list[uuid.UUID] = []
         self._prices: list[tuple[Decimal, Decimal]] = []
         self._data: list[ProductFormData] = []
+        self._active: list[bool] = []
         layout, header = QVBoxLayout(self), QHBoxLayout()
         title = QLabel("Pesticide Products")
         title.setObjectName("PageTitle")
@@ -173,10 +180,13 @@ class ProductsScreen(QWidget):
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search product, manufacturer, ingredient, or category")
         self.search.setClearButtonEnabled(True)
+        self.status_filter = QComboBox()
+        self.status_filter.addItems(("Active", "Inactive", "All"))
         price.setProperty("secondary", True)
         header.addWidget(title)
         header.addStretch()
         header.addWidget(self.search, 1)
+        header.addWidget(self.status_filter)
         header.addWidget(price)
         header.addWidget(add)
         self.model = RowsTableModel(
@@ -191,6 +201,7 @@ class ProductsScreen(QWidget):
                 "Sale",
                 "Available",
                 "Minimum",
+                "Active",
                 "Actions",
             ),
             self,
@@ -201,6 +212,9 @@ class ProductsScreen(QWidget):
         self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
         layout.addLayout(header)
         layout.addWidget(self.table)
+        self.state_label = QLabel("Loading products…")
+        self.state_label.setObjectName("RecordCount")
+        layout.addWidget(self.state_label)
         add.clicked.connect(self._add)
         price.clicked.connect(self._change_prices)
         self._search_timer = QTimer(self)
@@ -208,16 +222,20 @@ class ProductsScreen(QWidget):
         self._search_timer.setInterval(300)
         self._search_timer.timeout.connect(self.refresh)
         self.search.textChanged.connect(lambda _text: self._search_timer.start())
+        self.status_filter.currentIndexChanged.connect(self.refresh)
         self.refresh()
 
     def refresh(self) -> None:
         query = self.search.text().strip()
+        status = self.status_filter.currentText()
+        self.state_label.setText("Loading products…")
 
         def operation() -> tuple[
             list[tuple[object, ...]],
             list[uuid.UUID],
             list[tuple[Decimal, Decimal]],
             list[ProductFormData],
+            list[bool],
         ]:
             with self._session_factory() as session:
                 stock = (
@@ -229,11 +247,11 @@ class ProductsScreen(QWidget):
                     .group_by(StockBatch.product_id)
                     .subquery()
                 )
-                statement = (
-                    select(Product, func.coalesce(stock.c.stock, 0))
-                    .outerjoin(stock, stock.c.product_id == Product.id)
-                    .where(Product.is_active.is_(True))
+                statement = select(Product, func.coalesce(stock.c.stock, 0)).outerjoin(
+                    stock, stock.c.product_id == Product.id
                 )
+                if status != "All":
+                    statement = statement.where(Product.is_active.is_(status == "Active"))
                 if query:
                     pattern = f"%{query}%"
                     statement = statement.where(
@@ -261,6 +279,7 @@ class ProductsScreen(QWidget):
                             f"{self._currency} {p.default_sale_price:,.2f}",
                             count,
                             p.minimum_stock,
+                            "Yes" if p.is_active else "No",
                             "",
                         )
                         for p, count in products
@@ -284,6 +303,7 @@ class ProductsScreen(QWidget):
                         )
                         for p, _ in products
                     ],
+                    [p.is_active for p, _ in products],
                 )
 
         self._worker = start_worker(
@@ -291,21 +311,29 @@ class ProductsScreen(QWidget):
         )
 
     def _display(self, result: object) -> None:
-        rows, self._ids, self._prices, self._data = cast(
+        rows, self._ids, self._prices, self._data, self._active = cast(
             tuple[
                 list[tuple[object, ...]],
                 list[uuid.UUID],
                 list[tuple[Decimal, Decimal]],
                 list[ProductFormData],
+                list[bool],
             ],
             result,
         )
         self.model.set_rows(rows)
+        self.state_label.setText(
+            "No products found." if not rows else f"{len(rows)} products shown"
+        )
         populate_row_actions(
             self.table,
-            10,
+            11,
             len(rows),
-            (("View", self._view), ("Edit", self._edit), ("Delete", self._delete)),
+            (
+                ("View", self._view),
+                ("Edit", self._edit),
+                ("Activate / deactivate", self._toggle_active),
+            ),
         )
 
     def _add(self) -> None:
@@ -362,7 +390,7 @@ class ProductsScreen(QWidget):
 
         self._worker = start_worker(
             operation,
-            succeeded=lambda _result: self.refresh(),
+            succeeded=lambda _result: self._saved("Product saved."),
             failed=lambda error: show_error(self, error),
         )
 
@@ -410,7 +438,32 @@ class ProductsScreen(QWidget):
 
         self._worker = start_worker(
             operation,
-            succeeded=lambda _result: self.refresh(),
+            succeeded=lambda _result: self._saved("Product removed from active lists."),
+            failed=lambda error: show_error(self, error),
+        )
+
+    def _toggle_active(self, row: int) -> None:
+        if row >= len(self._ids):
+            return
+        new_state = not self._active[row]
+        action = "restore" if new_state else "remove from active lists"
+        if (
+            QMessageBox.question(
+                self, "Confirm product status", f"Do you want to {action} this product?"
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+
+        def operation() -> None:
+            with self._session_factory.begin() as session:
+                ProductService(session).set_active(
+                    self._ids[row], actor=self._actor, is_active=new_state
+                )
+
+        self._worker = start_worker(
+            operation,
+            succeeded=lambda _result: self._saved("Product status updated."),
             failed=lambda error: show_error(self, error),
         )
 
@@ -435,6 +488,10 @@ class ProductsScreen(QWidget):
 
         self._worker = start_worker(
             operation,
-            succeeded=lambda _result: self.refresh(),
+            succeeded=lambda _result: self._saved("Product prices updated."),
             failed=lambda error: show_error(self, error),
         )
+
+    def _saved(self, message: str) -> None:
+        show_success(self, message)
+        self.refresh()

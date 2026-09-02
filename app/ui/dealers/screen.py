@@ -9,6 +9,7 @@ from typing import cast
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -30,7 +31,13 @@ from app.models.sale import Sale
 from app.security.authentication import AuthenticatedUser
 from app.services.catalog_service import DealerService
 from app.ui.forms import MoneyEdit
-from app.ui.widgets import RowsTableModel, populate_row_actions, show_error, show_record_details
+from app.ui.widgets import (
+    RowsTableModel,
+    populate_row_actions,
+    show_error,
+    show_record_details,
+    show_success,
+)
 from app.ui.workers import FunctionWorker, start_worker
 from app.utils.formatting import format_date
 
@@ -118,12 +125,15 @@ class DealersScreen(QWidget):
         self._worker: FunctionWorker | None = None
         self._ids: list[uuid.UUID] = []
         self._data: list[DealerFormData] = []
+        self._active: list[bool] = []
         layout = QVBoxLayout(self)
         header = QHBoxLayout()
         title = QLabel("Dealers")
         title.setObjectName("PageTitle")
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search dealer, business, phone, or territory")
+        self.status_filter = QComboBox()
+        self.status_filter.addItems(("Active", "Inactive", "All"))
         history = QPushButton("Sales History")
         history.setProperty("secondary", True)
         edit = QPushButton("Edit")
@@ -132,6 +142,7 @@ class DealersScreen(QWidget):
         header.addWidget(title)
         header.addStretch()
         header.addWidget(self.search)
+        header.addWidget(self.status_filter)
         header.addWidget(history)
         header.addWidget(edit)
         header.addWidget(add)
@@ -144,6 +155,7 @@ class DealersScreen(QWidget):
                 "Territory",
                 "Balance",
                 "Credit Limit",
+                "Active",
                 "Actions",
             ),
             self,
@@ -155,6 +167,9 @@ class DealersScreen(QWidget):
         self.table.horizontalHeader().setStretchLastSection(True)
         layout.addLayout(header)
         layout.addWidget(self.table)
+        self.state_label = QLabel("Loading dealers…")
+        self.state_label.setObjectName("RecordCount")
+        layout.addWidget(self.state_label)
         add.clicked.connect(self._add)
         edit.clicked.connect(self._edit)
         history.clicked.connect(self._history)
@@ -164,14 +179,21 @@ class DealersScreen(QWidget):
         self._search_timer.setInterval(300)
         self._search_timer.timeout.connect(self.refresh)
         self.search.textChanged.connect(lambda _text: self._search_timer.start())
+        self.status_filter.currentIndexChanged.connect(self.refresh)
         self.refresh()
 
     def refresh(self) -> None:
         query = self.search.text().strip()
+        status = self.status_filter.currentText()
+        self.state_label.setText("Loading dealers…")
 
-        def operation() -> tuple[list[tuple[object, ...]], list[uuid.UUID], list[DealerFormData]]:
+        def operation() -> tuple[
+            list[tuple[object, ...]], list[uuid.UUID], list[DealerFormData], list[bool]
+        ]:
             with self._session_factory() as session:
-                statement = select(Dealer).where(Dealer.is_active.is_(True))
+                statement = select(Dealer)
+                if status != "All":
+                    statement = statement.where(Dealer.is_active.is_(status == "Active"))
                 if query:
                     pattern = f"%{query}%"
                     statement = statement.where(
@@ -196,6 +218,7 @@ class DealersScreen(QWidget):
                             dealer.territory or "—",
                             f"{self._currency} {dealer.balance:,.2f}",
                             f"{self._currency} {dealer.credit_limit:,.2f}",
+                            "Yes" if dealer.is_active else "No",
                             "",
                         )
                         for dealer in dealers
@@ -216,6 +239,7 @@ class DealersScreen(QWidget):
                         )
                         for dealer in dealers
                     ],
+                    [dealer.is_active for dealer in dealers],
                 )
 
         self._worker = start_worker(
@@ -223,15 +247,21 @@ class DealersScreen(QWidget):
         )
 
     def _display(self, result: object) -> None:
-        rows, self._ids, self._data = cast(
-            tuple[list[tuple[object, ...]], list[uuid.UUID], list[DealerFormData]], result
+        rows, self._ids, self._data, self._active = cast(
+            tuple[list[tuple[object, ...]], list[uuid.UUID], list[DealerFormData], list[bool]],
+            result,
         )
         self.model.set_rows(rows)
+        self.state_label.setText("No dealers found." if not rows else f"{len(rows)} dealers shown")
         populate_row_actions(
             self.table,
-            7,
+            8,
             len(rows),
-            (("View", self._view), ("Edit", self._edit_row), ("Delete", self._delete)),
+            (
+                ("View", self._view),
+                ("Edit", self._edit_row),
+                ("Activate / deactivate", self._toggle_active),
+            ),
         )
 
     def _selected(self) -> int | None:
@@ -300,9 +330,38 @@ class DealersScreen(QWidget):
 
         self._worker = start_worker(
             operation,
-            succeeded=lambda _result: self.refresh(),
+            succeeded=lambda _result: self._saved("Dealer status updated."),
             failed=lambda error: show_error(self, error),
         )
+
+    def _toggle_active(self, row: int) -> None:
+        if row >= len(self._ids):
+            return
+        new_state = not self._active[row]
+        action = "restore" if new_state else "remove from active lists"
+        if (
+            QMessageBox.question(
+                self, "Confirm dealer status", f"Do you want to {action} this dealer?"
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+
+        def operation() -> None:
+            with self._session_factory.begin() as session:
+                DealerService(session).set_active(
+                    self._ids[row], actor=self._actor, is_active=new_state
+                )
+
+        self._worker = start_worker(
+            operation,
+            succeeded=lambda _result: self._saved("Dealer status updated."),
+            failed=lambda error: show_error(self, error),
+        )
+
+    def _saved(self, message: str) -> None:
+        show_success(self, message)
+        self.refresh()
 
     def _save(self, dealer_id: uuid.UUID | None, data: DealerFormData) -> None:
         def operation() -> None:
@@ -340,7 +399,7 @@ class DealersScreen(QWidget):
 
         self._worker = start_worker(
             operation,
-            succeeded=lambda _result: self.refresh(),
+            succeeded=lambda _result: self._saved("Dealer saved."),
             failed=lambda error: show_error(self, error),
         )
 

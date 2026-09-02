@@ -30,8 +30,17 @@ from app.models.inventory import StockBatch, StockMovement
 from app.models.product import Product
 from app.models.supplier import Supplier
 from app.security.authentication import AuthenticatedUser
+from app.security.permissions import Permission, has_permission
 from app.services.stock_inventory_service import StockInventoryService
-from app.ui.widgets import PageHeader, RowsTableModel, configure_table, show_error
+from app.ui.widgets import (
+    PageHeader,
+    RowsTableModel,
+    configure_table,
+    populate_row_actions,
+    show_error,
+    show_record_details,
+    show_success,
+)
 from app.ui.workers import FunctionWorker, start_worker
 from app.utils.formatting import format_date
 
@@ -69,7 +78,15 @@ class InventoryScreen(QWidget):
         self.search.setClearButtonEnabled(True)
         self.filter = QComboBox()
         self.filter.addItems(
-            ("All", "In Stock", "Low Stock", "Expiring in 90 Days", "Expired", "Out of Stock")
+            (
+                "All",
+                "In Stock",
+                "Low Stock",
+                "Expiring in 90 Days",
+                "Expired",
+                "Out of Stock",
+                "Inactive",
+            )
         )
         refresh, history, adjust = (
             QPushButton("Refresh"),
@@ -103,6 +120,7 @@ class InventoryScreen(QWidget):
                 "Purchase",
                 "Sale",
                 "Stock Value",
+                "Actions",
             ),
             self,
         )
@@ -160,7 +178,9 @@ class InventoryScreen(QWidget):
                     )
                 today = date.today()
                 if selected_filter == "In Stock":
-                    statement = statement.where(StockBatch.quantity_available > 0)
+                    statement = statement.where(
+                        StockBatch.quantity_available > 0, StockBatch.is_active.is_(True)
+                    )
                 elif selected_filter == "Out of Stock":
                     statement = statement.where(StockBatch.quantity_available == 0)
                 elif selected_filter == "Expired":
@@ -174,6 +194,8 @@ class InventoryScreen(QWidget):
                     statement = statement.where(
                         StockBatch.quantity_available <= Product.minimum_stock
                     )
+                elif selected_filter == "Inactive":
+                    statement = statement.where(StockBatch.is_active.is_(False))
                 batches = list(
                     session.scalars(
                         statement.order_by(
@@ -196,6 +218,7 @@ class InventoryScreen(QWidget):
                             f"{self._currency} {b.purchase_price:,.2f}",
                             f"{self._currency} {b.selling_price:,.2f}",
                             f"{self._currency} {b.stock_value:,.2f}",
+                            "",
                         )
                         for b in batches
                     ],
@@ -213,17 +236,81 @@ class InventoryScreen(QWidget):
             tuple[list[tuple[object, ...]], list[uuid.UUID], list[int], list[int]], result
         )
         self.model.set_rows(rows)
+        actions = [
+            ("View", self._view_row),
+            ("Movement history", self._history_row),
+        ]
+        if self._actor is not None and has_permission(
+            self._actor.role, Permission.MANAGE_INVENTORY
+        ):
+            actions.append(("Adjust stock", self._adjust_row))
+        populate_row_actions(
+            self.table,
+            12,
+            len(rows),
+            actions,
+        )
         self.record_count.setText(f"{len(rows):,} {'batch' if len(rows) == 1 else 'batches'} shown")
         self._selection_changed()
 
     def _selection_changed(self) -> None:
         selected = self._selected() is not None
         self._history_button.setEnabled(selected)
-        self._adjust_button.setEnabled(selected and self._actor is not None)
+        can_adjust = self._actor is not None and has_permission(
+            self._actor.role, Permission.MANAGE_INVENTORY
+        )
+        self._adjust_button.setEnabled(selected and can_adjust)
 
     def _selected(self) -> int | None:
         rows = self.table.selectionModel().selectedRows()
         return rows[0].row() if rows else None
+
+    def _select_row(self, row: int) -> bool:
+        if row >= len(self._ids):
+            return False
+        self.table.selectRow(row)
+        return True
+
+    def _view_row(self, row: int) -> None:
+        if not self._select_row(row):
+            return
+        values = self.model.row(row)
+        show_record_details(
+            self,
+            f"Batch {values[2]}",
+            tuple(
+                zip(
+                    (
+                        "Product",
+                        "Manufacturer",
+                        "Batch",
+                        "Available",
+                        "Received",
+                        "Unit",
+                        "Expiry",
+                        "Expiry status",
+                        "Supplier",
+                        "Purchase price",
+                        "Sale price",
+                        "Stock value",
+                    ),
+                    values[:12],
+                    strict=True,
+                )
+            ),
+        )
+
+    def _history_row(self, row: int) -> None:
+        if self._select_row(row):
+            self._history()
+
+    def _adjust_row(self, row: int) -> None:
+        if (
+            self._actor is not None
+            and has_permission(self._actor.role, Permission.MANAGE_INVENTORY)
+            and self._select_row(row)
+        ):
+            self._adjust()
 
     def _adjust(self) -> None:
         row = self._selected()
@@ -252,21 +339,27 @@ class InventoryScreen(QWidget):
         form.addRow(buttons)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        corrected_quantity = quantity.value()
+        correction_reason = reason.text()
 
         def operation() -> None:
             with self._session_factory.begin() as session:
                 StockInventoryService(session).adjust(
                     self._ids[row],
-                    quantity=quantity.value(),
-                    reason=reason.text(),
+                    quantity=corrected_quantity,
+                    reason=correction_reason,
                     actor=actor,
                 )
 
         self._worker = start_worker(
             operation,
-            succeeded=lambda _result: self.refresh(),
+            succeeded=lambda _result: self._adjusted(),
             failed=lambda error: show_error(self, error),
         )
+
+    def _adjusted(self) -> None:
+        show_success(self, "Stock adjustment saved.")
+        self.refresh()
 
     def _history(self) -> None:
         row = self._selected()

@@ -8,6 +8,7 @@ from typing import cast
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -28,7 +29,13 @@ from app.models.purchase import Purchase
 from app.models.supplier import Supplier
 from app.security.authentication import AuthenticatedUser
 from app.services.catalog_service import SupplierService
-from app.ui.widgets import RowsTableModel, show_error
+from app.ui.widgets import (
+    RowsTableModel,
+    populate_row_actions,
+    show_error,
+    show_record_details,
+    show_success,
+)
 from app.ui.workers import FunctionWorker, start_worker
 from app.utils.formatting import format_date
 
@@ -104,12 +111,15 @@ class SuppliersScreen(QWidget):
         self._worker: FunctionWorker | None = None
         self._ids: list[uuid.UUID] = []
         self._data: list[SupplierFormData] = []
+        self._active: list[bool] = []
         layout = QVBoxLayout(self)
         header = QHBoxLayout()
         title = QLabel("Suppliers")
         title.setObjectName("PageTitle")
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search supplier")
+        self.status_filter = QComboBox()
+        self.status_filter.addItems(("Active", "Inactive", "All"))
         add = QPushButton("Add Supplier")
         edit = QPushButton("Edit")
         edit.setProperty("secondary", True)
@@ -118,11 +128,12 @@ class SuppliersScreen(QWidget):
         header.addWidget(title)
         header.addStretch()
         header.addWidget(self.search)
+        header.addWidget(self.status_filter)
         header.addWidget(history)
         header.addWidget(edit)
         header.addWidget(add)
         self.model = RowsTableModel(
-            ("Name", "Company", "Phone", "Email", "Balance", "Active"), self
+            ("Name", "Company", "Phone", "Email", "Balance", "Active", "Actions"), self
         )
         self.table = QTableView()
         self.table.setModel(self.model)
@@ -130,6 +141,9 @@ class SuppliersScreen(QWidget):
         self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
         layout.addLayout(header)
         layout.addWidget(self.table)
+        self.state_label = QLabel("Loading suppliers…")
+        self.state_label.setObjectName("RecordCount")
+        layout.addWidget(self.state_label)
         add.clicked.connect(self._add)
         edit.clicked.connect(self._edit)
         history.clicked.connect(self._history)
@@ -139,14 +153,21 @@ class SuppliersScreen(QWidget):
         self._search_timer.setInterval(300)
         self._search_timer.timeout.connect(self.refresh)
         self.search.textChanged.connect(lambda _text: self._search_timer.start())
+        self.status_filter.currentIndexChanged.connect(self.refresh)
         self.refresh()
 
     def refresh(self) -> None:
         query = self.search.text().strip()
+        status = self.status_filter.currentText()
+        self.state_label.setText("Loading suppliers…")
 
-        def operation() -> tuple[list[tuple[object, ...]], list[uuid.UUID], list[SupplierFormData]]:
+        def operation() -> tuple[
+            list[tuple[object, ...]], list[uuid.UUID], list[SupplierFormData], list[bool]
+        ]:
             with self._session_factory() as session:
                 statement = select(Supplier)
+                if status != "All":
+                    statement = statement.where(Supplier.is_active.is_(status == "Active"))
                 if query:
                     pattern = f"%{query}%"
                     statement = statement.where(
@@ -169,6 +190,7 @@ class SuppliersScreen(QWidget):
                             supplier.email or "—",
                             f"{self._currency} {supplier.balance:,.2f}",
                             "Yes" if supplier.is_active else "No",
+                            "",
                         )
                         for supplier in suppliers
                     ],
@@ -185,6 +207,7 @@ class SuppliersScreen(QWidget):
                         )
                         for supplier in suppliers
                     ],
+                    [supplier.is_active for supplier in suppliers],
                 )
 
         self._worker = start_worker(
@@ -192,10 +215,25 @@ class SuppliersScreen(QWidget):
         )
 
     def _display(self, result: object) -> None:
-        rows, self._ids, self._data = cast(
-            tuple[list[tuple[object, ...]], list[uuid.UUID], list[SupplierFormData]], result
+        rows, self._ids, self._data, self._active = cast(
+            tuple[list[tuple[object, ...]], list[uuid.UUID], list[SupplierFormData], list[bool]],
+            result,
         )
         self.model.set_rows(rows)
+        self.state_label.setText(
+            "No suppliers found." if not rows else f"{len(rows)} suppliers shown"
+        )
+        populate_row_actions(
+            self.table,
+            6,
+            len(rows),
+            (
+                ("View", self._view),
+                ("Edit", self._edit_row),
+                ("Purchase history", self._history_row),
+                ("Activate / deactivate", self._toggle_active),
+            ),
+        )
 
     def _selected(self) -> int | None:
         rows = self.table.selectionModel().selectedRows()
@@ -214,6 +252,61 @@ class SuppliersScreen(QWidget):
         dialog = SupplierDialog(self._data[row], self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._save(self._ids[row], dialog.values())
+
+    def _edit_row(self, row: int) -> None:
+        if row >= len(self._data):
+            return
+        dialog = SupplierDialog(self._data[row], self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._save(self._ids[row], dialog.values())
+
+    def _view(self, row: int) -> None:
+        if row >= len(self._data):
+            return
+        data = self._data[row]
+        show_record_details(
+            self,
+            data.company or data.name,
+            (
+                ("Contact", data.name),
+                ("Phone", data.phone),
+                ("Email", data.email),
+                ("Address", data.address),
+                ("Tax number", data.tax_number),
+                ("Notes", data.notes),
+            ),
+        )
+
+    def _toggle_active(self, row: int) -> None:
+        if row >= len(self._ids):
+            return
+        new_state = not self._active[row]
+        action = "restore" if new_state else "remove from active lists"
+        if (
+            QMessageBox.question(
+                self, "Confirm supplier status", f"Do you want to {action} this supplier?"
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+
+        def operation() -> None:
+            with self._session_factory.begin() as session:
+                SupplierService(session).set_active(
+                    self._ids[row], actor=self._actor, is_active=new_state
+                )
+
+        self._worker = start_worker(
+            operation,
+            succeeded=lambda _result: self._saved("Supplier status updated."),
+            failed=lambda error: show_error(self, error),
+        )
+
+    def _history_row(self, row: int) -> None:
+        if row >= len(self._ids):
+            return
+        self.table.selectRow(row)
+        self._history()
 
     def _save(self, supplier_id: uuid.UUID | None, data: SupplierFormData) -> None:
         def operation() -> None:
@@ -245,9 +338,13 @@ class SuppliersScreen(QWidget):
 
         self._worker = start_worker(
             operation,
-            succeeded=lambda _result: self.refresh(),
+            succeeded=lambda _result: self._saved("Supplier saved."),
             failed=lambda error: show_error(self, error),
         )
+
+    def _saved(self, message: str) -> None:
+        show_success(self, message)
+        self.refresh()
 
     def _history(self) -> None:
         row = self._selected()

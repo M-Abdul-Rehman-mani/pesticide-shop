@@ -9,13 +9,14 @@ from decimal import Decimal
 from pathlib import Path
 from typing import cast
 
-from PySide6.QtCore import QDate
+from PySide6.QtCore import QDate, QTimer
 from PySide6.QtWidgets import (
     QComboBox,
     QDateEdit,
     QFileDialog,
-    QHBoxLayout,
+    QGridLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QTableView,
@@ -27,9 +28,10 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config.settings import Settings
 from app.models.dealer import Dealer
-from app.models.enums import SaleStatus
+from app.models.enums import PurchaseStatus, SaleStatus
 from app.models.inventory import StockBatch
 from app.models.payment import Payment
+from app.models.product import Product
 from app.models.purchase import Purchase
 from app.models.sale import Sale, SaleItem
 from app.models.user import User
@@ -39,7 +41,7 @@ from app.reports.pdf_exporter import PDFReportExporter
 from app.reports.report_service import DateRange
 from app.security.authentication import AuthenticatedUser
 from app.security.permissions import Permission, has_permission, require_permission
-from app.ui.widgets import RowsTableModel, show_error
+from app.ui.widgets import RowsTableModel, configure_table, show_error
 from app.ui.workers import FunctionWorker, start_worker
 
 
@@ -65,7 +67,8 @@ class ReportsScreen(QWidget):
         self._session_factory, self._actor, self._settings = session_factory, actor, settings
         self._worker: FunctionWorker | None = None
         self._payload: ReportPayload | None = None
-        layout, toolbar = QVBoxLayout(self), QHBoxLayout()
+        self._source_payload: ReportPayload | None = None
+        layout, toolbar = QVBoxLayout(self), QGridLayout()
         title = QLabel("Reports & Previous Sales")
         title.setObjectName("PageTitle")
         self.report_type = QComboBox()
@@ -77,6 +80,12 @@ class ReportsScreen(QWidget):
             "Payments",
             "Dealer Balances",
             "Employee Sales",
+            "Daily Cash Closing",
+            "Customer / Dealer Statements",
+            "Product Profitability",
+            "Tax & Discounts",
+            "Outstanding Payments",
+            "Expiry Loss",
         ]
         if has_permission(actor.role, Permission.VIEW_PROFIT):
             names.insert(1, "Profit")
@@ -91,7 +100,7 @@ class ReportsScreen(QWidget):
         )
         self.from_date.setCalendarPopup(True)
         self.to_date.setCalendarPopup(True)
-        run, self.excel, self.pdf, self.print_button = (
+        self.run_button, self.excel, self.pdf, self.print_button = (
             QPushButton("Run Report"),
             QPushButton("Export Excel"),
             QPushButton("Export PDF"),
@@ -100,31 +109,42 @@ class ReportsScreen(QWidget):
         for button in (self.excel, self.pdf, self.print_button):
             button.setProperty("secondary", True)
             button.setEnabled(False)
-        for widget in (
-            title,
-            self.report_type,
-            self.preset,
-            self.from_date,
-            self.to_date,
-            run,
-            self.excel,
-            self.pdf,
-            self.print_button,
-        ):
-            if widget is self.report_type:
-                toolbar.addStretch()
-            toolbar.addWidget(widget)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Filter the displayed report")
+        self.search.setClearButtonEnabled(True)
+        toolbar.addWidget(title, 0, 0, 1, 2)
+        toolbar.addWidget(QLabel("Report"), 1, 0)
+        toolbar.addWidget(self.report_type, 1, 1)
+        toolbar.addWidget(QLabel("Period"), 1, 2)
+        toolbar.addWidget(self.preset, 1, 3)
+        toolbar.addWidget(self.from_date, 1, 4)
+        toolbar.addWidget(self.to_date, 1, 5)
+        toolbar.addWidget(self.run_button, 1, 6)
+        toolbar.addWidget(self.search, 2, 0, 1, 4)
+        toolbar.addWidget(self.excel, 2, 4)
+        toolbar.addWidget(self.pdf, 2, 5)
+        toolbar.addWidget(self.print_button, 2, 6)
+        toolbar.setColumnStretch(1, 1)
+        toolbar.setColumnStretch(3, 1)
         self.model = RowsTableModel((), self)
         self.table = QTableView()
         self.table.setModel(self.model)
-        self.table.setAlternatingRowColors(True)
+        configure_table(self.table, stretch_column=0, minimum_section_size=76)
+        self.state_label = QLabel("Choose a report and select Run Report.")
+        self.state_label.setObjectName("RecordCount")
         layout.addLayout(toolbar)
-        layout.addWidget(self.table)
+        layout.addWidget(self.table, 1)
+        layout.addWidget(self.state_label)
         self.preset.currentTextChanged.connect(self._apply_preset)
-        run.clicked.connect(self.run_report)
+        self.run_button.clicked.connect(self.run_report)
         self.excel.clicked.connect(self._export_excel)
         self.pdf.clicked.connect(self._export_pdf)
         self.print_button.clicked.connect(self._print)
+        self._filter_timer = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.setInterval(200)
+        self._filter_timer.timeout.connect(self._apply_result_filter)
+        self.search.textChanged.connect(lambda _text: self._filter_timer.start())
         self._apply_preset("Today")
 
     def _apply_preset(self, preset: str) -> None:
@@ -149,6 +169,8 @@ class ReportsScreen(QWidget):
         report_type = self.report_type.currentText()
         start = cast(date, self.from_date.date().toPython())
         end = cast(date, self.to_date.date().toPython())
+        self.run_button.setEnabled(False)
+        self.state_label.setText("Loading report…")
 
         def operation() -> ReportPayload:
             period = DateRange.local_days(start, end, self._settings.app_timezone)
@@ -349,6 +371,245 @@ class ReportsScreen(QWidget):
                         frozenset({5, 6}),
                         frozenset(),
                     )
+                if report_type == "Daily Cash Closing":
+                    payments = session.scalars(
+                        select(Payment).where(
+                            Payment.created_at >= period.start, Payment.created_at < period.end
+                        )
+                    )
+                    totals: dict[str, list[Decimal]] = {}
+                    for payment in payments:
+                        method_totals = totals.setdefault(
+                            payment.method.value.replace("_", " ").title(),
+                            [Decimal("0.00"), Decimal("0.00")],
+                        )
+                        method_totals[0 if payment.direction.value == "INCOMING" else 1] += (
+                            payment.amount
+                        )
+                    raw = tuple(
+                        (method, amounts[0], amounts[1], amounts[0] - amounts[1])
+                        for method, amounts in sorted(totals.items())
+                    )
+                    return self._payload_for(
+                        "Daily Cash Closing",
+                        ("Payment Method", "Incoming", "Outgoing", "Net Cash"),
+                        raw,
+                        frozenset({2, 3, 4}),
+                        frozenset(),
+                    )
+                if report_type == "Customer / Dealer Statements":
+                    sales = session.scalars(
+                        select(Sale)
+                        .where(Sale.sale_date >= period.start, Sale.sale_date < period.end)
+                        .order_by(Sale.sale_date.desc())
+                    )
+                    raw = tuple(
+                        (
+                            "Dealer" if sale.dealer else "Customer",
+                            sale.dealer.display_name
+                            if sale.dealer
+                            else sale.customer.name
+                            if sale.customer
+                            else "Walk-in",
+                            sale.dealer.phone
+                            if sale.dealer
+                            else sale.customer.phone
+                            if sale.customer
+                            else "",
+                            sale.invoice_number,
+                            sale.total,
+                            sale.paid_amount,
+                            sale.remaining_amount,
+                            sale.payment_status.value,
+                            sale.sale_date,
+                        )
+                        for sale in sales
+                    )
+                    return self._payload_for(
+                        "Customer and Dealer Statement",
+                        (
+                            "Account Type",
+                            "Account",
+                            "Phone",
+                            "Invoice",
+                            "Total",
+                            "Paid",
+                            "Outstanding",
+                            "Payment",
+                            "Date",
+                        ),
+                        raw,
+                        frozenset({5, 6, 7}),
+                        frozenset({9}),
+                    )
+                if report_type == "Product Profitability":
+                    rows = session.execute(
+                        select(
+                            Product.name,
+                            Product.manufacturer,
+                            func.sum(SaleItem.quantity),
+                            func.sum(SaleItem.total),
+                            func.sum(SaleItem.purchase_cost),
+                            func.sum(SaleItem.other_cost),
+                            func.sum(SaleItem.total - SaleItem.purchase_cost - SaleItem.other_cost),
+                        )
+                        .join(SaleItem, SaleItem.product_id == Product.id)
+                        .join(Sale, Sale.id == SaleItem.sale_id)
+                        .where(
+                            Sale.status == SaleStatus.COMPLETED,
+                            Sale.sale_date >= period.start,
+                            Sale.sale_date < period.end,
+                        )
+                        .group_by(Product.id, Product.name, Product.manufacturer)
+                        .order_by(
+                            func.sum(
+                                SaleItem.total - SaleItem.purchase_cost - SaleItem.other_cost
+                            ).desc()
+                        )
+                    )
+                    return self._payload_for(
+                        "Product Profitability",
+                        ("Product", "Manufacturer", "Units", "Revenue", "Cost", "Other", "Profit"),
+                        tuple(tuple(row) for row in rows),
+                        frozenset({4, 5, 6, 7}),
+                        frozenset(),
+                    )
+                if report_type == "Tax & Discounts":
+                    sales = session.scalars(
+                        select(Sale).where(
+                            Sale.status == SaleStatus.COMPLETED,
+                            Sale.sale_date >= period.start,
+                            Sale.sale_date < period.end,
+                        )
+                    )
+                    purchases = session.scalars(
+                        select(Purchase).where(
+                            Purchase.status == PurchaseStatus.COMPLETED,
+                            Purchase.purchase_date >= period.start,
+                            Purchase.purchase_date < period.end,
+                        )
+                    )
+                    tax_rows = [
+                        (
+                            "Sale",
+                            item.invoice_number,
+                            item.subtotal,
+                            item.discount,
+                            item.tax,
+                            item.total,
+                            item.sale_date,
+                        )
+                        for item in sales
+                    ]
+                    tax_rows.extend(
+                        (
+                            "Purchase",
+                            item.purchase_number,
+                            item.subtotal,
+                            item.discount,
+                            item.tax,
+                            item.total,
+                            item.purchase_date,
+                        )
+                        for item in purchases
+                    )
+                    tax_rows.sort(key=lambda row: row[6], reverse=True)
+                    return self._payload_for(
+                        "Tax and Discount Report",
+                        ("Type", "Document", "Subtotal", "Discount", "Tax", "Total", "Date"),
+                        tuple(tax_rows),
+                        frozenset({3, 4, 5, 6}),
+                        frozenset({7}),
+                    )
+                if report_type == "Outstanding Payments":
+                    sales = session.scalars(
+                        select(Sale).where(
+                            Sale.remaining_amount > 0,
+                            Sale.status == SaleStatus.COMPLETED,
+                            Sale.sale_date >= period.start,
+                            Sale.sale_date < period.end,
+                        )
+                    )
+                    purchases = session.scalars(
+                        select(Purchase).where(
+                            Purchase.remaining_amount > 0,
+                            Purchase.status == PurchaseStatus.COMPLETED,
+                            Purchase.purchase_date >= period.start,
+                            Purchase.purchase_date < period.end,
+                        )
+                    )
+                    outstanding_rows = [
+                        (
+                            "Receivable",
+                            item.invoice_number,
+                            item.dealer.display_name
+                            if item.dealer
+                            else item.customer.name
+                            if item.customer
+                            else "Walk-in",
+                            item.total,
+                            item.paid_amount,
+                            item.remaining_amount,
+                            item.sale_date,
+                        )
+                        for item in sales
+                    ]
+                    outstanding_rows.extend(
+                        (
+                            "Payable",
+                            item.purchase_number,
+                            item.supplier.company_name or item.supplier.name,
+                            item.total,
+                            item.paid_amount,
+                            item.remaining_amount,
+                            item.purchase_date,
+                        )
+                        for item in purchases
+                    )
+                    outstanding_rows.sort(key=lambda row: row[6], reverse=True)
+                    return self._payload_for(
+                        "Outstanding Payments",
+                        ("Type", "Document", "Account", "Total", "Paid", "Outstanding", "Date"),
+                        tuple(outstanding_rows),
+                        frozenset({4, 5, 6}),
+                        frozenset({7}),
+                    )
+                if report_type == "Expiry Loss":
+                    batches = session.scalars(
+                        select(StockBatch)
+                        .where(
+                            StockBatch.expiry_date < date.today(),
+                            StockBatch.quantity_available > 0,
+                        )
+                        .order_by(StockBatch.expiry_date)
+                    )
+                    raw = tuple(
+                        (
+                            batch.product.display_name,
+                            batch.batch_number,
+                            batch.expiry_date,
+                            batch.quantity_available,
+                            batch.purchase_price,
+                            batch.stock_value,
+                            batch.supplier.company_name or batch.supplier.name,
+                        )
+                        for batch in batches
+                    )
+                    return self._payload_for(
+                        "Expired Stock Loss",
+                        (
+                            "Product",
+                            "Batch",
+                            "Expired",
+                            "Units",
+                            "Unit Cost",
+                            "Potential Loss",
+                            "Supplier",
+                        ),
+                        raw,
+                        frozenset({5, 6}),
+                        frozenset({3}),
+                    )
                 rows = session.execute(
                     select(
                         User.full_name,
@@ -373,7 +634,10 @@ class ReportsScreen(QWidget):
                 )
 
         self._worker = start_worker(
-            operation, succeeded=self._display, failed=lambda error: show_error(self, error)
+            operation,
+            succeeded=self._display,
+            failed=lambda error: show_error(self, error),
+            finished=lambda: self.run_button.setEnabled(True),
         )
 
     def _payload_for(
@@ -401,13 +665,38 @@ class ReportsScreen(QWidget):
 
     def _display(self, payload: object) -> None:
         assert isinstance(payload, ReportPayload)
-        self._payload = payload
-        self.model = RowsTableModel(payload.headers, self)
-        self.model.set_rows(payload.display_rows)
-        self.table.setModel(self.model)
-        self.table.resizeColumnsToContents()
+        self._source_payload = payload
+        self._apply_result_filter()
         for button in (self.excel, self.pdf, self.print_button):
             button.setEnabled(True)
+
+    def _apply_result_filter(self) -> None:
+        if self._source_payload is None:
+            return
+        query = self.search.text().strip().casefold()
+        pairs = list(zip(self._source_payload.rows, self._source_payload.display_rows, strict=True))
+        if query:
+            pairs = [
+                pair for pair in pairs if any(query in str(value).casefold() for value in pair[1])
+            ]
+        raw = tuple(pair[0] for pair in pairs)
+        display = tuple(pair[1] for pair in pairs)
+        source = self._source_payload
+        self._payload = ReportPayload(
+            source.title,
+            source.headers,
+            raw,
+            display,
+            source.currency_columns,
+            source.date_columns,
+        )
+        self.model = RowsTableModel(source.headers, self)
+        self.model.set_rows(display)
+        self.table.setModel(self.model)
+        self.table.resizeColumnsToContents()
+        self.state_label.setText(
+            "No matching report records." if not display else f"{len(display):,} records shown"
+        )
 
     def _export_excel(self) -> None:
         if not self._payload:

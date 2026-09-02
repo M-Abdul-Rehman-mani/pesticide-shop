@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from collections import Counter
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -187,6 +188,68 @@ class StockPurchaseService:
                 "batch_count": len(command.batches),
                 "quantity": sum(item.quantity for item in command.batches),
             },
+        )
+        self._session.flush()
+        return purchase
+
+    def cancel(self, purchase_id: uuid.UUID, actor: AuthenticatedUser) -> Purchase:
+        """Cancel an untouched, unpaid purchase and reverse its available stock."""
+
+        require_permission(actor.role, Permission.RECORD_PURCHASE)
+        purchase = self._session.execute(
+            select(Purchase).where(Purchase.id == purchase_id).with_for_update(of=Purchase)
+        ).scalar_one_or_none()
+        if purchase is None:
+            raise NotFoundError("Purchase was not found.")
+        if purchase.status is not PurchaseStatus.COMPLETED:
+            raise ConflictError("Only a completed purchase can be cancelled.")
+        if purchase.paid_amount > 0:
+            raise ConflictError(
+                "This purchase has supplier payments. Record a correcting transaction instead."
+            )
+        batches = list(
+            self._session.scalars(
+                select(StockBatch)
+                .where(StockBatch.purchase_id == purchase.id)
+                .order_by(StockBatch.id)
+                .with_for_update(of=StockBatch)
+            )
+        )
+        if not batches or any(
+            batch.quantity_available != batch.quantity_received for batch in batches
+        ):
+            raise ConflictError(
+                "Stock from this purchase has already changed. Use a stock correction instead."
+            )
+        supplier = self._session.execute(
+            select(Supplier).where(Supplier.id == purchase.supplier_id).with_for_update(of=Supplier)
+        ).scalar_one()
+        for batch in batches:
+            quantity = batch.quantity_available
+            batch.quantity_available = 0
+            batch.is_active = False
+            self._session.add(
+                StockMovement(
+                    batch_id=batch.id,
+                    transaction_type=InventoryTransactionType.ADJUSTMENT,
+                    quantity_change=-quantity,
+                    balance_after=0,
+                    reference_id=purchase.id,
+                    reference_type="Purchase Cancellation",
+                    performed_by=actor.id,
+                    created_at=datetime.now(UTC),
+                    notes=f"Cancelled {purchase.purchase_number}",
+                )
+            )
+        supplier.balance -= purchase.remaining_amount
+        purchase.status = PurchaseStatus.CANCELLED
+        self._audit.record(
+            actor_id=actor.id,
+            action="PURCHASE_CANCELLED",
+            entity_type="Purchase",
+            entity_id=purchase.id,
+            old_value={"status": PurchaseStatus.COMPLETED.value},
+            new_value={"status": PurchaseStatus.CANCELLED.value},
         )
         self._session.flush()
         return purchase

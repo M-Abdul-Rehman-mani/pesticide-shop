@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import ClassVar
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QByteArray, QSettings, Qt, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QStackedWidget,
     QStatusBar,
+    QTableView,
     QVBoxLayout,
     QWidget,
 )
@@ -115,6 +116,8 @@ class MainWindow(QMainWindow):
         self.setStatusBar(status)
         self._build_pages(sidebar_layout)
         self._connect_data_refreshes()
+        self._preferences = QSettings("CropCare", "PesticideShop")
+        self._restore_ui_preferences()
         self._install_shortcuts()
         self._session_monitor = SessionTimeoutMonitor(settings.app_session_timeout_minutes, self)
         self._session_monitor.timed_out.connect(self._timed_out)
@@ -333,6 +336,31 @@ class MainWindow(QMainWindow):
             refresh = getattr(page, "refresh", None)
             if callable(refresh):
                 refresh()
+
+    def _restore_ui_preferences(self) -> None:
+        geometry = self._preferences.value("main/geometry")
+        if isinstance(geometry, QByteArray):
+            self.restoreGeometry(geometry)
+        for page_name, page in self._pages.items():
+            tables = page.findChildren(QTableView)
+            for index, table in enumerate(tables):
+                state = self._preferences.value(f"tables/{page_name}/{index}")
+                if isinstance(state, QByteArray):
+                    table.horizontalHeader().restoreState(state)
+
+    def _save_ui_preferences(self) -> None:
+        self._preferences.setValue("main/geometry", self.saveGeometry())
+        for page_name, page in self._pages.items():
+            tables = page.findChildren(QTableView)
+            for index, table in enumerate(tables):
+                self._preferences.setValue(
+                    f"tables/{page_name}/{index}", table.horizontalHeader().saveState()
+                )
+        self._preferences.sync()
+
+    def closeEvent(self, event: object) -> None:
+        self._save_ui_preferences()
+        super().closeEvent(event)  # type: ignore[arg-type]
 
     def navigate(self, name: str) -> None:
         page = self._pages.get(name)
