@@ -23,7 +23,7 @@ from app.config.settings import Settings
 from app.models.enums import SettingCategory
 from app.security.authentication import AuthenticatedUser
 from app.services.settings_service import SettingsService
-from app.ui.widgets import show_error
+from app.ui.widgets import show_error, wrap_scroll
 from app.ui.workers import FunctionWorker, start_worker
 
 
@@ -55,6 +55,7 @@ class ShopSettingsScreen(QWidget):
         self._worker: FunctionWorker | None = None
 
         root = QVBoxLayout(self)
+        root.setContentsMargins(16, 12, 16, 10)
         header = QHBoxLayout()
         title = QLabel("Shop Settings")
         title.setObjectName("PageTitle")
@@ -64,20 +65,23 @@ class ShopSettingsScreen(QWidget):
         header.addWidget(self.save_button)
         root.addLayout(header)
 
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
         notice = QLabel(
             "All fields are optional. Any value you enter here is printed on sale and return "
             "receipts; blank fields are omitted."
         )
         notice.setWordWrap(True)
-        root.addWidget(notice)
+        body_layout.addWidget(notice)
 
         group = QGroupBox("Shop identity and receipt branding")
         form = QFormLayout(group)
-        form.setContentsMargins(24, 24, 24, 24)
+        form.setContentsMargins(16, 16, 16, 16)
         self.shop_name = QLineEdit()
         self.owner_name = QLineEdit()
         self.address = QTextEdit()
-        self.address.setMaximumHeight(90)
+        self.address.setMaximumHeight(70)
         self.phone = QLineEdit()
         self.email = QLineEdit()
         self.website = QLineEdit()
@@ -102,8 +106,9 @@ class ShopSettingsScreen(QWidget):
         form.addRow("Website", self.website)
         form.addRow("Tax / registration", self.tax_information)
         form.addRow("Logo", logo_row)
-        root.addWidget(group)
-        root.addStretch()
+        body_layout.addWidget(group)
+        body_layout.addStretch()
+        root.addWidget(wrap_scroll(body), 1)
 
         choose_logo.clicked.connect(self._choose_logo)
         clear_logo.clicked.connect(self.logo_path.clear)

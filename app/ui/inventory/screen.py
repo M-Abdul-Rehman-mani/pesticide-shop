@@ -60,7 +60,7 @@ class InventoryScreen(QWidget):
         self._received: list[int] = []
         self._available: list[int] = []
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(26, 24, 26, 20)
+        layout.setContentsMargins(16, 12, 16, 10)
         layout.setSpacing(14)
         layout.addWidget(
             PageHeader(

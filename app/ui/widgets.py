@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QScrollArea,
     QTableView,
     QTableWidget,
     QToolButton,
@@ -45,10 +46,10 @@ class MetricCard(QFrame):
         super().__init__(parent)
         self.setObjectName("MetricCard")
         self.setProperty("accent", accent)
-        self.setMinimumHeight(104)
+        self.setMinimumHeight(78)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 13, 16, 13)
-        layout.setSpacing(3)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(2)
         title_label = QLabel(title)
         title_label.setObjectName("MetricTitle")
         self.value_label = QLabel("—")
@@ -118,13 +119,23 @@ def configure_table(
     table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
     table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
     table.verticalHeader().setVisible(False)
-    table.verticalHeader().setDefaultSectionSize(42)
+    table.verticalHeader().setDefaultSectionSize(34)
     header = table.horizontalHeader()
     header.setMinimumSectionSize(minimum_section_size)
     header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
     header.setHighlightSections(False)
     if stretch_column is not None and stretch_column < header.count():
         header.setSectionResizeMode(stretch_column, QHeaderView.ResizeMode.Stretch)
+
+
+def wrap_scroll(widget: QWidget) -> QScrollArea:
+    """Let dense pages scroll instead of clipping on laptop-height screens."""
+
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QFrame.Shape.NoFrame)
+    scroll.setWidget(widget)
+    return scroll
 
 
 def configure_searchable_combo(combo: QComboBox, placeholder: str) -> None:

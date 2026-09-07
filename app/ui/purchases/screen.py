@@ -53,6 +53,7 @@ from app.ui.widgets import (
     show_error,
     show_record_details,
     show_success,
+    wrap_scroll,
 )
 from app.ui.workers import FunctionWorker, start_worker
 from app.utils.formatting import format_date
@@ -111,7 +112,7 @@ class PurchasesScreen(QWidget):
         self._worker: FunctionWorker | None = None
         self._cart: list[PurchaseCartEntry] = []
         root = QVBoxLayout(self)
-        root.setContentsMargins(26, 24, 26, 20)
+        root.setContentsMargins(16, 12, 16, 10)
         root.addWidget(
             PageHeader("Purchases", "Receive stock or search and manage previous purchases.")
         )
@@ -119,8 +120,8 @@ class PurchasesScreen(QWidget):
         root.addWidget(self.tabs, 1)
         entry_page = QWidget()
         layout = QVBoxLayout(entry_page)
-        layout.setContentsMargins(12, 12, 12, 12)
-        self.tabs.addTab(entry_page, "Receive Stock")
+        layout.setContentsMargins(8, 8, 8, 8)
+        self.tabs.addTab(wrap_scroll(entry_page), "Receive Stock")
         supplier_group, supplier_form = QGroupBox("Supplier"), QFormLayout()
         supplier_group.setLayout(supplier_form)
         self.supplier = QComboBox()

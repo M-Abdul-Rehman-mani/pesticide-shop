@@ -11,11 +11,13 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTableView,
     QTabWidget,
@@ -81,10 +83,18 @@ class SettingsScreen(QWidget):
     @staticmethod
     def _tab_form() -> tuple[QWidget, QFormLayout]:
         tab = QWidget()
-        form = QFormLayout(tab)
-        form.setContentsMargins(24, 24, 24, 24)
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(0, 0, 0, 0)
+        inner = QWidget()
+        form = QFormLayout(inner)
+        form.setContentsMargins(16, 16, 16, 16)
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(inner)
+        outer.addWidget(scroll)
         return tab, form
 
     def _build_general(self) -> None:

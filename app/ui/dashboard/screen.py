@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -46,8 +47,8 @@ class DashboardScreen(QWidget):
         self._currency = currency
         self._worker: FunctionWorker | None = None
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(26, 24, 26, 20)
-        layout.setSpacing(16)
+        layout.setContentsMargins(16, 12, 16, 10)
+        layout.setSpacing(10)
         page_header = PageHeader(
             "Business overview",
             "Track today's revenue, profit, stock health, and outstanding balances.",
@@ -56,7 +57,7 @@ class DashboardScreen(QWidget):
         filter_bar = QFrame()
         filter_bar.setObjectName("FilterBar")
         heading = QHBoxLayout(filter_bar)
-        heading.setContentsMargins(14, 10, 14, 10)
+        heading.setContentsMargins(10, 6, 10, 6)
         self.from_date = QDateEdit(QDate.currentDate())
         self.from_date.setCalendarPopup(True)
         self.to_date = QDateEdit(QDate.currentDate())
@@ -75,8 +76,8 @@ class DashboardScreen(QWidget):
         heading.addWidget(refresh)
         layout.addWidget(filter_bar)
         card_layout = QGridLayout()
-        card_layout.setHorizontalSpacing(12)
-        card_layout.setVerticalSpacing(12)
+        card_layout.setHorizontalSpacing(8)
+        card_layout.setVerticalSpacing(8)
         specifications = (
             ("Sales", "Revenue in selected period", "green"),
             ("Profit", "Gross profit after costs", "blue"),
@@ -101,14 +102,16 @@ class DashboardScreen(QWidget):
         chart_title = QLabel("Performance and inventory insights")
         chart_title.setObjectName("SectionTitle")
         chart_layout.addWidget(chart_title)
-        self.figure = Figure(figsize=(10, 5), tight_layout=True, facecolor="#ffffff")
+        self.figure = Figure(figsize=(6, 2.6), tight_layout=True, facecolor="#ffffff")
         self.canvas = FigureCanvasQTAgg(self.figure)
+        self.canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.canvas.setMinimumHeight(180)
         chart_layout.addWidget(self.canvas, 1)
         layout.addWidget(chart_card, 1)
 
     def resizeEvent(self, event: object) -> None:
         super().resizeEvent(event)  # type: ignore[arg-type]
-        columns = 1 if self.width() < 560 else 2 if self.width() < 980 else 4
+        columns = 1 if self.width() < 560 else 2 if self.width() < 900 else 3 if self.width() < 1180 else 4
         if getattr(self, "_card_columns", None) == columns:
             return
         self._card_columns = columns

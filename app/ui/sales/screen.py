@@ -60,6 +60,7 @@ from app.ui.widgets import (
     populate_row_actions,
     show_error,
     show_record_details,
+    wrap_scroll,
 )
 from app.ui.workers import FunctionWorker, start_worker
 from app.utils.exceptions import ConflictError
@@ -132,8 +133,8 @@ class SalesScreen(QWidget):
         self._dealers: list[tuple[uuid.UUID, str, str | None, str | None]] = []
         self._last_sale_id: uuid.UUID | None = None
         root_layout = QVBoxLayout(self)
-        root_layout.setContentsMargins(26, 24, 26, 20)
-        root_layout.setSpacing(14)
+        root_layout.setContentsMargins(16, 12, 16, 10)
+        root_layout.setSpacing(8)
         root_layout.addWidget(
             PageHeader(
                 "Sales",
@@ -144,9 +145,9 @@ class SalesScreen(QWidget):
         root_layout.addWidget(self.tabs, 1)
         sale_page = QWidget()
         layout = QVBoxLayout(sale_page)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(14)
-        self.tabs.addTab(sale_page, "New Sale")
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+        self.tabs.addTab(wrap_scroll(sale_page), "New Sale")
 
         top = QHBoxLayout()
         recipient_group, recipient_form = QGroupBox("Invoice Recipient"), QFormLayout()

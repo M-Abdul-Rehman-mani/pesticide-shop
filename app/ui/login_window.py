@@ -31,10 +31,10 @@ class LoginDialog(QDialog):
         self._worker: FunctionWorker | None = None
         self.authenticated_user: AuthenticatedUser | None = None
         self.setWindowTitle("Pesticide Shop Manager — Sign in")
-        self.setMinimumSize(500, 510)
+        self.setMinimumSize(420, 460)
         self.setModal(True)
         root = QVBoxLayout(self)
-        root.setContentsMargins(62, 42, 62, 42)
+        root.setContentsMargins(36, 24, 36, 24)
         root.setSpacing(8)
         mark = QLabel("C")
         mark.setObjectName("LoginMark")
@@ -53,8 +53,8 @@ class LoginDialog(QDialog):
         form_card = QFrame()
         form_card.setObjectName("LoginCard")
         form_layout = QVBoxLayout(form_card)
-        form_layout.setContentsMargins(26, 24, 26, 24)
-        form_layout.setSpacing(10)
+        form_layout.setContentsMargins(18, 16, 18, 16)
+        form_layout.setSpacing(8)
         form_title = QLabel("Account details")
         form_title.setObjectName("SectionTitle")
         username_label = QLabel("Username")

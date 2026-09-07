@@ -44,7 +44,7 @@ class PaymentEditor(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(("Method", "Amount", "Reference"))
-        self.table.setMinimumHeight(150)
+        self.table.setMinimumHeight(96)
         configure_table(self.table, stretch_column=2, editable=True)
         controls = QHBoxLayout()
         add = QPushButton("Add payment")

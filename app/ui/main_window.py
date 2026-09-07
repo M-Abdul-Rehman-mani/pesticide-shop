@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import ClassVar
 
-from PySide6.QtCore import QByteArray, QSettings, Qt, Signal
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtCore import QByteArray, QRect, QSettings, Qt, Signal
+from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QStackedWidget,
     QStatusBar,
@@ -88,9 +89,9 @@ class MainWindow(QMainWindow):
         self._pages: dict[str, QWidget] = {}
         self._nav_buttons: dict[str, QPushButton] = {}
         self.setWindowTitle("Pesticide Shop Management System")
-        self.resize(1480, 900)
-        self.setMinimumSize(900, 600)
+        self.setMinimumSize(900, 560)
         self._compact_shell = False
+        self._fit_to_available_screen()
         central = QWidget()
         central.setObjectName("PageBackground")
         root = QVBoxLayout(central)
@@ -129,9 +130,9 @@ class MainWindow(QMainWindow):
     def _top_bar(self) -> QFrame:
         frame = QFrame()
         frame.setObjectName("TopBar")
-        frame.setFixedHeight(72)
+        frame.setFixedHeight(54)
         layout = QHBoxLayout(frame)
-        layout.setContentsMargins(24, 0, 22, 0)
+        layout.setContentsMargins(16, 0, 14, 0)
         page_copy = QVBoxLayout()
         page_copy.setSpacing(0)
         eyebrow = QLabel("WORKSPACE")
@@ -177,10 +178,11 @@ class MainWindow(QMainWindow):
     def _sidebar(self) -> tuple[QFrame, QVBoxLayout]:
         frame = QFrame()
         frame.setObjectName("Sidebar")
-        frame.setFixedWidth(238)
-        layout = QVBoxLayout(frame)
-        layout.setContentsMargins(13, 18, 13, 14)
-        layout.setSpacing(3)
+        frame.setFixedWidth(220)
+        inner = QWidget()
+        layout = QVBoxLayout(inner)
+        layout.setContentsMargins(10, 12, 10, 10)
+        layout.setSpacing(2)
         brand_row = QHBoxLayout()
         brand_row.setSpacing(10)
         mark = QLabel("C")
@@ -200,7 +202,16 @@ class MainWindow(QMainWindow):
         brand_row.addLayout(brand_copy)
         brand_row.addStretch()
         layout.addLayout(brand_row)
-        layout.addSpacing(12)
+        layout.addSpacing(8)
+        scroll = QScrollArea()
+        scroll.setObjectName("SidebarScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(inner)
+        wrap = QVBoxLayout(frame)
+        wrap.setContentsMargins(0, 0, 0, 0)
+        wrap.addWidget(scroll)
         return frame, layout
 
     @staticmethod
@@ -337,10 +348,40 @@ class MainWindow(QMainWindow):
             if callable(refresh):
                 refresh()
 
+    def _available_screen(self) -> QRect | None:
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        return None if screen is None else screen.availableGeometry()
+
+    def _fit_to_available_screen(self) -> None:
+        available = self._available_screen()
+        if available is None:
+            self.resize(1280, 720)
+            return
+        self.setMinimumSize(min(900, available.width()), min(560, available.height()))
+        self.resize(min(1366, available.width()), min(768, available.height()))
+        self.move(
+            available.x() + max(0, (available.width() - self.width()) // 2),
+            available.y() + max(0, (available.height() - self.height()) // 2),
+        )
+
+    def _clamp_to_available_screen(self) -> None:
+        available = self._available_screen()
+        if available is None:
+            return
+        self.setMinimumSize(min(900, available.width()), min(560, available.height()))
+        width = min(max(self.width(), self.minimumWidth()), available.width())
+        height = min(max(self.height(), self.minimumHeight()), available.height())
+        self.resize(width, height)
+        frame = self.frameGeometry()
+        x = min(max(frame.x(), available.x()), available.x() + available.width() - frame.width())
+        y = min(max(frame.y(), available.y()), available.y() + available.height() - frame.height())
+        self.move(x, y)
+
     def _restore_ui_preferences(self) -> None:
         geometry = self._preferences.value("main/geometry")
         if isinstance(geometry, QByteArray):
             self.restoreGeometry(geometry)
+        self._clamp_to_available_screen()
         for page_name, page in self._pages.items():
             tables = page.findChildren(QTableView)
             for index, table in enumerate(tables):
@@ -380,7 +421,7 @@ class MainWindow(QMainWindow):
         if compact == self._compact_shell:
             return
         self._compact_shell = compact
-        self._sidebar_frame.setFixedWidth(76 if compact else 238)
+        self._sidebar_frame.setFixedWidth(76 if compact else 220)
         self._brand_name.setVisible(not compact)
         self._brand_caption.setVisible(not compact)
         self._user_name_label.setVisible(not compact)

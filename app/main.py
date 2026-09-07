@@ -48,7 +48,12 @@ class ApplicationController(QObject):
         window = MainWindow(self._session_factory, user, self._load_runtime_settings())
         window.logout_requested.connect(self._logout)
         self._window = window
-        window.show()
+        screen = window.screen()
+        available = None if screen is None else screen.availableGeometry()
+        if available is not None and (available.width() <= 1366 or available.height() <= 768):
+            window.showMaximized()
+        else:
+            window.show()
         return True
 
     def _load_runtime_settings(self) -> Settings:
