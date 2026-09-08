@@ -34,7 +34,9 @@ from app.services.catalog_service import ProductService
 from app.ui.forms import MoneyEdit
 from app.ui.widgets import (
     RowsTableModel,
+    configure_table,
     populate_row_actions,
+    record_count_text,
     show_error,
     show_record_details,
     show_success,
@@ -208,8 +210,8 @@ class ProductsScreen(QWidget):
         )
         self.table = QTableView()
         self.table.setModel(self.model)
-        self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
-        self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
+        # Twelve columns fit only when the short ones may drop below the usual minimum.
+        configure_table(self.table, stretch_column=0, minimum_section_size=62)
         layout.addLayout(header)
         layout.addWidget(self.table)
         self.state_label = QLabel("Loading products…")
@@ -322,9 +324,7 @@ class ProductsScreen(QWidget):
             result,
         )
         self.model.set_rows(rows)
-        self.state_label.setText(
-            "No products found." if not rows else f"{len(rows)} products shown"
-        )
+        self.state_label.setText(record_count_text(len(rows), "product"))
         populate_row_actions(
             self.table,
             11,
@@ -333,6 +333,7 @@ class ProductsScreen(QWidget):
                 ("View", self._view),
                 ("Edit", self._edit),
                 ("Activate / deactivate", self._toggle_active),
+                ("Delete", self._delete_row),
             ),
         )
 
@@ -489,6 +490,32 @@ class ProductsScreen(QWidget):
         self._worker = start_worker(
             operation,
             succeeded=lambda _result: self._saved("Product prices updated."),
+            failed=lambda error: show_error(self, error),
+        )
+
+    def _delete_row(self, row: int) -> None:
+        if row >= len(self._ids):
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "Delete product",
+                "Delete this product permanently?\n\nProducts that have been sold, purchased, "
+                "or stocked cannot be deleted; deactivate them instead so past invoices stay "
+                "complete.",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        product_id = self._ids[row]
+
+        def operation() -> None:
+            with self._session_factory.begin() as session:
+                ProductService(session).delete(product_id, actor=self._actor)
+
+        self._worker = start_worker(
+            operation,
+            succeeded=lambda _result: self._saved("Product deleted."),
             failed=lambda error: show_error(self, error),
         )
 

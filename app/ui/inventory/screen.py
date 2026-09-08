@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import date, timedelta
+from decimal import Decimal
 from typing import cast
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QDate, QTimer
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
+    QDateEdit,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -20,6 +24,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QTableView,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -32,17 +37,122 @@ from app.models.supplier import Supplier
 from app.security.authentication import AuthenticatedUser
 from app.security.permissions import Permission, has_permission
 from app.services.stock_inventory_service import StockInventoryService
+from app.ui.forms import MoneyEdit
 from app.ui.widgets import (
     PageHeader,
     RowsTableModel,
+    configure_date_edit,
     configure_table,
     populate_row_actions,
+    record_count_text,
     show_error,
     show_record_details,
     show_success,
 )
 from app.ui.workers import FunctionWorker, start_worker
 from app.utils.formatting import format_date
+
+
+@dataclass(frozen=True, slots=True)
+class BatchFormData:
+    """The batch fields an operator may correct after receipt."""
+
+    batch_number: str
+    manufacture_date: date | None
+    expiry_date: date | None
+    cartons: int
+    packs_per_carton: int
+    purchase_price: Decimal
+    selling_price: Decimal
+    location: str
+    notes: str
+
+
+class BatchDialog(QDialog):
+    """Edit a batch's identity, dates, packing, and prices.
+
+    Quantities are absent on purpose: they change only through Adjust Stock, which
+    writes to the movement ledger.
+    """
+
+    def __init__(self, data: BatchFormData, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Edit Batch")
+        self.setMinimumWidth(430)
+        form = QFormLayout(self)
+        self.batch_number = QLineEdit(data.batch_number)
+        self.manufacture_date = QDateEdit()
+        self.expiry_date = QDateEdit()
+        configure_date_edit(self.manufacture_date, self.expiry_date)
+        self.manufacture_known = QCheckBox("Manufacture date known")
+        self.expiry_known = QCheckBox("Expiry date known")
+        self._bind_date(self.manufacture_known, self.manufacture_date, data.manufacture_date)
+        self._bind_date(self.expiry_known, self.expiry_date, data.expiry_date)
+        self.cartons, self.packs_per_carton = QSpinBox(), QSpinBox()
+        for counter, value in (
+            (self.cartons, data.cartons),
+            (self.packs_per_carton, data.packs_per_carton),
+        ):
+            counter.setRange(0, 1_000_000)
+            counter.setValue(value)
+        self.purchase_price = MoneyEdit(f"{data.purchase_price:.2f}")
+        self.selling_price = MoneyEdit(f"{data.selling_price:.2f}")
+        self.location = QLineEdit(data.location)
+        self.location.setPlaceholderText("Shelf or store location")
+        self.notes = QTextEdit(data.notes)
+        self.notes.setMaximumHeight(70)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._accept_if_valid)
+        buttons.rejected.connect(self.reject)
+        form.addRow("Batch number *", self.batch_number)
+        form.addRow("", self.manufacture_known)
+        form.addRow("Manufacture date", self.manufacture_date)
+        form.addRow("", self.expiry_known)
+        form.addRow("Expiry date", self.expiry_date)
+        form.addRow("Cartons", self.cartons)
+        form.addRow("Packs per carton", self.packs_per_carton)
+        form.addRow("Purchase price", self.purchase_price)
+        form.addRow("Sale price", self.selling_price)
+        form.addRow("Location", self.location)
+        form.addRow("Notes", self.notes)
+        form.addRow(buttons)
+
+    @staticmethod
+    def _bind_date(toggle: QCheckBox, editor: QDateEdit, value: date | None) -> None:
+        toggle.setChecked(value is not None)
+        editor.setDate(QDate(value.year, value.month, value.day) if value else QDate.currentDate())
+        editor.setEnabled(value is not None)
+        toggle.toggled.connect(editor.setEnabled)
+
+    def _accept_if_valid(self) -> None:
+        if not self.batch_number.text().strip():
+            QMessageBox.information(self, "Batch number required", "Enter the batch number.")
+            self.batch_number.setFocus()
+            return
+        self.accept()
+
+    def values(self) -> BatchFormData:
+        return BatchFormData(
+            batch_number=self.batch_number.text().strip(),
+            manufacture_date=(
+                cast(date, self.manufacture_date.date().toPython())
+                if self.manufacture_known.isChecked()
+                else None
+            ),
+            expiry_date=(
+                cast(date, self.expiry_date.date().toPython())
+                if self.expiry_known.isChecked()
+                else None
+            ),
+            cartons=self.cartons.value(),
+            packs_per_carton=self.packs_per_carton.value(),
+            purchase_price=self.purchase_price.decimal_value("Purchase price"),
+            selling_price=self.selling_price.decimal_value("Sale price"),
+            location=self.location.text().strip(),
+            notes=self.notes.toPlainText().strip(),
+        )
 
 
 class InventoryScreen(QWidget):
@@ -59,6 +169,7 @@ class InventoryScreen(QWidget):
         self._ids: list[uuid.UUID] = []
         self._received: list[int] = []
         self._available: list[int] = []
+        self._batch_data: list[BatchFormData] = []
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 12, 16, 10)
         layout.setSpacing(14)
@@ -88,16 +199,16 @@ class InventoryScreen(QWidget):
                 "Inactive",
             )
         )
-        refresh, history, adjust = (
+        refresh, history, adjust, edit = (
             QPushButton("Refresh"),
             QPushButton("Batch History"),
             QPushButton("Adjust Stock"),
+            QPushButton("Edit Batch"),
         )
-        history.setProperty("secondary", True)
-        adjust.setProperty("secondary", True)
-        history.setEnabled(False)
-        adjust.setEnabled(False)
-        self._history_button, self._adjust_button = history, adjust
+        for secondary in (history, adjust, edit):
+            secondary.setProperty("secondary", True)
+            secondary.setEnabled(False)
+        self._history_button, self._adjust_button, self._edit_button = history, adjust, edit
         header.addWidget(QLabel("Search"))
         header.addWidget(self.search)
         header.addWidget(QLabel("Status"))
@@ -105,6 +216,7 @@ class InventoryScreen(QWidget):
         header.addStretch()
         header.addWidget(history)
         header.addWidget(adjust)
+        header.addWidget(edit)
         header.addWidget(refresh)
         self.model = RowsTableModel(
             (
@@ -126,7 +238,9 @@ class InventoryScreen(QWidget):
         )
         self.table = QTableView()
         self.table.setModel(self.model)
-        configure_table(self.table, stretch_column=0)
+        # Thirteen columns only fit when the narrow numeric ones may shrink
+        # below the usual minimum width.
+        configure_table(self.table, stretch_column=0, minimum_section_size=62)
         layout.addWidget(filter_bar)
         layout.addWidget(self.table, 1)
         self.record_count = QLabel("Loading inventory…")
@@ -143,6 +257,7 @@ class InventoryScreen(QWidget):
         self.filter.currentIndexChanged.connect(self.refresh)
         history.clicked.connect(self._history)
         adjust.clicked.connect(self._adjust)
+        edit.clicked.connect(self._edit)
         self.table.doubleClicked.connect(lambda _index: self._history())
         self.table.selectionModel().selectionChanged.connect(self._selection_changed)
         self.refresh()
@@ -161,7 +276,13 @@ class InventoryScreen(QWidget):
     def refresh(self) -> None:
         query, selected_filter = self.search.text().strip(), self.filter.currentText()
 
-        def operation() -> tuple[list[tuple[object, ...]], list[uuid.UUID], list[int], list[int]]:
+        def operation() -> tuple[
+            list[tuple[object, ...]],
+            list[uuid.UUID],
+            list[int],
+            list[int],
+            list[BatchFormData],
+        ]:
             with self._session_factory() as session:
                 statement = select(StockBatch).join(StockBatch.product).join(StockBatch.supplier)
                 if query:
@@ -225,6 +346,20 @@ class InventoryScreen(QWidget):
                     [b.id for b in batches],
                     [b.quantity_received for b in batches],
                     [b.quantity_available for b in batches],
+                    [
+                        BatchFormData(
+                            batch_number=b.batch_number,
+                            manufacture_date=b.manufacture_date,
+                            expiry_date=b.expiry_date,
+                            cartons=b.cartons,
+                            packs_per_carton=b.packs_per_carton,
+                            purchase_price=b.purchase_price,
+                            selling_price=b.selling_price,
+                            location=b.location or "",
+                            notes=b.notes or "",
+                        )
+                        for b in batches
+                    ],
                 )
 
         self._worker = start_worker(
@@ -232,34 +367,49 @@ class InventoryScreen(QWidget):
         )
 
     def _display(self, result: object) -> None:
-        rows, self._ids, self._received, self._available = cast(
-            tuple[list[tuple[object, ...]], list[uuid.UUID], list[int], list[int]], result
+        rows, self._ids, self._received, self._available, self._batch_data = cast(
+            tuple[
+                list[tuple[object, ...]],
+                list[uuid.UUID],
+                list[int],
+                list[int],
+                list[BatchFormData],
+            ],
+            result,
         )
         self.model.set_rows(rows)
         actions = [
             ("View", self._view_row),
             ("Movement history", self._history_row),
         ]
-        if self._actor is not None and has_permission(
-            self._actor.role, Permission.MANAGE_INVENTORY
-        ):
-            actions.append(("Adjust stock", self._adjust_row))
+        if self._can_manage():
+            actions.extend(
+                (
+                    ("Adjust stock", self._adjust_row),
+                    ("Edit batch", self._edit_row),
+                    ("Delete batch", self._delete_row),
+                )
+            )
         populate_row_actions(
             self.table,
             12,
             len(rows),
             actions,
         )
-        self.record_count.setText(f"{len(rows):,} {'batch' if len(rows) == 1 else 'batches'} shown")
+        self.record_count.setText(record_count_text(len(rows), "batch", "batches"))
         self._selection_changed()
+
+    def _can_manage(self) -> bool:
+        return self._actor is not None and has_permission(
+            self._actor.role, Permission.MANAGE_INVENTORY
+        )
 
     def _selection_changed(self) -> None:
         selected = self._selected() is not None
+        manage = selected and self._can_manage()
         self._history_button.setEnabled(selected)
-        can_adjust = self._actor is not None and has_permission(
-            self._actor.role, Permission.MANAGE_INVENTORY
-        )
-        self._adjust_button.setEnabled(selected and can_adjust)
+        self._adjust_button.setEnabled(manage)
+        self._edit_button.setEnabled(manage)
 
     def _selected(self) -> int | None:
         rows = self.table.selectionModel().selectedRows()
@@ -305,12 +455,113 @@ class InventoryScreen(QWidget):
             self._history()
 
     def _adjust_row(self, row: int) -> None:
-        if (
-            self._actor is not None
-            and has_permission(self._actor.role, Permission.MANAGE_INVENTORY)
-            and self._select_row(row)
-        ):
+        if self._can_manage() and self._select_row(row):
             self._adjust()
+
+    def _edit_row(self, row: int) -> None:
+        if self._can_manage() and self._select_row(row):
+            self._edit()
+
+    def _delete_row(self, row: int) -> None:
+        if self._can_manage() and self._select_row(row):
+            self._delete()
+
+    def _edit(self) -> None:
+        """Correct a batch's details without touching its quantities."""
+
+        row = self._selected()
+        if row is None or row >= len(self._batch_data):
+            QMessageBox.information(self, "Select batch", "Select a batch first.")
+            return
+        if self._actor is None:
+            QMessageBox.information(self, "Not available", "Sign in with inventory permission.")
+            return
+        actor = self._actor
+        batch_id = self._ids[row]
+        dialog = BatchDialog(self._batch_data[row], self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        data = dialog.values()
+
+        def operation() -> None:
+            with self._session_factory.begin() as session:
+                StockInventoryService(session).update_batch(
+                    batch_id,
+                    actor=actor,
+                    batch_number=data.batch_number,
+                    manufacture_date=data.manufacture_date,
+                    expiry_date=data.expiry_date,
+                    cartons=data.cartons,
+                    packs_per_carton=data.packs_per_carton,
+                    purchase_price=data.purchase_price,
+                    selling_price=data.selling_price,
+                    location=data.location or None,
+                    notes=data.notes or None,
+                )
+
+        self._worker = start_worker(
+            operation,
+            succeeded=lambda _result: self._changed("Batch details saved."),
+            failed=lambda error: show_error(self, error),
+        )
+
+    def _delete(self) -> None:
+        """Write a batch's remaining stock off and retire it.
+
+        The batch row itself survives because invoices reference it and the movement
+        ledger is append-only, so the confirmation says exactly what will happen.
+        """
+
+        row = self._selected()
+        if row is None or row >= len(self._ids):
+            QMessageBox.information(self, "Select batch", "Select a batch first.")
+            return
+        if self._actor is None:
+            QMessageBox.information(self, "Not available", "Sign in with inventory permission.")
+            return
+        actor = self._actor
+        batch_id = self._ids[row]
+        remaining = self._available[row]
+        confirmation = QDialog(self)
+        confirmation.setWindowTitle("Delete Batch")
+        form = QFormLayout(confirmation)
+        explanation = QLabel(
+            f"This removes the batch from sales and stock figures and writes off its "
+            f"remaining {remaining:,} unit{'' if remaining == 1 else 's'}.\n\n"
+            "The batch record itself is kept because invoices and the movement ledger "
+            "refer to it."
+        )
+        explanation.setWordWrap(True)
+        reason = QLineEdit()
+        reason.setPlaceholderText("Damaged, expired, wrongly entered, returned to supplier…")
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Delete batch")
+        buttons.accepted.connect(confirmation.accept)
+        buttons.rejected.connect(confirmation.reject)
+        form.addRow(explanation)
+        form.addRow("Reason *", reason)
+        form.addRow(buttons)
+        if confirmation.exec() != QDialog.DialogCode.Accepted:
+            return
+        removal_reason = reason.text()
+
+        def operation() -> None:
+            with self._session_factory.begin() as session:
+                StockInventoryService(session).delete_batch(
+                    batch_id, actor=actor, reason=removal_reason
+                )
+
+        self._worker = start_worker(
+            operation,
+            succeeded=lambda _result: self._changed("Batch removed from stock."),
+            failed=lambda error: show_error(self, error),
+        )
+
+    def _changed(self, message: str) -> None:
+        show_success(self, message)
+        self.refresh()
 
     def _adjust(self) -> None:
         row = self._selected()

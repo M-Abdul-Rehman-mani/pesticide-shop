@@ -28,6 +28,7 @@ from app.security.authentication import AuthenticatedUser
 from app.services.catalog_service import CustomerService
 from app.ui.widgets import (
     RowsTableModel,
+    configure_table,
     populate_row_actions,
     show_error,
     show_record_details,
@@ -123,9 +124,7 @@ class CustomersScreen(QWidget):
         self.model = RowsTableModel(("Name", "Phone", "Email", "CNIC", "Created", "Actions"), self)
         self.table = QTableView()
         self.table.setModel(self.model)
-        self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
-        self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
-        self.table.horizontalHeader().setStretchLastSection(True)
+        configure_table(self.table, stretch_column=0)
         pager = QHBoxLayout()
         previous = QPushButton("Previous")
         next_button = QPushButton("Next")

@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QCompleter,
+    QDateEdit,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from shiboken6 import isValid
 
 from app.utils.exceptions import ApplicationError
 
@@ -97,12 +99,45 @@ class PageHeader(QWidget):
         self.action_layout.addWidget(widget)
 
 
+#: Marks a table whose column widths were restored from saved preferences, so
+#: automatic sizing leaves that remembered layout alone.
+_USER_SIZED = "userSizedColumns"
+
+
+def mark_columns_user_sized(table: QTableView | QTableWidget) -> None:
+    """Record that a table's column widths came from the user's saved layout."""
+
+    table.setProperty(_USER_SIZED, True)
+
+
+def _fit_columns(table: QTableView | QTableWidget, stretch_column: int | None) -> None:
+    """Widen every resizable column to its contents after the data changes.
+
+    Wide tables otherwise keep the header's default section width and clip most
+    values to an ellipsis. Sizing is skipped for a table whose widths were
+    restored from the user's saved layout.
+    """
+
+    if not isValid(table) or table.property(_USER_SIZED):
+        # A model can outlive its view during teardown, so confirm the C++ widget
+        # is still alive before touching it.
+        return
+    header = table.horizontalHeader()
+    for column in range(header.count()):
+        if (
+            column != stretch_column
+            and header.sectionResizeMode(column) is QHeaderView.ResizeMode.Interactive
+        ):
+            table.resizeColumnToContents(column)
+
+
 def configure_table(
     table: QTableView | QTableWidget,
     *,
     stretch_column: int | None = 0,
     minimum_section_size: int = 86,
     editable: bool = False,
+    fit_columns: bool = False,
 ) -> None:
     """Apply readable, keyboard-friendly defaults to a data table."""
 
@@ -124,8 +159,33 @@ def configure_table(
     header.setMinimumSectionSize(minimum_section_size)
     header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
     header.setHighlightSections(False)
+    # Sampling keeps content-based sizing cheap on tables of several hundred rows.
+    header.setResizeContentsPrecision(60)
+    if fit_columns:
+        # Narrow reference tables pin every other column to its content so dates
+        # and money are never clipped, whatever the data.
+        for column in range(header.count()):
+            if column != stretch_column:
+                header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
     if stretch_column is not None and stretch_column < header.count():
         header.setSectionResizeMode(stretch_column, QHeaderView.ResizeMode.Stretch)
+    model = table.model()
+    if model is not None:
+        model.modelReset.connect(lambda: _fit_columns(table, stretch_column))
+        _fit_columns(table, stretch_column)
+
+
+#: An unambiguous date format. The locale default renders "9/8/26", which reads
+#: as a different day depending on the machine's regional settings.
+DATE_DISPLAY_FORMAT = "dd-MMM-yyyy"
+
+
+def configure_date_edit(*editors: QDateEdit) -> None:
+    """Give date fields a calendar popup and one unambiguous display format."""
+
+    for editor in editors:
+        editor.setCalendarPopup(True)
+        editor.setDisplayFormat(DATE_DISPLAY_FORMAT)
 
 
 def wrap_scroll(widget: QWidget) -> QScrollArea:
@@ -153,6 +213,10 @@ def configure_searchable_combo(combo: QComboBox, placeholder: str) -> None:
         completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         completer.setFilterMode(Qt.MatchFlag.MatchContains)
         completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+    if line_edit is not None:
+        # Selecting an entry leaves the cursor at the end of a long label, which
+        # scrolls the name out of view. Show the start of it instead.
+        combo.currentIndexChanged.connect(lambda _index: line_edit.setCursorPosition(0))
 
 
 def populate_row_actions(
@@ -202,6 +266,15 @@ def show_record_details(
     layout.addLayout(form)
     layout.addWidget(buttons)
     dialog.exec()
+
+
+def record_count_text(count: int, singular: str, plural: str | None = None) -> str:
+    """Return a record count that reads correctly for one row as well as many."""
+
+    plural = plural or f"{singular}s"
+    if not count:
+        return f"No {plural} found."
+    return f"{count:,} {singular if count == 1 else plural} shown"
 
 
 def show_success(parent: QWidget, message: str) -> None:

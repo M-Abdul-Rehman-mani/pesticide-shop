@@ -13,6 +13,8 @@ from pydantic.functional_validators import field_validator, model_validator
 from pydantic.types import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.utils.paths import environment_file_candidates, resolve_writable
+
 
 class Settings(BaseSettings):
     """Environment-backed runtime settings.
@@ -21,7 +23,7 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=environment_file_candidates(),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -71,6 +73,13 @@ class Settings(BaseSettings):
     backup_compress: bool = True
     postgres_tools_directory: Path | None = None
     log_directory: Path = Path("logs")
+
+    @field_validator("backup_directory", "log_directory")
+    @classmethod
+    def writable_runtime_directory(cls, value: Path) -> Path:
+        """Anchor relative runtime directories so a frozen Windows build stays writable."""
+
+        return resolve_writable(value)
 
     @field_validator("app_currency")
     @classmethod

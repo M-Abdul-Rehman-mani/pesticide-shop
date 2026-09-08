@@ -19,6 +19,10 @@ from app.security.permissions import Permission, require_permission
 from app.services.audit_service import AuditService
 from app.utils.exceptions import InfrastructureError, ValidationError
 
+#: Keeps the PostgreSQL command line tools from flashing a console window on
+#: Windows. POSIX accepts and ignores a zero value.
+_NO_CONSOLE_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 
 @dataclass(frozen=True, slots=True)
 class BackupResult:
@@ -68,6 +72,7 @@ class BackupService:
                 capture_output=True,
                 text=True,
                 timeout=3600,
+                creationflags=_NO_CONSOLE_WINDOW,
             )
             if not temporary.is_file() or temporary.stat().st_size == 0:
                 raise InfrastructureError("pg_dump completed without creating a valid backup file.")
@@ -132,6 +137,7 @@ class BackupService:
                 capture_output=True,
                 text=True,
                 timeout=3600,
+                creationflags=_NO_CONSOLE_WINDOW,
             )
         except subprocess.CalledProcessError as exc:
             error = (exc.stderr or "restore failed").strip().splitlines()[-1]

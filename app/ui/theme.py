@@ -2,7 +2,9 @@
 
 from pathlib import Path
 
-_COMBO_BOX_ARROW = (Path(__file__).parent / "assets" / "combo-down-arrow.svg").as_posix()
+_ASSETS = Path(__file__).parent / "assets"
+_COMBO_BOX_ARROW = (_ASSETS / "combo-down-arrow.svg").as_posix()
+_COMBO_BOX_ARROW_UP = (_ASSETS / "combo-up-arrow.svg").as_posix()
 
 APPLICATION_STYLESHEET = """
 QWidget {
@@ -99,6 +101,9 @@ QToolButton {
     border-radius: 7px; padding: 4px 10px; font-size: 15pt; font-weight: 700;
 }
 QToolButton:hover, QToolButton::menu-button:hover { background: #e7f2ec; }
+/* The row-action buttons already read as a menu; Qt's extra arrow only crowds
+   the narrow actions column. */
+QToolButton::menu-indicator { image: none; width: 0; }
 QMenu {
     background: #ffffff; color: #1c2b25; border: 1px solid #cbd9d2;
     padding: 5px; border-radius: 7px;
@@ -138,6 +143,41 @@ QComboBox QAbstractItemView {
     selection-background-color: #dff2e8; selection-color: #17382c;
 }
 QComboBox QAbstractItemView::item { min-height: 24px; padding: 3px 8px; }
+
+/* Styling an input's border makes Qt stop drawing its native sub-controls, so
+   spin boxes and date editors need their steppers and arrows defined too. */
+QSpinBox, QDoubleSpinBox, QDateEdit { padding-right: 26px; }
+QSpinBox::up-button, QDoubleSpinBox::up-button,
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-origin: border; width: 22px; border: 0; background: #f7faf8;
+    border-left: 1px solid #e1e8e4;
+}
+QSpinBox::up-button, QDoubleSpinBox::up-button {
+    subcontrol-position: top right; height: 13px;
+    border-top-right-radius: 7px; border-bottom: 1px solid #eef3f0;
+}
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-position: bottom right; height: 13px; border-bottom-right-radius: 7px;
+}
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover { background: #eaf3ee; }
+QSpinBox::up-button:pressed, QDoubleSpinBox::up-button:pressed,
+QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed { background: #dceee5; }
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+    image: url("__COMBO_BOX_ARROW_UP__"); width: 8px; height: 5px;
+}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+    image: url("__COMBO_BOX_ARROW__"); width: 8px; height: 5px;
+}
+QSpinBox::up-button:disabled, QDoubleSpinBox::up-button:disabled,
+QSpinBox::down-button:disabled, QDoubleSpinBox::down-button:disabled { background: #eef2f0; }
+QDateEdit::drop-down {
+    subcontrol-origin: padding; subcontrol-position: top right; width: 26px;
+    border: 0; border-left: 1px solid #e1e8e4; background: #f7faf8;
+    border-top-right-radius: 7px; border-bottom-right-radius: 7px;
+}
+QDateEdit::drop-down:hover { background: #eaf3ee; }
+QDateEdit::down-arrow { image: url("__COMBO_BOX_ARROW__"); width: 10px; height: 6px; }
 
 /* Data tables */
 QTableView, QTableWidget {
@@ -206,4 +246,6 @@ QDialogButtonBox QPushButton { min-width: 84px; }
 QMessageBox { background: #f7faf8; }
 QCheckBox { spacing: 7px; }
 QCheckBox::indicator { width: 16px; height: 16px; }
-""".replace("__COMBO_BOX_ARROW__", _COMBO_BOX_ARROW)
+""".replace("__COMBO_BOX_ARROW_UP__", _COMBO_BOX_ARROW_UP).replace(
+    "__COMBO_BOX_ARROW__", _COMBO_BOX_ARROW
+)

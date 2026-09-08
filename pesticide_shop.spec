@@ -16,6 +16,8 @@ datas = [
 ]
 datas += collect_data_files("alembic")
 
+icon = project_root / "app" / "ui" / "assets" / "app-icon.ico"
+
 hiddenimports = collect_submodules("app")
 hiddenimports += collect_submodules("celery")
 hiddenimports += collect_submodules("kombu")
@@ -24,6 +26,12 @@ hiddenimports += [
     "sqlalchemy.dialects.postgresql.psycopg",
     "psycopg_binary",
     "redis",
+    # Printing and preview are loaded lazily from the UI, so the bundler cannot
+    # discover these Qt modules by following imports alone.
+    "PySide6.QtPdf",
+    "PySide6.QtPdfWidgets",
+    "PySide6.QtPrintSupport",
+    "PySide6.QtSvg",
 ]
 
 analysis = Analysis(
@@ -48,6 +56,7 @@ executable = EXE(
     analysis.datas,
     [],
     name="PesticideShopManager",
+    icon=str(icon) if icon.is_file() else None,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

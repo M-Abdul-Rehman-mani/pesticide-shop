@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -74,6 +75,40 @@ class TopSellingModel:
     product: str
     units: int
     revenue: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class ProductSummary:
+    """Identity of one product, used to build the dashboard's product tabs."""
+
+    id: uuid.UUID
+    name: str
+    is_active: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ProductMetrics:
+    """Everything the dashboard shows for a single product in one period."""
+
+    units_sold: int
+    sales: Decimal
+    profit: Decimal
+    in_stock: int
+    active_batches: int
+    expiring_units: int
+    minimum_stock: int
+    stock_value: Decimal
+    last_sold: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class ProductBatchRow:
+    batch_number: str
+    expiry_date: date | None
+    received: int
+    available: int
+    purchase_price: Decimal
+    selling_price: Decimal
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,3 +345,118 @@ class ReportService:
             .group_by(Payment.method)
         )
         return {method.value: Decimal(total) for method, total in rows}
+
+    def products(self, *, include_inactive: bool = False) -> list[ProductSummary]:
+        """List products for the dashboard's per-product tabs, in display order."""
+
+        statement = select(Product).order_by(Product.manufacturer, Product.name)
+        if not include_inactive:
+            statement = statement.where(Product.is_active.is_(True))
+        return [
+            ProductSummary(product.id, product.display_name, product.is_active)
+            for product in self._session.scalars(statement)
+        ]
+
+    def product_dashboard(self, product_id: uuid.UUID, period: DateRange) -> ProductMetrics:
+        """Return the same figures as the main dashboard, scoped to one product."""
+
+        sold = self._session.execute(
+            select(
+                func.coalesce(func.sum(SaleItem.quantity), 0),
+                func.coalesce(func.sum(SaleItem.total), Decimal("0.00")),
+                func.coalesce(
+                    func.sum(SaleItem.total - SaleItem.purchase_cost - SaleItem.other_cost),
+                    Decimal("0.00"),
+                ),
+                func.max(Sale.sale_date),
+            )
+            .join(Sale, Sale.id == SaleItem.sale_id)
+            .where(
+                SaleItem.product_id == product_id,
+                Sale.status == SaleStatus.COMPLETED,
+                Sale.sale_date >= period.start,
+                Sale.sale_date < period.end,
+            )
+        ).one()
+        stock = self._session.execute(
+            select(
+                func.coalesce(func.sum(StockBatch.quantity_available), 0),
+                func.count(StockBatch.id),
+                func.coalesce(
+                    func.sum(StockBatch.quantity_available * StockBatch.purchase_price),
+                    Decimal("0.00"),
+                ),
+            ).where(StockBatch.product_id == product_id, StockBatch.is_active.is_(True))
+        ).one()
+        expiring = self._session.scalar(
+            select(func.coalesce(func.sum(StockBatch.quantity_available), 0)).where(
+                StockBatch.product_id == product_id,
+                StockBatch.quantity_available > 0,
+                StockBatch.expiry_date.is_not(None),
+                StockBatch.expiry_date <= date.today() + timedelta(days=90),
+            )
+        )
+        minimum_stock = self._session.scalar(
+            select(Product.minimum_stock).where(Product.id == product_id)
+        )
+        return ProductMetrics(
+            units_sold=int(sold[0] or 0),
+            sales=Decimal(sold[1] or 0),
+            profit=Decimal(sold[2] or 0),
+            in_stock=int(stock[0] or 0),
+            active_batches=int(stock[1] or 0),
+            expiring_units=int(expiring or 0),
+            minimum_stock=int(minimum_stock or 0),
+            stock_value=Decimal(stock[2] or 0),
+            last_sold=sold[3],
+        )
+
+    def product_financial_by_day(
+        self, product_id: uuid.UUID, period: DateRange, timezone: str
+    ) -> list[DailyFinancialPoint]:
+        """Return one product's daily revenue and profit across the period."""
+
+        zone = ZoneInfo(timezone)
+        rows = self._session.execute(
+            select(
+                Sale.sale_date,
+                SaleItem.total,
+                SaleItem.total - SaleItem.purchase_cost - SaleItem.other_cost,
+            )
+            .join(Sale, Sale.id == SaleItem.sale_id)
+            .where(
+                SaleItem.product_id == product_id,
+                Sale.status == SaleStatus.COMPLETED,
+                Sale.sale_date >= period.start,
+                Sale.sale_date < period.end,
+            )
+        )
+        totals: dict[date, list[Decimal]] = defaultdict(lambda: [Decimal("0.00"), Decimal("0.00")])
+        for occurred_at, amount, profit in rows:
+            values = totals[occurred_at.astimezone(zone).date()]
+            values[0] += Decimal(amount)
+            values[1] += Decimal(profit)
+        return [
+            DailyFinancialPoint(day, values[0], values[1]) for day, values in sorted(totals.items())
+        ]
+
+    def product_batches(self, product_id: uuid.UUID, *, limit: int = 50) -> list[ProductBatchRow]:
+        """Return a product's live batches, soonest to expire first."""
+
+        rows = self._session.scalars(
+            select(StockBatch)
+            .where(StockBatch.product_id == product_id, StockBatch.is_active.is_(True))
+            .order_by(StockBatch.expiry_date.asc().nullslast(), StockBatch.created_at)
+            .limit(limit)
+        )
+        return [
+            ProductBatchRow(
+                batch_number=batch.batch_number,
+                expiry_date=batch.expiry_date,
+                received=batch.quantity_received,
+                available=batch.quantity_available,
+                purchase_price=batch.purchase_price,
+                selling_price=batch.selling_price,
+            )
+            for batch in rows
+        ]

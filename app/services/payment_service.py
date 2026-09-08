@@ -51,6 +51,7 @@ class PaymentService:
             raise ValidationError("Payment cannot exceed the outstanding sale balance.")
         payment = Payment(
             sale_id=sale.id,
+            dealer_id=sale.dealer_id,
             method=method,
             direction=PaymentDirection.INCOMING,
             amount=amount,

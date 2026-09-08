@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
 
 from app.config.settings import Settings
 from app.ui.theme import APPLICATION_STYLESHEET
+from app.utils.paths import resource_path
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,7 @@ class ApplicationController(QObject):
             self._application.quit()
 
 
-def _install_exception_hook() -> None:
+def _install_exception_hook(log_directory: Path) -> None:
     def handle(exc_type: type[BaseException], exc: BaseException, tb: Any) -> None:
         logger.critical(
             "Unhandled exception\n%s", "".join(traceback.format_exception(exc_type, exc, tb))
@@ -131,15 +132,58 @@ def _install_exception_hook() -> None:
         QMessageBox.critical(
             None,
             "Unexpected error",
-            "An unexpected error occurred. Details were written to logs/errors.log.",
+            "An unexpected error occurred. Details were written to\n"
+            f"{log_directory / 'errors.log'}",
         )
 
     sys.excepthook = handle
 
 
+def migration_config() -> Config:
+    """Return the Alembic configuration, resolved for source and frozen builds."""
+
+    config = Config(str(resource_path("alembic.ini")))
+    config.set_main_option("script_location", str(resource_path("alembic")))
+    return config
+
+
+def _upgrade_database(current_revision: str | None) -> bool:
+    """Offer to bring the schema up to date, then report whether it is current.
+
+    A packaged Windows install has no Python or ``alembic`` command available, so
+    the upgrade has to be reachable from inside the application itself.
+    """
+
+    from alembic import command
+
+    answer = QMessageBox.question(
+        None,
+        "Database upgrade required",
+        "The database schema is not current"
+        + (f" (at revision {current_revision})" if current_revision else " (no migrations applied)")
+        + ".\n\nUpgrade the database now? Back up the database first if it holds live data.",
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        QMessageBox.StandardButton.Yes,
+    )
+    if answer is not QMessageBox.StandardButton.Yes:
+        return False
+    try:
+        command.upgrade(migration_config(), "head")
+    except Exception:
+        logger.exception("Database upgrade failed")
+        QMessageBox.critical(
+            None,
+            "Database upgrade failed",
+            "The database could not be upgraded. Details were written to the "
+            "application log. Restore a backup or run 'alembic upgrade head' manually.",
+        )
+        return False
+    QMessageBox.information(None, "Database upgraded", "The database schema is now current.")
+    return True
+
+
 def _expected_revision() -> str:
-    config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
-    revision = ScriptDirectory.from_config(config).get_current_head()
+    revision = ScriptDirectory.from_config(migration_config()).get_current_head()
     if revision is None:
         raise RuntimeError("No Alembic head revision is configured")
     return revision
@@ -166,7 +210,7 @@ def main() -> int:
         )
         return 2
     configure_logging(settings.log_directory, settings.app_debug)
-    _install_exception_hook()
+    _install_exception_hook(settings.log_directory)
     from app.database.connection import check_database
     from app.database.session import engine
 
@@ -180,13 +224,7 @@ def main() -> int:
         )
         return 3
     expected = _expected_revision()
-    if health.migration_revision != expected:
-        QMessageBox.critical(
-            None,
-            "Database upgrade required",
-            "The database schema is not current. Close the application and run:\n\n"
-            "alembic upgrade head",
-        )
+    if health.migration_revision != expected and not _upgrade_database(health.migration_revision):
         return 4
     controller = ApplicationController(application, settings)
     if not controller.start():

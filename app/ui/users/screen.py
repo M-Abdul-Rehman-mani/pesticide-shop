@@ -29,7 +29,9 @@ from app.security.authentication import AuthenticatedUser, AuthenticationService
 from app.security.permissions import Permission, has_permission
 from app.ui.widgets import (
     RowsTableModel,
+    configure_table,
     populate_row_actions,
+    record_count_text,
     show_error,
     show_record_details,
     show_success,
@@ -111,8 +113,7 @@ class UsersScreen(QWidget):
         )
         self.table = QTableView()
         self.table.setModel(self.model)
-        self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
-        self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
+        configure_table(self.table, stretch_column=1)
         layout.addLayout(header)
         layout.addWidget(self.table)
         self.state_label = QLabel("Loading users…")
@@ -195,7 +196,7 @@ class UsersScreen(QWidget):
             result,
         )
         self.model.set_rows(rows)
-        self.state_label.setText("No users found." if not rows else f"{len(rows)} users shown")
+        self.state_label.setText(record_count_text(len(rows), "user"))
         populate_row_actions(
             self.table,
             7,

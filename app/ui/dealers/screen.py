@@ -27,19 +27,28 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.models.dealer import Dealer
+from app.models.enums import PaymentMethod
 from app.models.sale import Sale
 from app.security.authentication import AuthenticatedUser
 from app.services.catalog_service import DealerService
+from app.services.dealer_account_service import (
+    INVOICE,
+    DealerAccountService,
+    DealerPaymentResult,
+    DealerStatement,
+)
 from app.ui.forms import MoneyEdit
 from app.ui.widgets import (
     RowsTableModel,
+    configure_table,
     populate_row_actions,
+    record_count_text,
     show_error,
     show_record_details,
     show_success,
 )
 from app.ui.workers import FunctionWorker, start_worker
-from app.utils.formatting import format_date
+from app.utils.formatting import format_date, format_money
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +119,67 @@ class DealerDialog(QDialog):
         )
 
 
+class DealerPaymentDialog(QDialog):
+    """Take one instalment against a dealer's running account."""
+
+    def __init__(
+        self,
+        dealer_name: str,
+        outstanding: Decimal,
+        currency: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Record Dealer Payment")
+        self.setMinimumWidth(430)
+        form = QFormLayout(self)
+        summary = QLabel(
+            f"{dealer_name} currently owes {format_money(outstanding, currency)}.\n"
+            "The payment is applied to their oldest unpaid invoices first; anything "
+            "left over stays on the account as credit."
+        )
+        summary.setWordWrap(True)
+        self.amount = MoneyEdit()
+        self.amount.setPlaceholderText("0.00")
+        self.method = QComboBox()
+        for candidate in PaymentMethod:
+            self.method.addItem(candidate.value.replace("_", " ").title(), candidate)
+        self.reference = QLineEdit()
+        self.reference.setPlaceholderText("Cheque number, transfer reference, receipt no.")
+        self.notes = QTextEdit()
+        self.notes.setMaximumHeight(70)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("Record payment")
+        buttons.accepted.connect(self._accept_if_valid)
+        buttons.rejected.connect(self.reject)
+        form.addRow(summary)
+        form.addRow("Amount *", self.amount)
+        form.addRow("Method", self.method)
+        form.addRow("Reference", self.reference)
+        form.addRow("Notes", self.notes)
+        form.addRow(buttons)
+
+    def _accept_if_valid(self) -> None:
+        try:
+            amount = self.amount.decimal_value("Payment")
+        except Exception:
+            QMessageBox.information(self, "Enter an amount", "Enter the amount received.")
+            self.amount.setFocus()
+            return
+        if amount <= 0:
+            QMessageBox.information(
+                self, "Enter an amount", "The payment must be greater than zero."
+            )
+            self.amount.setFocus()
+            return
+        self.accept()
+
+    def payment_method(self) -> PaymentMethod:
+        return cast(PaymentMethod, self.method.currentData())
+
+
 class DealersScreen(QWidget):
     def __init__(
         self,
@@ -126,6 +196,7 @@ class DealersScreen(QWidget):
         self._ids: list[uuid.UUID] = []
         self._data: list[DealerFormData] = []
         self._active: list[bool] = []
+        self._balances: list[Decimal] = []
         layout = QVBoxLayout(self)
         header = QHBoxLayout()
         title = QLabel("Dealers")
@@ -135,15 +206,20 @@ class DealersScreen(QWidget):
         self.status_filter = QComboBox()
         self.status_filter.addItems(("Active", "Inactive", "All"))
         history = QPushButton("Sales History")
-        history.setProperty("secondary", True)
+        statement = QPushButton("Account Statement")
+        payment = QPushButton("Record Payment")
         edit = QPushButton("Edit")
-        edit.setProperty("secondary", True)
+        for secondary in (history, statement, payment, edit):
+            secondary.setProperty("secondary", True)
+        payment.setToolTip("Record an instalment against the selected dealer's account")
         add = QPushButton("Add Dealer")
         header.addWidget(title)
         header.addStretch()
         header.addWidget(self.search)
         header.addWidget(self.status_filter)
         header.addWidget(history)
+        header.addWidget(statement)
+        header.addWidget(payment)
         header.addWidget(edit)
         header.addWidget(add)
         self.model = RowsTableModel(
@@ -153,7 +229,7 @@ class DealersScreen(QWidget):
                 "Phone",
                 "Email",
                 "Territory",
-                "Balance",
+                "Outstanding",
                 "Credit Limit",
                 "Active",
                 "Actions",
@@ -162,9 +238,7 @@ class DealersScreen(QWidget):
         )
         self.table = QTableView()
         self.table.setModel(self.model)
-        self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
-        self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
-        self.table.horizontalHeader().setStretchLastSection(True)
+        configure_table(self.table, stretch_column=0, minimum_section_size=74)
         layout.addLayout(header)
         layout.addWidget(self.table)
         self.state_label = QLabel("Loading dealers…")
@@ -173,6 +247,8 @@ class DealersScreen(QWidget):
         add.clicked.connect(self._add)
         edit.clicked.connect(self._edit)
         history.clicked.connect(self._history)
+        statement.clicked.connect(self._statement)
+        payment.clicked.connect(self._record_payment)
         self.search.returnPressed.connect(self.refresh)
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
@@ -182,13 +258,24 @@ class DealersScreen(QWidget):
         self.status_filter.currentIndexChanged.connect(self.refresh)
         self.refresh()
 
+    def _balance_text(self, balance: Decimal) -> str:
+        """Show a negative balance as the credit the dealer has paid in advance."""
+
+        if balance < 0:
+            return f"{format_money(-balance, self._currency)} credit"
+        return format_money(balance, self._currency)
+
     def refresh(self) -> None:
         query = self.search.text().strip()
         status = self.status_filter.currentText()
         self.state_label.setText("Loading dealers…")
 
         def operation() -> tuple[
-            list[tuple[object, ...]], list[uuid.UUID], list[DealerFormData], list[bool]
+            list[tuple[object, ...]],
+            list[uuid.UUID],
+            list[DealerFormData],
+            list[bool],
+            list[Decimal],
         ]:
             with self._session_factory() as session:
                 statement = select(Dealer)
@@ -216,7 +303,7 @@ class DealersScreen(QWidget):
                             dealer.phone,
                             dealer.email or "—",
                             dealer.territory or "—",
-                            f"{self._currency} {dealer.balance:,.2f}",
+                            self._balance_text(dealer.balance),
                             f"{self._currency} {dealer.credit_limit:,.2f}",
                             "Yes" if dealer.is_active else "No",
                             "",
@@ -240,6 +327,7 @@ class DealersScreen(QWidget):
                         for dealer in dealers
                     ],
                     [dealer.is_active for dealer in dealers],
+                    [dealer.balance for dealer in dealers],
                 )
 
         self._worker = start_worker(
@@ -247,12 +335,18 @@ class DealersScreen(QWidget):
         )
 
     def _display(self, result: object) -> None:
-        rows, self._ids, self._data, self._active = cast(
-            tuple[list[tuple[object, ...]], list[uuid.UUID], list[DealerFormData], list[bool]],
+        rows, self._ids, self._data, self._active, self._balances = cast(
+            tuple[
+                list[tuple[object, ...]],
+                list[uuid.UUID],
+                list[DealerFormData],
+                list[bool],
+                list[Decimal],
+            ],
             result,
         )
         self.model.set_rows(rows)
-        self.state_label.setText("No dealers found." if not rows else f"{len(rows)} dealers shown")
+        self.state_label.setText(record_count_text(len(rows), "dealer"))
         populate_row_actions(
             self.table,
             8,
@@ -260,7 +354,11 @@ class DealersScreen(QWidget):
             (
                 ("View", self._view),
                 ("Edit", self._edit_row),
+                ("Record payment", self._record_payment_row),
+                ("Account statement", self._statement_row),
+                ("Sales history", self._history_row),
                 ("Activate / deactivate", self._toggle_active),
+                ("Delete", self._delete_row),
             ),
         )
 
@@ -359,6 +457,32 @@ class DealersScreen(QWidget):
             failed=lambda error: show_error(self, error),
         )
 
+    def _delete_row(self, row: int) -> None:
+        if row >= len(self._ids):
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "Delete dealer",
+                "Delete this dealer permanently?\n\nDealers with sales history or an "
+                "outstanding balance cannot be deleted; deactivate them instead so past "
+                "invoices stay complete.",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        dealer_id = self._ids[row]
+
+        def operation() -> None:
+            with self._session_factory.begin() as session:
+                DealerService(session).delete(dealer_id, actor=self._actor)
+
+        self._worker = start_worker(
+            operation,
+            succeeded=lambda _result: self._saved("Dealer deleted."),
+            failed=lambda error: show_error(self, error),
+        )
+
     def _saved(self, message: str) -> None:
         show_success(self, message)
         self.refresh()
@@ -401,6 +525,154 @@ class DealersScreen(QWidget):
             operation,
             succeeded=lambda _result: self._saved("Dealer saved."),
             failed=lambda error: show_error(self, error),
+        )
+
+    def _record_payment_row(self, row: int) -> None:
+        if self._select_row(row):
+            self._record_payment()
+
+    def _statement_row(self, row: int) -> None:
+        if self._select_row(row):
+            self._statement()
+
+    def _history_row(self, row: int) -> None:
+        if self._select_row(row):
+            self._history()
+
+    def _select_row(self, row: int) -> bool:
+        if row >= len(self._ids):
+            return False
+        self.table.selectRow(row)
+        return True
+
+    def _record_payment(self) -> None:
+        """Take an instalment and apply it across the dealer's unpaid invoices."""
+
+        row = self._selected()
+        if row is None or row >= len(self._ids):
+            QMessageBox.information(self, "Select dealer", "Select a dealer first.")
+            return
+        dealer_id = self._ids[row]
+        dialog = DealerPaymentDialog(
+            self._data[row].business_name or self._data[row].name,
+            self._balances[row],
+            self._currency,
+            self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        amount = dialog.amount.decimal_value("Payment")
+        method = dialog.payment_method()
+        reference = dialog.reference.text()
+        notes = dialog.notes.toPlainText()
+
+        def operation() -> DealerPaymentResult:
+            with self._session_factory.begin() as session:
+                return DealerAccountService(session).record_payment(
+                    dealer_id,
+                    actor=self._actor,
+                    method=method,
+                    amount=amount,
+                    reference=reference,
+                    notes=notes,
+                )
+
+        def recorded(result: object) -> None:
+            outcome = cast(DealerPaymentResult, result)
+            lines = [
+                f"Received {format_money(outcome.amount, self._currency)}.",
+            ]
+            if outcome.settled:
+                lines.append("")
+                lines.append("Applied to:")
+                lines.extend(
+                    f"  {entry.invoice_number}: "
+                    f"{format_money(entry.applied, self._currency)} "
+                    f"(balance {format_money(entry.remaining, self._currency)})"
+                    for entry in outcome.settled
+                )
+            if outcome.credited:
+                lines.append("")
+                lines.append(
+                    f"{format_money(outcome.credited, self._currency)} was held as "
+                    "account credit against future invoices."
+                )
+            lines.append("")
+            lines.append(f"Account balance is now {format_money(outcome.balance, self._currency)}.")
+            QMessageBox.information(self, "Payment recorded", "\n".join(lines))
+            self.refresh()
+
+        self._worker = start_worker(
+            operation, succeeded=recorded, failed=lambda error: show_error(self, error)
+        )
+
+    def _statement(self) -> None:
+        """Show every charge and payment for the dealer with a running balance."""
+
+        row = self._selected()
+        if row is None or row >= len(self._ids):
+            QMessageBox.information(self, "Select dealer", "Select a dealer first.")
+            return
+        dealer_id = self._ids[row]
+
+        def operation() -> DealerStatement:
+            with self._session_factory() as session:
+                return DealerAccountService(session).statement(dealer_id)
+
+        def display(result: object) -> None:
+            statement = cast(DealerStatement, result)
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"Account statement — {statement.dealer_name}")
+            dialog.resize(980, 500)
+            layout = QVBoxLayout(dialog)
+            summary_parts = [
+                f"Invoiced {format_money(statement.invoiced, self._currency)}",
+                f"Paid {format_money(statement.paid, self._currency)}",
+                f"Outstanding {format_money(statement.outstanding, self._currency)}",
+            ]
+            available = statement.available_credit
+            if available is not None:
+                summary_parts.append(
+                    f"Credit available {format_money(available, self._currency)} "
+                    f"of {format_money(statement.credit_limit, self._currency)}"
+                )
+            summary = QLabel("   ·   ".join(summary_parts))
+            summary.setObjectName("SectionTitle")
+            summary.setWordWrap(True)
+            model = RowsTableModel(
+                ("Date", "Type", "Reference", "Detail", "Charge", "Payment", "Balance"), dialog
+            )
+            model.set_rows(
+                [
+                    (
+                        format_date(entry.occurred_at),
+                        "Invoice" if entry.kind == INVOICE else "Payment",
+                        entry.reference,
+                        entry.detail,
+                        format_money(entry.charge, self._currency) if entry.charge else "—",
+                        format_money(entry.credit, self._currency) if entry.credit else "—",
+                        format_money(entry.balance, self._currency),
+                    )
+                    for entry in statement.entries
+                ]
+            )
+            table = QTableView()
+            table.setModel(model)
+            configure_table(table, stretch_column=3, minimum_section_size=70)
+            count = QLabel(
+                record_count_text(len(statement.entries), "account entry", "account entries")
+            )
+            count.setObjectName("RecordCount")
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(summary)
+            layout.addWidget(table, 1)
+            layout.addWidget(count)
+            layout.addWidget(buttons)
+            dialog.exec()
+
+        self._worker = start_worker(
+            operation, succeeded=display, failed=lambda error: show_error(self, error)
         )
 
     def _history(self) -> None:

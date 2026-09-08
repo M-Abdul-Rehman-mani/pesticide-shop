@@ -31,7 +31,9 @@ from app.security.authentication import AuthenticatedUser
 from app.services.catalog_service import SupplierService
 from app.ui.widgets import (
     RowsTableModel,
+    configure_table,
     populate_row_actions,
+    record_count_text,
     show_error,
     show_record_details,
     show_success,
@@ -137,8 +139,7 @@ class SuppliersScreen(QWidget):
         )
         self.table = QTableView()
         self.table.setModel(self.model)
-        self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
-        self.table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
+        configure_table(self.table, stretch_column=0)
         layout.addLayout(header)
         layout.addWidget(self.table)
         self.state_label = QLabel("Loading suppliers…")
@@ -220,9 +221,7 @@ class SuppliersScreen(QWidget):
             result,
         )
         self.model.set_rows(rows)
-        self.state_label.setText(
-            "No suppliers found." if not rows else f"{len(rows)} suppliers shown"
-        )
+        self.state_label.setText(record_count_text(len(rows), "supplier"))
         populate_row_actions(
             self.table,
             6,
@@ -232,6 +231,7 @@ class SuppliersScreen(QWidget):
                 ("Edit", self._edit_row),
                 ("Purchase history", self._history_row),
                 ("Activate / deactivate", self._toggle_active),
+                ("Delete", self._delete_row),
             ),
         )
 
@@ -339,6 +339,32 @@ class SuppliersScreen(QWidget):
         self._worker = start_worker(
             operation,
             succeeded=lambda _result: self._saved("Supplier saved."),
+            failed=lambda error: show_error(self, error),
+        )
+
+    def _delete_row(self, row: int) -> None:
+        if row >= len(self._ids):
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "Delete supplier",
+                "Delete this supplier permanently?\n\nSuppliers with purchase history or an "
+                "outstanding balance cannot be deleted; deactivate them instead so past "
+                "purchases stay complete.",
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        supplier_id = self._ids[row]
+
+        def operation() -> None:
+            with self._session_factory.begin() as session:
+                SupplierService(session).delete(supplier_id, actor=self._actor)
+
+        self._worker = start_worker(
+            operation,
+            succeeded=lambda _result: self._saved("Supplier deleted."),
             failed=lambda error: show_error(self, error),
         )
 

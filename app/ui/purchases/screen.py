@@ -47,9 +47,11 @@ from app.ui.forms import MoneyEdit, PaymentEditor
 from app.ui.widgets import (
     PageHeader,
     RowsTableModel,
+    configure_date_edit,
     configure_searchable_combo,
     configure_table,
     populate_row_actions,
+    record_count_text,
     show_error,
     show_record_details,
     show_success,
@@ -138,9 +140,8 @@ class PurchasesScreen(QWidget):
             field.setRange(0, 1_000_000)
         self.quantity.setMinimum(1)
         self.manufacture_date = QDateEdit(QDate.currentDate())
-        self.manufacture_date.setCalendarPopup(True)
         self.expiry_date = QDateEdit(QDate.currentDate().addYears(2))
-        self.expiry_date.setCalendarPopup(True)
+        configure_date_edit(self.manufacture_date, self.expiry_date)
         self.purchase_price, self.selling_price = MoneyEdit(), MoneyEdit()
         add = QPushButton("Add Batch")
         fields = (
@@ -198,7 +199,7 @@ class PurchasesScreen(QWidget):
         layout.addLayout(bottom)
         action_row = QHBoxLayout()
         action_row.addStretch()
-        self.save_button = QPushButton("Complete Purchase & Add Stock")
+        self.save_button = QPushButton("Complete Purchase && Add Stock")
         action_row.addWidget(self.save_button)
         layout.addLayout(action_row)
         add.clicked.connect(self._add)
@@ -530,9 +531,7 @@ class PurchasesScreen(QWidget):
                 ("Cancel purchase", self._cancel_purchase),
             ),
         )
-        self.history_state.setText(
-            "No purchases found." if not rows else f"{len(rows)} purchases shown"
-        )
+        self.history_state.setText(record_count_text(len(rows), "purchase"))
 
     def _view_purchase(self, row: int) -> None:
         if row >= len(self._history_entries):

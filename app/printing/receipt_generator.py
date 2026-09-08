@@ -137,6 +137,11 @@ class SaleReceiptData:
         )
 
 
+#: ReportLab frames inset their contents by 6 points on every side, which the
+#: roll-width and page-height calculations must both account for.
+_FRAME_PADDING = 6.0
+
+
 class ReceiptGenerator:
     """Render receipt data without communicating with any printer."""
 
@@ -310,21 +315,56 @@ class ReceiptGenerator:
     ) -> bytes:
         if width_mm not in {58, 80}:
             raise ValueError("Thermal receipt width must be 58 mm or 80 mm")
-        buffer = BytesIO()
-        logo_height = 22 if shop.logo_path and shop.logo_path.is_file() else 0
-        page_height = max(120, 95 + logo_height + len(receipt.lines) * 25) * mm
         width = width_mm * mm
+        margin = 3 * mm
+        usable_width = width - 2 * margin - 2 * _FRAME_PADDING
+        base_size = 7 if width_mm == 58 else 8
+        page_height = self._thermal_page_height(
+            self._thermal_story(receipt, shop, base_size, usable_width),
+            usable_width,
+            margin,
+        )
+        buffer = BytesIO()
         document = SimpleDocTemplate(
             buffer,
             pagesize=(width, page_height),
-            leftMargin=3 * mm,
-            rightMargin=3 * mm,
-            topMargin=3 * mm,
-            bottomMargin=3 * mm,
+            leftMargin=margin,
+            rightMargin=margin,
+            topMargin=margin,
+            bottomMargin=margin,
             title=f"Receipt {receipt.invoice_number}",
             author=shop.name or "Pesticide Shop Manager",
         )
-        base_size = 7 if width_mm == 58 else 8
+        document.build(self._thermal_story(receipt, shop, base_size, usable_width))
+        return buffer.getvalue()
+
+    @staticmethod
+    def _thermal_page_height(story: list[Flowable], usable_width: float, margin: float) -> float:
+        """Size the roll page to its content so a receipt always prints on one page.
+
+        A fixed page estimate either wastes several centimetres of thermal roll on a
+        short sale or spills a long one onto a second page. Each flowable is measured
+        at the roll width instead, and the gaps between them are collapsed the same
+        way ReportLab's frame does -- the larger of the preceding space-after and the
+        following space-before.
+        """
+
+        content = 0.0
+        previous_space_after = 0.0
+        for index, flowable in enumerate(story):
+            space_before = flowable.getSpaceBefore()
+            content += space_before if index == 0 else max(previous_space_after, space_before)
+            content += flowable.wrap(usable_width, 0)[1]
+            previous_space_after = flowable.getSpaceAfter()
+        return max(60 * mm, content + 2 * margin + 2 * _FRAME_PADDING + 2 * mm)
+
+    def _thermal_story(
+        self,
+        receipt: SaleReceiptData,
+        shop: ShopProfile,
+        base_size: int,
+        usable_width: float,
+    ) -> list[Flowable]:
         normal = ParagraphStyle(
             "ThermalNormal", fontName="Helvetica", fontSize=base_size, leading=base_size + 2
         )
@@ -338,7 +378,6 @@ class ReceiptGenerator:
             fontSize=base_size + 4,
             leading=base_size + 6,
         )
-        usable_width = width - 6 * mm
         story: list[Flowable] = []
         if shop.logo_path and shop.logo_path.is_file():
             story.append(Image(str(shop.logo_path), width=18 * mm, height=18 * mm))
@@ -349,17 +388,17 @@ class ReceiptGenerator:
         story.extend(
             [
                 Spacer(1, 2 * mm),
-                Paragraph(f"Invoice: {receipt.invoice_number}", left),
+                Paragraph(f"Invoice: {escape(receipt.invoice_number)}", left),
                 Paragraph(f"Date: {receipt.sold_at:%d-%b-%Y %H:%M}", left),
-                Paragraph(f"Customer: {receipt.customer_name}", left),
+                Paragraph(f"Customer: {escape(receipt.customer_name)}", left),
                 Spacer(1, 2 * mm),
             ]
         )
         for line in receipt.lines:
             story.extend(
                 [
-                    Paragraph(line.product, left),
-                    Paragraph(f"Batch: {line.batch_number}", left),
+                    Paragraph(escape(line.product), left),
+                    Paragraph(f"Batch: {escape(line.batch_number)}", left),
                     Table(
                         [[f"{line.quantity} x {line.price:,.2f}", f"{line.total:,.2f}"]],
                         colWidths=[usable_width * 0.6, usable_width * 0.4],
@@ -393,14 +432,13 @@ class ReceiptGenerator:
             story.append(Paragraph(f"{label}: {shop.currency} {value:,.2f}", style))
         story.extend(
             [
-                Paragraph(f"Payment: {receipt.payment_methods}", left),
+                Paragraph(f"Payment: {escape(receipt.payment_methods)}", left),
                 Spacer(1, 3 * mm),
             ]
         )
         if shop.footer:
             story.append(Paragraph(escape(shop.footer), center))
-        document.build(story)
-        return buffer.getvalue()
+        return story
 
     @staticmethod
     def _amount(value: Decimal, currency: str) -> str:

@@ -15,7 +15,7 @@ from app.ui.forms import MoneyEdit, PaymentEditor
 from app.ui.main_window import MainWindow
 from app.ui.reports import screen as reports_module
 from app.ui.theme import APPLICATION_STYLESHEET
-from app.ui.widgets import PageHeader, RowsTableModel
+from app.ui.widgets import PageHeader, RowsTableModel, record_count_text
 
 
 def test_table_model_and_financial_widgets(qtbot: QtBot) -> None:
@@ -38,7 +38,7 @@ def test_table_model_and_financial_widgets(qtbot: QtBot) -> None:
     add_payment = next(
         button for button in payments.findChildren(QPushButton) if button.text() == "Add payment"
     )
-    qtbot.mouseClick(add_payment, Qt.MouseButton.LeftButton)
+    qtbot.mouseClick(add_payment, Qt.MouseButton.LeftButton)  # type: ignore[no-untyped-call]
     assert payments.table.rowCount() == 2
 
 
@@ -79,7 +79,8 @@ def test_owner_window_contains_complete_pesticide_workflow(
     }
     assert expected == set(window._pages)
     assert window.windowTitle() == "Pesticide Shop Management System"
-    assert window.minimumWidth() == 900
+    available = window.screen().availableGeometry()
+    assert window.minimumWidth() == min(900, available.width())
     window.resize(1000, 700)
     window.show()
     qtbot.wait(20)
@@ -134,3 +135,11 @@ def test_owner_window_contains_complete_pesticide_workflow(
         qtbot.waitUntil(lambda: reports.run_button.isEnabled(), timeout=5_000)  # type: ignore[attr-defined]
         assert reports._source_payload is not None  # type: ignore[attr-defined]
     assert not report_failures
+
+
+def test_record_counts_read_correctly_for_one_row_and_many() -> None:
+    assert record_count_text(0, "dealer") == "No dealers found."
+    assert record_count_text(1, "dealer") == "1 dealer shown"
+    assert record_count_text(2, "dealer") == "2 dealers shown"
+    assert record_count_text(1, "batch", "batches") == "1 batch shown"
+    assert record_count_text(4200, "record") == "4,200 records shown"

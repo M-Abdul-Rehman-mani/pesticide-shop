@@ -11,8 +11,10 @@ from sqlalchemy.orm import Session
 
 from app.models.customer import Customer
 from app.models.dealer import Dealer
+from app.models.inventory import StockBatch
 from app.models.product import Product
-from app.models.sale import Sale
+from app.models.purchase import Purchase, PurchaseItem
+from app.models.sale import Sale, SaleItem
 from app.models.supplier import Supplier
 from app.security.authentication import AuthenticatedUser
 from app.security.permissions import Permission, has_permission, require_permission
@@ -257,6 +259,31 @@ class DealerService:
         )
         return dealer
 
+    def delete(self, dealer_id: uuid.UUID, *, actor: AuthenticatedUser) -> None:
+        """Remove a dealer that has never traded; invoices must keep their recipient."""
+
+        require_permission(actor.role, Permission.MANAGE_DEALERS)
+        dealer = self._session.get(Dealer, dealer_id)
+        if dealer is None:
+            raise NotFoundError("Dealer was not found.")
+        if self._session.scalar(select(Sale.id).where(Sale.dealer_id == dealer_id).limit(1)):
+            raise ConflictError(
+                "This dealer has sales history and cannot be deleted. "
+                "Deactivate the dealer instead so past invoices stay complete."
+            )
+        if dealer.balance:
+            raise ConflictError(
+                "This dealer has an outstanding balance. Settle the account before deleting."
+            )
+        self._audit.record(
+            actor_id=actor.id,
+            action="DEALER_DELETED",
+            entity_type="Dealer",
+            entity_id=dealer.id,
+            old_value={"name": dealer.name, "business_name": dealer.business_name},
+        )
+        self._session.delete(dealer)
+
 
 class SupplierService:
     def __init__(self, session: Session) -> None:
@@ -358,6 +385,33 @@ class SupplierService:
             new_value={"is_active": is_active},
         )
         return supplier
+
+    def delete(self, supplier_id: uuid.UUID, *, actor: AuthenticatedUser) -> None:
+        """Remove a supplier that has never been purchased from."""
+
+        require_permission(actor.role, Permission.MANAGE_SUPPLIERS)
+        supplier = self._session.get(Supplier, supplier_id)
+        if supplier is None:
+            raise NotFoundError("Supplier was not found.")
+        if self._session.scalar(
+            select(Purchase.id).where(Purchase.supplier_id == supplier_id).limit(1)
+        ):
+            raise ConflictError(
+                "This supplier has purchase history and cannot be deleted. "
+                "Deactivate the supplier instead so past purchases stay complete."
+            )
+        if supplier.balance:
+            raise ConflictError(
+                "This supplier has an outstanding balance. Settle the account before deleting."
+            )
+        self._audit.record(
+            actor_id=actor.id,
+            action="SUPPLIER_DELETED",
+            entity_type="Supplier",
+            entity_id=supplier.id,
+            old_value={"name": supplier.name, "company_name": supplier.company_name},
+        )
+        self._session.delete(supplier)
 
 
 class ProductService:
@@ -526,3 +580,35 @@ class ProductService:
             new_value={"is_active": is_active},
         )
         return product
+
+    def delete(self, product_id: uuid.UUID, *, actor: AuthenticatedUser) -> None:
+        """Remove a product that was never stocked or sold."""
+
+        require_permission(actor.role, Permission.MANAGE_INVENTORY)
+        product = self._session.get(Product, product_id)
+        if product is None:
+            raise NotFoundError("Product was not found.")
+        if self._session.scalar(
+            select(SaleItem.id).where(SaleItem.product_id == product_id).limit(1)
+        ):
+            raise ConflictError(
+                "This product has been sold and cannot be deleted. "
+                "Deactivate it instead so past invoices stay complete."
+            )
+        if self._session.scalar(
+            select(StockBatch.id).where(StockBatch.product_id == product_id).limit(1)
+        ) or self._session.scalar(
+            select(PurchaseItem.id).where(PurchaseItem.product_id == product_id).limit(1)
+        ):
+            raise ConflictError(
+                "This product has stock batches or purchase history and cannot be deleted. "
+                "Deactivate it instead."
+            )
+        self._audit.record(
+            actor_id=actor.id,
+            action="PRODUCT_DELETED",
+            entity_type="Product",
+            entity_id=product.id,
+            old_value={"name": product.display_name, "manufacturer": product.manufacturer},
+        )
+        self._session.delete(product)

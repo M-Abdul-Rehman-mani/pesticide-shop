@@ -33,7 +33,18 @@ from app.email.email_service import OutgoingEmail
 from app.email.smtp_client import SMTPConfig, SMTPEmailService
 from app.models.email_history import EmailHistory
 from app.models.enums import EmailStatus, SettingCategory
-from app.printing.printer_service import PrinterService
+from app.printing.print_preview import open_print_preview
+from app.printing.printer_service import (
+    DEFAULT_RECEIPT_FORMAT,
+    RECEIPT_FORMATS,
+    SYSTEM_DEFAULT_PRINTER,
+    PrinterService,
+    receipt_format,
+    write_temporary_pdf,
+)
+from app.printing.receipt_generator import ReceiptGenerator
+from app.printing.sample_receipt import sample_receipt
+from app.printing.shop_profile import load_shop_profile
 from app.security.authentication import AuthenticatedUser
 from app.security.permissions import Permission, has_permission
 from app.services.backup_service import BackupService
@@ -136,17 +147,74 @@ class SettingsScreen(QWidget):
 
     def _build_printer(self) -> None:
         tab, form = self._tab_form()
+        service = PrinterService()
+        system_default = service.system_default_printer()
         self.printer = QComboBox()
-        self.printer.addItem("System default", "")
-        for printer in PrinterService().available_printers():
+        self.printer.addItem(
+            f"System default ({system_default})" if system_default else "System default",
+            SYSTEM_DEFAULT_PRINTER,
+        )
+        for printer in service.available_printers():
             self.printer.addItem(printer, printer)
         self.receipt_width = QComboBox()
-        self.receipt_width.addItem("A4", "A4")
-        self.receipt_width.addItem("58 mm thermal", "58")
-        self.receipt_width.addItem("80 mm thermal", "80")
+        for choice in RECEIPT_FORMATS:
+            self.receipt_width.addItem(choice.label, choice.key)
+        self.receipt_width.setCurrentIndex(
+            max(0, self.receipt_width.findData(DEFAULT_RECEIPT_FORMAT.key))
+        )
+        self.printer_summary = QLabel()
+        self.printer_summary.setWordWrap(True)
+        preview = QPushButton("Preview Sample Receipt")
+        preview.setProperty("secondary", True)
+        preview.setToolTip("Show how a receipt will look on the selected printer and paper")
+        preview.clicked.connect(self._preview_sample_receipt)
         form.addRow("Default printer", self.printer)
         form.addRow("Default receipt format", self.receipt_width)
+        form.addRow("", self.printer_summary)
+        form.addRow("", preview)
+        self.printer.currentIndexChanged.connect(self._update_printer_summary)
+        self.receipt_width.currentIndexChanged.connect(self._update_printer_summary)
+        self._update_printer_summary()
         self.tabs.addTab(tab, "Printer")
+
+    def _update_printer_summary(self) -> None:
+        service = PrinterService()
+        selected = str(self.printer.currentData() or SYSTEM_DEFAULT_PRINTER)
+        resolved = service.resolve_printer_name(selected)
+        chosen = receipt_format(str(self.receipt_width.currentData() or ""))
+        self.printer_summary.setText(
+            f"Invoices print on {resolved or 'no printer (install one first)'} "
+            f"using {chosen.label} paper. The print preview follows this choice."
+        )
+
+    def _preview_sample_receipt(self) -> None:
+        """Render a sample invoice so the printer choice can be checked at once."""
+
+        printer_name = str(self.printer.currentData() or SYSTEM_DEFAULT_PRINTER)
+        chosen = receipt_format(str(self.receipt_width.currentData() or ""))
+
+        def operation() -> Path:
+            with self._session_factory() as session:
+                shop = load_shop_profile(session, self._settings)
+            generator = ReceiptGenerator()
+            receipt = sample_receipt(shop.currency)
+            payload = (
+                generator.generate_thermal(receipt, shop, chosen.width_mm)
+                if chosen.width_mm is not None
+                else generator.generate_a4(receipt, shop)
+            )
+            return write_temporary_pdf(payload, f"sample-receipt-{chosen.key}")
+
+        self._worker = start_worker(
+            lambda: operation(),
+            succeeded=lambda path: open_print_preview(
+                cast(Path, path),
+                self,
+                printer_name=printer_name,
+                suggested_filename="sample-receipt.pdf",
+            ),
+            failed=lambda error: show_error(self, error),
+        )
 
     def _build_receipt(self) -> None:
         tab, form = self._tab_form()
@@ -273,13 +341,19 @@ class SettingsScreen(QWidget):
             self.retention.setValue(int(retention))
         if timeout := data.get((SettingCategory.SECURITY, "session_timeout")):
             self.session_timeout.setValue(int(timeout))
-        for key, combo in (
-            ((SettingCategory.PRINTER, "default_printer"), self.printer),
-            ((SettingCategory.PRINTER, "receipt_width"), self.receipt_width),
-        ):
-            index = combo.findData(data.get(key))
-            if index >= 0:
-                combo.setCurrentIndex(index)
+        stored_printer = (data.get((SettingCategory.PRINTER, "default_printer")) or "").strip()
+        if stored_printer and self.printer.findData(stored_printer) < 0:
+            # Keep a printer that is currently offline selectable so saving other
+            # settings does not silently reset the shop's chosen device.
+            self.printer.addItem(f"{stored_printer} (not connected)", stored_printer)
+        index = self.printer.findData(stored_printer)
+        self.printer.setCurrentIndex(max(0, index))
+        width_index = self.receipt_width.findData(
+            data.get((SettingCategory.PRINTER, "receipt_width"))
+        )
+        if width_index >= 0:
+            self.receipt_width.setCurrentIndex(width_index)
+        self._update_printer_summary()
 
     def save(self) -> None:
         values = (

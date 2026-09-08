@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import date
@@ -43,11 +42,13 @@ from app.models.inventory import StockBatch
 from app.models.payment import Payment
 from app.models.product import Product
 from app.models.sale import Sale, SaleItem
-from app.printing.printer_service import PrinterService
+from app.printing.preferences import PrintPreferences, load_print_preferences
+from app.printing.print_preview import open_print_preview
+from app.printing.printer_service import PrinterService, write_temporary_pdf
 from app.printing.receipt_generator import ReceiptGenerator, SaleReceiptData
 from app.printing.shop_profile import load_shop_profile
 from app.security.authentication import AuthenticatedUser
-from app.services.catalog_service import CustomerService
+from app.services.catalog_service import CustomerService, DealerService
 from app.services.dto import CreatePesticideSaleCommand, PesticideSaleLineInput
 from app.services.pesticide_sale_service import PesticideSaleService
 from app.services.settings_service import SettingsService
@@ -58,6 +59,7 @@ from app.ui.widgets import (
     configure_searchable_combo,
     configure_table,
     populate_row_actions,
+    record_count_text,
     show_error,
     show_record_details,
     wrap_scroll,
@@ -132,6 +134,7 @@ class SalesScreen(QWidget):
         self._customers: list[tuple[uuid.UUID, str, str | None, str | None]] = []
         self._dealers: list[tuple[uuid.UUID, str, str | None, str | None]] = []
         self._last_sale_id: uuid.UUID | None = None
+        self._last_invoice_number = "invoice"
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(16, 12, 16, 10)
         root_layout.setSpacing(8)
@@ -155,11 +158,11 @@ class SalesScreen(QWidget):
         self.recipient_type, self.recipient = QComboBox(), QComboBox()
         self.recipient_type.addItems(("Customer", "Dealer"))
         configure_searchable_combo(self.recipient, "Type to find a customer or dealer")
-        add_walk_in = QPushButton("+ Add walk-in customer")
-        add_walk_in.setProperty("secondary", True)
+        self.add_recipient = QPushButton()
+        self.add_recipient.setProperty("secondary", True)
         recipient_form.addRow("Type", self.recipient_type)
         recipient_form.addRow("Name", self.recipient)
-        recipient_form.addRow("", add_walk_in)
+        recipient_form.addRow("", self.add_recipient)
         details_group, details_form = QGroupBox("Delivery Details"), QFormLayout()
         details_group.setLayout(details_form)
         self.order_number, self.territory = QLineEdit(), QLineEdit()
@@ -178,8 +181,10 @@ class SalesScreen(QWidget):
             ("Notes", self.notes),
         ):
             details_form.addRow(field_label, field_widget)
-        top.addWidget(recipient_group)
-        top.addWidget(details_group, 1)
+        # Recipient names are long; give the group a fair share of the row so the
+        # selected customer or dealer stays readable.
+        top.addWidget(recipient_group, 2)
+        top.addWidget(details_group, 3)
         self._top_layout = top
         layout.addLayout(top)
 
@@ -236,20 +241,25 @@ class SalesScreen(QWidget):
         layout.addLayout(bottom)
         actions = QHBoxLayout()
         self.save_pdf, self.preview = QPushButton("Save PDF"), QPushButton("Print Preview")
-        self.complete = QPushButton("Complete Sale & Queue Emails")
-        self.save_pdf.setProperty("secondary", True)
-        self.preview.setProperty("secondary", True)
-        self.save_pdf.setEnabled(False)
-        self.preview.setEnabled(False)
+        self.print_invoice = QPushButton("Print Invoice")
+        self.complete = QPushButton("Complete Sale && Queue Emails")
+        for secondary in (self.save_pdf, self.preview, self.print_invoice):
+            secondary.setProperty("secondary", True)
+            secondary.setEnabled(False)
+        self.print_invoice.setToolTip(
+            "Print the receipt straight to the thermal printer chosen in Settings > Printer"
+        )
         self.complete.setEnabled(False)
         self.complete.setToolTip("Save the sale, reduce stock, and queue invoice emails")
         actions.addWidget(self.save_pdf)
         actions.addWidget(self.preview)
+        actions.addWidget(self.print_invoice)
         actions.addStretch()
         actions.addWidget(self.complete)
         layout.addLayout(actions)
 
         self.recipient_type.currentIndexChanged.connect(self._set_recipients)
+        self.recipient_type.currentIndexChanged.connect(self._update_add_recipient_button)
         self.recipient.currentIndexChanged.connect(self._recipient_changed)
         self.batch.currentIndexChanged.connect(self._batch_changed)
         add.clicked.connect(self._add_batch)
@@ -258,7 +268,9 @@ class SalesScreen(QWidget):
         self.complete.clicked.connect(self.save)
         self.save_pdf.clicked.connect(self._save_last_pdf)
         self.preview.clicked.connect(self._preview_last)
-        add_walk_in.clicked.connect(self._add_walk_in_customer)
+        self.print_invoice.clicked.connect(self._print_last_receipt)
+        self.add_recipient.clicked.connect(self._add_recipient)
+        self._update_add_recipient_button()
         self._build_sales_history_tab()
         self._load_choices()
         self._update_cart_state()
@@ -342,9 +354,80 @@ class SalesScreen(QWidget):
         if self.tabs.currentIndex() == 1:
             self._refresh_sales_history()
 
+    def _is_dealer_sale(self) -> bool:
+        return self.recipient_type.currentText() == "Dealer"
+
+    def _update_add_recipient_button(self) -> None:
+        """Offer the shortcut that matches the selected recipient type."""
+
+        dealer = self._is_dealer_sale()
+        self.add_recipient.setText("+ Add dealer" if dealer else "+ Add walk-in customer")
+        self.add_recipient.setToolTip(
+            "Create a trade dealer account without leaving this sale"
+            if dealer
+            else "Create a counter customer without leaving this sale"
+        )
+
+    def _add_recipient(self) -> None:
+        if self._is_dealer_sale():
+            self._add_dealer()
+        else:
+            self._add_walk_in_customer()
+
+    def _add_dealer(self) -> None:
+        """Create a dealer from the sales screen and select it for this invoice."""
+
+        from app.ui.dealers.screen import DealerDialog
+
+        dialog = DealerDialog(parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        data = dialog.values()
+
+        def operation() -> tuple[uuid.UUID, str, str, str | None, str | None]:
+            with self._session_factory.begin() as session:
+                dealer = DealerService(session).create(
+                    actor=self._actor,
+                    name=data.name,
+                    phone=data.phone,
+                    business_name=data.business_name,
+                    email=data.email,
+                    address=data.address,
+                    cnic=data.cnic,
+                    tax_number=data.tax_number,
+                    territory=data.territory,
+                    credit_limit=data.credit_limit,
+                    notes=data.notes,
+                )
+                return (
+                    dealer.id,
+                    dealer.display_name,
+                    dealer.phone,
+                    dealer.address,
+                    dealer.territory,
+                )
+
+        def added(result: object) -> None:
+            dealer_id, display_name, phone, address, territory = cast(
+                tuple[uuid.UUID, str, str, str | None, str | None], result
+            )
+            self._dealers.append((dealer_id, f"{display_name} — {phone}", address, territory))
+            self._dealers.sort(key=lambda dealer: dealer[1].casefold())
+            self._set_recipients()
+            self._select_recipient(dealer_id)
+
+        self._worker = start_worker(
+            operation, succeeded=added, failed=lambda error: show_error(self, error)
+        )
+
+    def _select_recipient(self, recipient_id: uuid.UUID) -> None:
+        for index in range(self.recipient.count()):
+            data = self.recipient.itemData(index)
+            if data and data[0] == recipient_id:
+                self.recipient.setCurrentIndex(index)
+                return
+
     def _add_walk_in_customer(self) -> None:
-        if self.recipient_type.currentText() != "Customer":
-            self.recipient_type.setCurrentText("Customer")
         dialog = WalkInCustomerDialog(self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -373,11 +456,7 @@ class SalesScreen(QWidget):
             self._customers.append((customer_id, label, stored_address, None))
             self._customers.sort(key=lambda customer: customer[1].casefold())
             self._set_recipients()
-            for index in range(self.recipient.count()):
-                data = self.recipient.itemData(index)
-                if data and data[0] == customer_id:
-                    self.recipient.setCurrentIndex(index)
-                    break
+            self._select_recipient(customer_id)
 
         self._worker = start_worker(
             operation, succeeded=added, failed=lambda error: show_error(self, error)
@@ -563,9 +642,7 @@ class SalesScreen(QWidget):
 
     def _sale_saved(self, result: object) -> None:
         sale_id, invoice = cast(tuple[uuid.UUID, str], result)
-        self._last_sale_id = sale_id
-        self.save_pdf.setEnabled(True)
-        self.preview.setEnabled(True)
+        self._select_invoice(sale_id, invoice)
         QMessageBox.information(
             self,
             "Sale completed",
@@ -709,9 +786,13 @@ class SalesScreen(QWidget):
             self.sales_table,
             8,
             len(rows),
-            (("View details", self._view_sale), ("Print preview", self._preview_sale)),
+            (
+                ("View details", self._view_sale),
+                ("Print preview", self._preview_sale),
+                ("Print invoice", self._print_sale),
+            ),
         )
-        self.sales_count.setText(f"{len(rows)} sale{'s' if len(rows) != 1 else ''}")
+        self.sales_count.setText(record_count_text(len(rows), "sale"))
 
     def _view_sale(self, row: int) -> None:
         if row >= len(self._history_sales):
@@ -747,12 +828,36 @@ class SalesScreen(QWidget):
         )
 
     def _preview_sale(self, row: int) -> None:
-        if row >= len(self._history_sales):
-            return
-        self._last_sale_id = self._history_sales[row].id
-        self._preview_last()
+        if self._select_history_row(row):
+            self._preview_last()
 
-    def _receipt_payload(self) -> bytes:
+    def _print_sale(self, row: int) -> None:
+        if self._select_history_row(row):
+            self._print_last_receipt()
+
+    def _select_history_row(self, row: int) -> bool:
+        if row >= len(self._history_sales):
+            return False
+        sale = self._history_sales[row]
+        self._select_invoice(sale.id, sale.invoice_number)
+        return True
+
+    def _select_invoice(self, sale_id: uuid.UUID, invoice_number: str) -> None:
+        """Point the document actions at one saved invoice and enable them."""
+
+        self._last_sale_id = sale_id
+        self._last_invoice_number = invoice_number
+        for button in (self.save_pdf, self.preview, self.print_invoice):
+            button.setEnabled(True)
+
+    def _receipt_document(self, *, thermal: bool) -> tuple[bytes, PrintPreferences]:
+        """Render the stored invoice and return it with the configured printer.
+
+        The A4 layout is used for the on-screen preview and saved PDFs; ``thermal``
+        renders the same sale at the roll width chosen in Settings > Printer so it
+        prints on the counter's 80 mm receipt printer.
+        """
+
         if self._last_sale_id is None:
             raise ConflictError("Complete a sale before generating an invoice.")
         with self._session_factory() as session:
@@ -765,10 +870,18 @@ class SalesScreen(QWidget):
                 )
             )
             method_text = ", ".join(dict.fromkeys(m.value for m in methods)) or "UNPAID"
-            return ReceiptGenerator().generate_a4(
-                SaleReceiptData.from_sale(sale, method_text),
-                load_shop_profile(session, self._settings),
+            receipt = SaleReceiptData.from_sale(sale, method_text)
+            shop = load_shop_profile(session, self._settings)
+            preferences = load_print_preferences(session, self._settings)
+        generator = ReceiptGenerator()
+        if thermal and preferences.receipt.width_mm is not None:
+            return generator.generate_thermal(receipt, shop, preferences.receipt.width_mm), (
+                preferences
             )
+        return generator.generate_a4(receipt, shop), preferences
+
+    def _receipt_payload(self) -> bytes:
+        return self._receipt_document(thermal=False)[0]
 
     def _save_last_pdf(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -784,13 +897,52 @@ class SalesScreen(QWidget):
             )
 
     def _preview_last(self) -> None:
-        def operation() -> str:
-            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as handle:
-                handle.write(self._receipt_payload())
-                return handle.name
+        def operation() -> tuple[Path, PrintPreferences]:
+            payload, preferences = self._receipt_document(thermal=False)
+            return write_temporary_pdf(payload, f"invoice-{self._last_invoice_number}"), preferences
+
+        def preview(result: object) -> None:
+            path, preferences = cast(tuple[Path, PrintPreferences], result)
+            open_print_preview(
+                path,
+                self,
+                printer_name=preferences.printer_name,
+                suggested_filename=f"{self._last_invoice_number}.pdf",
+            )
 
         self._worker = start_worker(
-            operation,
-            succeeded=lambda path: PrinterService().preview_pdf(Path(path), self),
-            failed=lambda error: show_error(self, error),
+            operation, succeeded=preview, failed=lambda error: show_error(self, error)
+        )
+
+    def _print_last_receipt(self) -> None:
+        """Send the receipt straight to the configured thermal printer."""
+
+        def operation() -> tuple[Path, PrintPreferences]:
+            payload, preferences = self._receipt_document(thermal=True)
+            return write_temporary_pdf(payload, f"receipt-{self._last_invoice_number}"), preferences
+
+        def print_document(result: object) -> None:
+            path, preferences = cast(tuple[Path, PrintPreferences], result)
+            service = PrinterService()
+            try:
+                printed = service.print_pdf(
+                    path,
+                    self,
+                    printer_name=preferences.printer_name,
+                    prompt=not service.resolve_printer_name(preferences.printer_name),
+                )
+            except Exception as error:
+                show_error(self, error)
+                return
+            if printed:
+                QMessageBox.information(
+                    self,
+                    "Invoice sent to printer",
+                    f"Invoice {self._last_invoice_number} was sent to "
+                    f"{service.resolve_printer_name(preferences.printer_name) or 'the printer'} "
+                    f"on {preferences.receipt.label} paper.",
+                )
+
+        self._worker = start_worker(
+            operation, succeeded=print_document, failed=lambda error: show_error(self, error)
         )

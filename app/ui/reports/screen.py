@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import tempfile
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -35,13 +34,21 @@ from app.models.product import Product
 from app.models.purchase import Purchase
 from app.models.sale import Sale, SaleItem
 from app.models.user import User
-from app.printing.printer_service import PrinterService
+from app.printing.preferences import load_print_preferences
+from app.printing.print_preview import open_print_preview
+from app.printing.printer_service import PrinterService, write_temporary_pdf
 from app.reports.excel_exporter import ExcelExporter
 from app.reports.pdf_exporter import PDFReportExporter
 from app.reports.report_service import DateRange
 from app.security.authentication import AuthenticatedUser
 from app.security.permissions import Permission, has_permission, require_permission
-from app.ui.widgets import RowsTableModel, configure_table, show_error
+from app.ui.widgets import (
+    RowsTableModel,
+    configure_date_edit,
+    configure_table,
+    record_count_text,
+    show_error,
+)
 from app.ui.workers import FunctionWorker, start_worker
 
 
@@ -98,8 +105,7 @@ class ReportsScreen(QWidget):
             QDateEdit(QDate.currentDate()),
             QDateEdit(QDate.currentDate()),
         )
-        self.from_date.setCalendarPopup(True)
-        self.to_date.setCalendarPopup(True)
+        configure_date_edit(self.from_date, self.to_date)
         self.run_button, self.excel, self.pdf, self.print_button = (
             QPushButton("Run Report"),
             QPushButton("Export Excel"),
@@ -694,9 +700,7 @@ class ReportsScreen(QWidget):
         self.model.set_rows(display)
         self.table.setModel(self.model)
         self.table.resizeColumnsToContents()
-        self.state_label.setText(
-            "No matching report records." if not display else f"{len(display):,} records shown"
-        )
+        self.state_label.setText(record_count_text(len(display), "record"))
 
     def _export_excel(self) -> None:
         if not self._payload:
@@ -746,14 +750,22 @@ class ReportsScreen(QWidget):
     def _print(self) -> None:
         if not self._payload:
             return
+        title = self._payload.title
 
-        def operation() -> Path:
-            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as handle:
-                handle.write(self._pdf_bytes())
-                return Path(handle.name)
+        def operation() -> tuple[Path, str]:
+            payload = self._pdf_bytes()
+            with self._session_factory() as session:
+                preferences = load_print_preferences(session, self._settings)
+            return write_temporary_pdf(payload, title), preferences.printer_name
+
+        def preview(result: object) -> None:
+            path, printer_name = cast(tuple[Path, str], result)
+            open_print_preview(
+                path, self, printer_name=printer_name, suggested_filename=f"{title}.pdf"
+            )
 
         self._worker = start_worker(
             operation,
-            succeeded=lambda path: PrinterService().preview_pdf(path, self),
+            succeeded=preview,
             failed=lambda error: show_error(self, error),
         )

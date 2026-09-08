@@ -37,6 +37,19 @@ class FunctionWorker(QRunnable):
             self.signals.finished.emit()
 
 
+#: Every worker that is still running. ``QThreadPool`` does not own the Python
+#: object, so a screen that starts two operations in a row -- overwriting its
+#: single ``self._worker`` attribute -- would let the first one be collected and
+#: silently lose its result. Workers stay referenced here until they finish.
+_ACTIVE_WORKERS: set[FunctionWorker] = set()
+
+
+def active_worker_count() -> int:
+    """Return how many workers are still in flight; used by tests."""
+
+    return len(_ACTIVE_WORKERS)
+
+
 def start_worker(
     function: Callable[[], Any],
     *,
@@ -49,5 +62,7 @@ def start_worker(
     worker.signals.failed.connect(failed)
     if finished:
         worker.signals.finished.connect(finished)
+    _ACTIVE_WORKERS.add(worker)
+    worker.signals.finished.connect(lambda: _ACTIVE_WORKERS.discard(worker))
     QThreadPool.globalInstance().start(worker)
     return worker

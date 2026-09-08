@@ -196,6 +196,9 @@ class PesticideSaleService:
                 self._session.add(
                     Payment(
                         sale_id=sale.id,
+                        # Stamping the dealer keeps their account statement complete,
+                        # including the amount paid at the counter.
+                        dealer_id=dealer.id if dealer else None,
                         method=payment_input.method,
                         direction=PaymentDirection.INCOMING,
                         amount=amount,

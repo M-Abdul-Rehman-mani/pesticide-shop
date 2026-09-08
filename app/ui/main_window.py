@@ -42,6 +42,11 @@ from app.ui.settings.screen import SettingsScreen
 from app.ui.shop_settings.screen import ShopSettingsScreen
 from app.ui.suppliers.screen import SuppliersScreen
 from app.ui.users.screen import UsersScreen
+from app.ui.widgets import mark_columns_user_sized
+
+#: Bumped when column layouts change meaning, so installs upgrading from an
+#: earlier build pick up the new automatic sizing instead of stale widths.
+_TABLE_LAYOUT_KEY = "tables/v2"
 
 
 class MainWindow(QMainWindow):
@@ -385,9 +390,10 @@ class MainWindow(QMainWindow):
         for page_name, page in self._pages.items():
             tables = page.findChildren(QTableView)
             for index, table in enumerate(tables):
-                state = self._preferences.value(f"tables/{page_name}/{index}")
-                if isinstance(state, QByteArray):
-                    table.horizontalHeader().restoreState(state)
+                state = self._preferences.value(f"{_TABLE_LAYOUT_KEY}/{page_name}/{index}")
+                if isinstance(state, QByteArray) and table.horizontalHeader().restoreState(state):
+                    # A remembered layout wins over automatic content sizing.
+                    mark_columns_user_sized(table)
 
     def _save_ui_preferences(self) -> None:
         self._preferences.setValue("main/geometry", self.saveGeometry())
@@ -395,7 +401,8 @@ class MainWindow(QMainWindow):
             tables = page.findChildren(QTableView)
             for index, table in enumerate(tables):
                 self._preferences.setValue(
-                    f"tables/{page_name}/{index}", table.horizontalHeader().saveState()
+                    f"{_TABLE_LAYOUT_KEY}/{page_name}/{index}",
+                    table.horizontalHeader().saveState(),
                 )
         self._preferences.sync()
 
