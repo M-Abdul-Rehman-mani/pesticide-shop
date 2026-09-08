@@ -29,20 +29,36 @@ SYSTEM_DEFAULT_PRINTER = ""
 
 @dataclass(frozen=True, slots=True)
 class ReceiptFormat:
-    """A page geometry the shop can print invoices on."""
+    """A page geometry the shop can print invoices on.
+
+    ``width_mm`` is the paper the roll is cut to; ``print_width_mm`` is the narrower
+    strip the thermal head can actually mark. A 203 dpi head prints 576 dots on an
+    80 mm roll and 384 on a 58 mm roll -- 72 mm and 48 mm -- and the rest of the
+    paper is a dead margin. Laying content out across the full paper width is what
+    makes the right-hand column disappear on a receipt printer.
+    """
 
     key: str
     label: str
     width_mm: int | None
+    print_width_mm: int | None = None
 
     @property
     def is_thermal(self) -> bool:
         return self.width_mm is not None
 
+    @property
+    def side_margin_mm(self) -> float:
+        """Blank paper on each side of the printable strip."""
+
+        if self.width_mm is None or self.print_width_mm is None:
+            return 0.0
+        return (self.width_mm - self.print_width_mm) / 2
+
 
 A4_FORMAT = ReceiptFormat("A4", "A4", None)
-THERMAL_58_FORMAT = ReceiptFormat("58", "58 mm thermal", 58)
-THERMAL_80_FORMAT = ReceiptFormat("80", "80 mm thermal", 80)
+THERMAL_58_FORMAT = ReceiptFormat("58", "58 mm thermal", 58, 48)
+THERMAL_80_FORMAT = ReceiptFormat("80", "80 mm thermal", 80, 72)
 RECEIPT_FORMATS: tuple[ReceiptFormat, ...] = (A4_FORMAT, THERMAL_58_FORMAT, THERMAL_80_FORMAT)
 DEFAULT_RECEIPT_FORMAT = THERMAL_80_FORMAT
 
@@ -134,6 +150,7 @@ class PrinterService:
             "",
             QPageSize.SizeMatchPolicy.FuzzyMatch,
         )
+        page_size = self._driver_page_size(printer, page_size) or page_size
         orientation = (
             QPageLayout.Orientation.Landscape
             if size_points.width() > size_points.height()
@@ -144,6 +161,38 @@ class PrinterService:
         printer.setPageLayout(layout)
         printer.setFullPage(True)
         return printer
+
+    @staticmethod
+    def _driver_page_size(printer: QPrinter, wanted: QPageSize) -> QPageSize | None:
+        """Prefer a page size the printer itself declares, matched on roll width.
+
+        Windows receipt drivers ship fixed roll definitions and quietly substitute
+        their default when handed a custom size, which scales or crops the receipt.
+        Reusing the driver's own definition avoids that; the height is free-running
+        on a roll, so only the width has to line up.
+        """
+
+        info = QPrinterInfo(printer)
+        if info.isNull():
+            return None
+        wanted_width = wanted.size(QPageSize.Unit.Millimeter).width()
+        supported = [
+            candidate
+            for candidate in info.supportedPageSizes()
+            if abs(candidate.size(QPageSize.Unit.Millimeter).width() - wanted_width) <= 1.0
+        ]
+        if not supported:
+            return None
+        wanted_height = wanted.size(QPageSize.Unit.Millimeter).height()
+        # Among same-width roll definitions, take the one whose length wastes the
+        # least paper while still holding the receipt.
+        tall_enough = [
+            candidate
+            for candidate in supported
+            if candidate.size(QPageSize.Unit.Millimeter).height() >= wanted_height - 1.0
+        ]
+        pool = tall_enough or supported
+        return min(pool, key=lambda size: size.size(QPageSize.Unit.Millimeter).height())
 
     def print_pdf(
         self,

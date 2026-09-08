@@ -335,10 +335,11 @@ def test_sales_screen_offers_the_right_shortcut_for_the_recipient_type(
 def test_dealers_screen_shows_advance_credit_as_credit(
     qtbot: QtBot, database_engine: Engine, owner: AuthenticatedUser
 ) -> None:
+    from app.config.settings import get_settings
     from app.ui.dealers.screen import DealersScreen
 
     factory = sessionmaker[Session](bind=database_engine, expire_on_commit=False, autoflush=False)
-    screen = DealersScreen(factory, owner, "PKR")
+    screen = DealersScreen(factory, owner, get_settings())
     qtbot.addWidget(screen)
     assert screen._balance_text(Decimal("1250.00")) == "PKR 1,250.00"
     assert screen._balance_text(Decimal("0.00")) == "PKR 0.00"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import replace
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -14,11 +15,16 @@ from PySide6.QtPdf import QPdfDocument
 from PySide6.QtPrintSupport import QPrinter
 from PySide6.QtWidgets import QApplication
 from pytestqt.qtbot import QtBot
+from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config.settings import get_settings
-from app.models.enums import SettingCategory
+from app.models.customer import Customer
+from app.models.enums import PaymentMethod, SettingCategory
+from app.models.inventory import StockBatch
+from app.models.product import Product
+from app.models.supplier import Supplier
 from app.printing.preferences import load_print_preferences
 from app.printing.print_preview import PrintPreviewDialog
 from app.printing.printer_service import (
@@ -33,7 +39,17 @@ from app.printing.printer_service import (
 from app.printing.receipt_generator import ReceiptGenerator, ReceiptLine, ShopProfile
 from app.printing.sample_receipt import sample_receipt
 from app.security.authentication import AuthenticatedUser
+from app.services.dto import (
+    CreatePesticideSaleCommand,
+    CreateStockPurchaseCommand,
+    PaymentInput,
+    PesticideSaleLineInput,
+    PurchasedBatchInput,
+)
+from app.services.pesticide_sale_service import PesticideSaleService
 from app.services.settings_service import SettingsService
+from app.services.stock_purchase_service import StockPurchaseService
+from app.utils.exceptions import NotFoundError
 
 MILLIMETRES_PER_POINT = 25.4 / 72
 
@@ -243,3 +259,233 @@ def test_thermal_receipt_grows_with_its_content(qapp: QApplication) -> None:
     assert long > short
     # A short receipt must not consume a long strip of roll.
     assert short < 110
+
+
+@pytest.mark.ui
+def test_build_sale_document_renders_both_paper_sizes(
+    qapp: QApplication,
+    db_session: Session,
+    owner: AuthenticatedUser,
+    supplier: Supplier,
+    product: Product,
+    customer: Customer,
+) -> None:
+    """Any screen can render a saved invoice for A4 or the configured roll."""
+
+    from app.printing.invoice_documents import build_sale_document
+
+    purchase = StockPurchaseService(db_session).create(
+        CreateStockPurchaseCommand(
+            supplier_id=supplier.id,
+            batches=(
+                PurchasedBatchInput(
+                    product_id=product.id,
+                    batch_number="DOC-001",
+                    quantity=20,
+                    purchase_price=Decimal("100.00"),
+                    selling_price=Decimal("150.00"),
+                    manufacture_date=date(2025, 1, 1),
+                    expiry_date=date(2099, 1, 1),
+                ),
+            ),
+            payments=(),
+        ),
+        owner,
+    )
+    db_session.flush()
+    batch = db_session.scalar(select(StockBatch).where(StockBatch.purchase_id == purchase.id))
+    assert batch is not None
+    sale = PesticideSaleService(db_session).create(
+        CreatePesticideSaleCommand(
+            lines=(PesticideSaleLineInput(batch.id, 2),),
+            payments=(PaymentInput(PaymentMethod.CASH, Decimal("300.00")),),
+            customer_id=customer.id,
+        ),
+        owner,
+    )
+    db_session.flush()
+
+    # Bind to the test's own connection so the builder sees this open transaction.
+    factory = sessionmaker[Session](
+        bind=db_session.get_bind(), join_transaction_mode="create_savepoint"
+    )
+    settings = get_settings()
+    service = PrinterService()
+
+    a4 = build_sale_document(factory, settings, sale.id)
+    assert a4.invoice_number == sale.invoice_number
+    assert a4.payload.startswith(b"%PDF")
+    page = service.load(write_temporary_pdf(a4.payload, "doc-a4")).pagePointSize(0)
+    assert page.width() * MILLIMETRES_PER_POINT == pytest.approx(210, abs=1)
+
+    thermal = build_sale_document(factory, settings, sale.id, thermal=True)
+    assert thermal.preferences.receipt.width_mm is not None
+    page = service.load(write_temporary_pdf(thermal.payload, "doc-roll")).pagePointSize(0)
+    assert page.width() * MILLIMETRES_PER_POINT == pytest.approx(
+        thermal.preferences.receipt.width_mm, abs=1
+    )
+
+
+@pytest.mark.ui
+def test_build_sale_document_reports_a_missing_invoice(
+    qapp: QApplication, db_session: Session
+) -> None:
+    from app.printing.invoice_documents import build_sale_document
+
+    factory = sessionmaker[Session](
+        bind=db_session.get_bind(), join_transaction_mode="create_savepoint"
+    )
+    with pytest.raises(NotFoundError):
+        build_sale_document(factory, get_settings(), uuid.uuid4())
+
+
+@pytest.mark.ui
+def test_invoice_history_dialog_offers_the_document_actions(qtbot: QtBot) -> None:
+    """A past invoice must be reprintable from a party's history list."""
+
+    from app.ui.documents import InvoiceDocumentActions, InvoiceHistoryDialog
+
+    sale_ids = [uuid.uuid4(), uuid.uuid4()]
+    rows = [
+        ("INV-2026-000001", "01-Sep-2026", "PKR 100.00", "PKR 100.00", "PKR 0.00", "Paid"),
+        ("INV-2026-000002", "02-Sep-2026", "PKR 250.00", "PKR 0.00", "PKR 250.00", "Unpaid"),
+    ]
+    actions = InvoiceDocumentActions(None, None, None)  # type: ignore[arg-type]
+    dialog = InvoiceHistoryDialog("Dealer sales history", rows, sale_ids, actions)
+    qtbot.addWidget(dialog)
+    assert dialog.model.rowCount() == 2
+    labels = [
+        dialog.save_button.text(),
+        dialog.preview_button.text(),
+        dialog.print_button.text(),
+    ]
+    assert labels == ["Save PDF", "Print Preview", "Print Invoice"]
+    # The first row is preselected so the actions are immediately usable.
+    assert dialog.selected_sale() == sale_ids[0]
+    assert dialog.selected_invoice_number() == "INV-2026-000001"
+    assert dialog.preview_button.isEnabled() is True
+    dialog.table.selectRow(1)
+    assert dialog.selected_sale() == sale_ids[1]
+
+
+@pytest.mark.ui
+def test_invoice_history_dialog_disables_actions_without_invoices(qtbot: QtBot) -> None:
+    from app.ui.documents import InvoiceDocumentActions, InvoiceHistoryDialog
+
+    actions = InvoiceDocumentActions(None, None, None)  # type: ignore[arg-type]
+    dialog = InvoiceHistoryDialog("Customer purchase history", [], [], actions)
+    qtbot.addWidget(dialog)
+    assert dialog.selected_sale() is None
+    assert dialog.preview_button.isEnabled() is False
+    assert dialog.print_button.isEnabled() is False
+    assert dialog.save_button.isEnabled() is False
+    assert "No invoices found." in dialog.count_label.text()
+
+
+def test_roll_formats_declare_their_printable_strip() -> None:
+    """A thermal head marks less than the paper width; both must be modelled."""
+
+    assert (THERMAL_80_FORMAT.width_mm, THERMAL_80_FORMAT.print_width_mm) == (80, 72)
+    assert (THERMAL_58_FORMAT.width_mm, THERMAL_58_FORMAT.print_width_mm) == (58, 48)
+    assert THERMAL_80_FORMAT.side_margin_mm == 4.0
+    assert THERMAL_58_FORMAT.side_margin_mm == 5.0
+    assert A4_FORMAT.print_width_mm is None
+    assert A4_FORMAT.side_margin_mm == 0.0
+
+
+@pytest.mark.ui
+@pytest.mark.parametrize(
+    ("paper_mm", "printable_mm"),
+    [(80, 72), (58, 48), (80, 64), (58, 42)],
+)
+def test_receipt_ink_stays_inside_the_printable_strip(
+    qapp: QApplication, paper_mm: int, printable_mm: int
+) -> None:
+    """Nothing may be laid out in the dead margin the print head cannot reach."""
+
+    from PySide6.QtCore import QSize
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    payload = ReceiptGenerator().generate_thermal(
+        sample_receipt(),
+        ShopProfile(name="Green Valley Crop Care", address="Main Bazaar Road, Multan"),
+        paper_mm,
+        printable_mm,
+    )
+    document = PrinterService().load(
+        write_temporary_pdf(payload, f"strip-{paper_mm}-{printable_mm}")
+    )
+    points = document.pagePointSize(0)
+    assert points.width() * MILLIMETRES_PER_POINT == pytest.approx(paper_mm, abs=0.5)
+
+    dots_per_mm = 8  # 203 dpi thermal head
+    width_px = round(points.width() * MILLIMETRES_PER_POINT * dots_per_mm)
+    height_px = round(points.height() * MILLIMETRES_PER_POINT * dots_per_mm)
+    flattened = QImage(width_px, height_px, QImage.Format.Format_RGB32)
+    flattened.fill(QColor("white"))
+    painter = QPainter(flattened)
+    painter.drawImage(0, 0, document.render(0, QSize(width_px, height_px)))
+    painter.end()
+
+    left, right = width_px, -1
+    for y in range(height_px):
+        for x in range(width_px):
+            if QColor(flattened.pixel(x, y)).value() < 160:
+                left = min(left, x)
+                right = max(right, x)
+    assert right >= 0, "the receipt rendered blank"
+    margin = (paper_mm - printable_mm) / 2
+    assert left / dots_per_mm >= margin - 0.5
+    assert (right + 1) / dots_per_mm <= paper_mm - margin + 0.5
+
+
+def test_thermal_generation_rejects_an_impossible_printable_width() -> None:
+    generator = ReceiptGenerator()
+    shop = ShopProfile(name="Test")
+    with pytest.raises(ValueError, match="fit inside the paper"):
+        generator.generate_thermal(sample_receipt(), shop, 80, 90)
+    with pytest.raises(ValueError, match="fit inside the paper"):
+        generator.generate_thermal(sample_receipt(), shop, 80, 0)
+    with pytest.raises(ValueError, match="58 mm or 80 mm"):
+        generator.generate_thermal(sample_receipt(), shop, 72)
+
+
+@pytest.mark.ui
+def test_alignment_test_page_matches_the_roll(qapp: QApplication) -> None:
+    from app.printing.alignment_test import alignment_test_page
+
+    document = PrinterService().load(write_temporary_pdf(alignment_test_page(80, 72), "align"))
+    assert document.pageCount() == 1
+    size = document.pagePointSize(0)
+    assert size.width() * MILLIMETRES_PER_POINT == pytest.approx(80, abs=0.5)
+    with pytest.raises(ValueError):
+        alignment_test_page(80, 90)
+
+
+def test_print_preferences_override_the_standard_printable_width() -> None:
+    from app.printing.preferences import PrintPreferences
+
+    default = PrintPreferences(receipt=THERMAL_80_FORMAT)
+    assert default.effective_print_width_mm == 72
+    narrowed = PrintPreferences(receipt=THERMAL_80_FORMAT, print_width_mm=64)
+    assert narrowed.effective_print_width_mm == 64
+    assert PrintPreferences(receipt=A4_FORMAT).effective_print_width_mm is None
+
+
+def test_printable_width_setting_is_validated(
+    db_session: Session, owner: AuthenticatedUser
+) -> None:
+    from app.utils.exceptions import ValidationError
+
+    service = SettingsService(db_session, get_settings().app_secret_key.get_secret_value())
+    service.set(actor=owner, category=SettingCategory.PRINTER, key="print_width", value="64")
+    db_session.flush()
+    assert load_print_preferences(db_session, get_settings()).print_width_mm == 64
+    for invalid in ("0", "120", "wide"):
+        with pytest.raises(ValidationError):
+            service.set(
+                actor=owner,
+                category=SettingCategory.PRINTER,
+                key="print_width",
+                value=invalid,
+            )

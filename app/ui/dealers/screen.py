@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 from typing import cast
 
 from PySide6.QtCore import QTimer
@@ -12,6 +13,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -26,9 +28,14 @@ from PySide6.QtWidgets import (
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.config.settings import Settings
 from app.models.dealer import Dealer
 from app.models.enums import PaymentMethod
 from app.models.sale import Sale
+from app.printing.preferences import load_print_preferences
+from app.printing.print_preview import open_print_preview
+from app.printing.printer_service import PrinterService, write_temporary_pdf
+from app.reports.pdf_exporter import PDFReportExporter
 from app.security.authentication import AuthenticatedUser
 from app.services.catalog_service import DealerService
 from app.services.dealer_account_service import (
@@ -37,6 +44,7 @@ from app.services.dealer_account_service import (
     DealerPaymentResult,
     DealerStatement,
 )
+from app.ui.documents import InvoiceDocumentActions, InvoiceHistoryDialog
 from app.ui.forms import MoneyEdit
 from app.ui.widgets import (
     RowsTableModel,
@@ -185,18 +193,20 @@ class DealersScreen(QWidget):
         self,
         session_factory: sessionmaker[Session],
         actor: AuthenticatedUser,
-        currency: str,
+        settings: Settings,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._session_factory = session_factory
         self._actor = actor
-        self._currency = currency
+        self._settings = settings
+        self._currency = settings.app_currency
         self._worker: FunctionWorker | None = None
         self._ids: list[uuid.UUID] = []
         self._data: list[DealerFormData] = []
         self._active: list[bool] = []
         self._balances: list[Decimal] = []
+        self._documents = InvoiceDocumentActions(self, session_factory, settings)
         layout = QVBoxLayout(self)
         header = QHBoxLayout()
         title = QLabel("Dealers")
@@ -663,16 +673,92 @@ class DealersScreen(QWidget):
                 record_count_text(len(statement.entries), "account entry", "account entries")
             )
             count.setObjectName("RecordCount")
-            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-            buttons.rejected.connect(dialog.reject)
+            save = QPushButton("Save PDF")
+            preview = QPushButton("Print Preview")
+            close_button = QPushButton("Close")
+            for secondary in (save, preview):
+                secondary.setProperty("secondary", True)
+            save.clicked.connect(lambda: self._export_statement(statement, save_to_file=True))
+            preview.clicked.connect(lambda: self._export_statement(statement, save_to_file=False))
+            close_button.clicked.connect(dialog.reject)
+            actions = QHBoxLayout()
+            actions.addWidget(count)
+            actions.addStretch()
+            actions.addWidget(save)
+            actions.addWidget(preview)
+            actions.addWidget(close_button)
             layout.addWidget(summary)
             layout.addWidget(table, 1)
-            layout.addWidget(count)
-            layout.addWidget(buttons)
+            layout.addLayout(actions)
             dialog.exec()
 
         self._worker = start_worker(
             operation, succeeded=display, failed=lambda error: show_error(self, error)
+        )
+
+    def _statement_document(self, statement: DealerStatement) -> bytes:
+        """Render the statement as a PDF the dealer can be handed or emailed."""
+
+        subtitle = (
+            f"Invoiced {format_money(statement.invoiced, self._currency)} · "
+            f"Paid {format_money(statement.paid, self._currency)} · "
+            f"Outstanding {format_money(statement.outstanding, self._currency)}"
+        )
+        available = statement.available_credit
+        if available is not None:
+            subtitle += (
+                f" · Credit available {format_money(available, self._currency)} "
+                f"of {format_money(statement.credit_limit, self._currency)}"
+            )
+        return PDFReportExporter().render(
+            title=f"Account statement — {statement.dealer_name}",
+            subtitle=subtitle,
+            headers=("Date", "Type", "Reference", "Detail", "Charge", "Payment", "Balance"),
+            rows=[
+                (
+                    format_date(entry.occurred_at),
+                    "Invoice" if entry.kind == INVOICE else "Payment",
+                    entry.reference,
+                    entry.detail,
+                    format_money(entry.charge, self._currency) if entry.charge else "—",
+                    format_money(entry.credit, self._currency) if entry.credit else "—",
+                    format_money(entry.balance, self._currency),
+                )
+                for entry in statement.entries
+            ],
+        )
+
+    def _export_statement(self, statement: DealerStatement, *, save_to_file: bool) -> None:
+        name = f"statement-{statement.dealer_name}".replace(" ", "-").lower()
+        if save_to_file:
+            path, _filter = QFileDialog.getSaveFileName(
+                self, "Save account statement", f"{name}.pdf", "PDF documents (*.pdf)"
+            )
+            if not path:
+                return
+            self._worker = start_worker(
+                lambda: PrinterService().save_pdf(Path(path), self._statement_document(statement)),
+                succeeded=lambda saved: QMessageBox.information(
+                    self, "Statement saved", f"Saved to {saved}"
+                ),
+                failed=lambda error: show_error(self, error),
+            )
+            return
+
+        def operation() -> tuple[Path, str]:
+            payload = self._statement_document(statement)
+            with self._session_factory() as session:
+                printer = load_print_preferences(session, self._settings).printer_name
+            return write_temporary_pdf(payload, name), printer
+
+        def preview(result: object) -> None:
+            document, printer = cast(tuple[Path, str], result)
+            open_print_preview(
+                document, self, printer_name=printer, suggested_filename=f"{name}.pdf"
+            )
+
+        self._worker = start_worker(
+            operation, succeeded=preview, failed=lambda error: show_error(self, error)
         )
 
     def _history(self) -> None:
@@ -682,35 +768,39 @@ class DealersScreen(QWidget):
             return
         dealer_id = self._ids[row]
 
-        def operation() -> list[tuple[object, ...]]:
+        def operation() -> tuple[list[tuple[object, ...]], list[uuid.UUID]]:
             with self._session_factory() as session:
-                sales = session.scalars(
-                    select(Sale).where(Sale.dealer_id == dealer_id).order_by(Sale.sale_date.desc())
-                )
-                return [
-                    (
-                        sale.invoice_number,
-                        format_date(sale.sale_date),
-                        f"{self._currency} {sale.total:,.2f}",
-                        f"{self._currency} {sale.remaining_amount:,.2f}",
-                        sale.payment_status.value,
+                sales = list(
+                    session.scalars(
+                        select(Sale)
+                        .where(Sale.dealer_id == dealer_id)
+                        .order_by(Sale.sale_date.desc())
                     )
-                    for sale in sales
-                ]
+                )
+                return (
+                    [
+                        (
+                            sale.invoice_number,
+                            format_date(sale.sale_date),
+                            format_money(sale.total, self._currency),
+                            format_money(sale.paid_amount, self._currency),
+                            format_money(sale.remaining_amount, self._currency),
+                            sale.payment_status.value.replace("_", " ").title(),
+                        )
+                        for sale in sales
+                    ],
+                    [sale.id for sale in sales],
+                )
 
-        def display(rows: object) -> None:
-            dialog = QDialog(self)
-            dialog.setWindowTitle("Dealer sales history")
-            dialog.resize(760, 420)
-            layout = QVBoxLayout(dialog)
-            model = RowsTableModel(("Invoice", "Date", "Total", "Balance", "Payment"), dialog)
-            model.set_rows(rows)  # type: ignore[arg-type]
-            table = QTableView()
-            table.setModel(model)
-            layout.addWidget(table)
-            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-            buttons.rejected.connect(dialog.reject)
-            layout.addWidget(buttons)
+        def display(result: object) -> None:
+            rows, sale_ids = cast(tuple[list[tuple[object, ...]], list[uuid.UUID]], result)
+            dialog = InvoiceHistoryDialog(
+                "Dealer sales history",
+                rows,
+                sale_ids,
+                self._documents,
+                self,
+            )
             dialog.exec()
 
         self._worker = start_worker(

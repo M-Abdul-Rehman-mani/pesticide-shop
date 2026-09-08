@@ -141,6 +141,10 @@ class SaleReceiptData:
 #: roll-width and page-height calculations must both account for.
 _FRAME_PADDING = 6.0
 
+#: Printable strip of each thermal roll at the usual 203 dpi head: 576 dots across
+#: an 80 mm roll and 384 across a 58 mm one.
+_THERMAL_PRINT_WIDTHS_MM = {58: 48, 80: 72}
+
 
 class ReceiptGenerator:
     """Render receipt data without communicating with any printer."""
@@ -311,12 +315,27 @@ class ReceiptGenerator:
         return buffer.getvalue()
 
     def generate_thermal(
-        self, receipt: SaleReceiptData, shop: ShopProfile, width_mm: int = 80
+        self,
+        receipt: SaleReceiptData,
+        shop: ShopProfile,
+        width_mm: int = 80,
+        print_width_mm: int | None = None,
     ) -> bytes:
-        if width_mm not in {58, 80}:
+        """Render a receipt for a thermal roll.
+
+        ``width_mm`` is the paper width and ``print_width_mm`` the strip the head can
+        mark -- 72 mm of an 80 mm roll, 48 mm of a 58 mm roll. Content is centred
+        inside that strip, so nothing falls in the dead margin the printer cannot
+        reach and no column is clipped.
+        """
+
+        if width_mm not in _THERMAL_PRINT_WIDTHS_MM:
             raise ValueError("Thermal receipt width must be 58 mm or 80 mm")
+        printable = _THERMAL_PRINT_WIDTHS_MM[width_mm] if print_width_mm is None else print_width_mm
+        if not 0 < printable <= width_mm:
+            raise ValueError("Printable width must be positive and fit inside the paper.")
         width = width_mm * mm
-        margin = 3 * mm
+        margin = max((width_mm - printable) / 2, 1.0) * mm
         usable_width = width - 2 * margin - 2 * _FRAME_PADDING
         base_size = 7 if width_mm == 58 else 8
         page_height = self._thermal_page_height(

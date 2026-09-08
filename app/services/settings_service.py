@@ -131,6 +131,16 @@ class SettingsService:
             "receipt_width",
         ) and cleaned not in {"A4", "58", "80"}:
             raise ValidationError("Receipt width must be A4, 58, or 80.")
+        if (category, key) == (SettingCategory.PRINTER, "print_width"):
+            if not cleaned:
+                return ""
+            try:
+                millimetres = int(cleaned)
+            except ValueError as exc:
+                raise ValidationError("Printable width must be a whole number of mm.") from exc
+            if millimetres not in range(30, 81):
+                raise ValidationError("Printable width must be between 30 and 80 mm.")
+            return str(millimetres)
         if (category, key) in {
             (SettingCategory.SECURITY, "session_timeout"),
             (SettingCategory.BACKUP, "retention_days"),

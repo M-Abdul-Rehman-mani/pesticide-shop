@@ -6,7 +6,6 @@ import uuid
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from pathlib import Path
 from typing import cast
 
 from PySide6.QtCore import QTimer, Signal
@@ -15,7 +14,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
-    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -37,21 +35,16 @@ from sqlalchemy.orm import Session, selectinload, sessionmaker
 from app.config.settings import Settings
 from app.models.customer import Customer
 from app.models.dealer import Dealer
-from app.models.enums import PaymentDirection, SettingCategory
+from app.models.enums import SettingCategory
 from app.models.inventory import StockBatch
-from app.models.payment import Payment
 from app.models.product import Product
 from app.models.sale import Sale, SaleItem
-from app.printing.preferences import PrintPreferences, load_print_preferences
-from app.printing.print_preview import open_print_preview
-from app.printing.printer_service import PrinterService, write_temporary_pdf
-from app.printing.receipt_generator import ReceiptGenerator, SaleReceiptData
-from app.printing.shop_profile import load_shop_profile
 from app.security.authentication import AuthenticatedUser
 from app.services.catalog_service import CustomerService, DealerService
 from app.services.dto import CreatePesticideSaleCommand, PesticideSaleLineInput
 from app.services.pesticide_sale_service import PesticideSaleService
 from app.services.settings_service import SettingsService
+from app.ui.documents import InvoiceDocumentActions
 from app.ui.forms import MoneyEdit, PaymentEditor
 from app.ui.widgets import (
     PageHeader,
@@ -135,6 +128,7 @@ class SalesScreen(QWidget):
         self._dealers: list[tuple[uuid.UUID, str, str | None, str | None]] = []
         self._last_sale_id: uuid.UUID | None = None
         self._last_invoice_number = "invoice"
+        self._documents = InvoiceDocumentActions(self, session_factory, settings)
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(16, 12, 16, 10)
         root_layout.setSpacing(8)
@@ -850,99 +844,22 @@ class SalesScreen(QWidget):
         for button in (self.save_pdf, self.preview, self.print_invoice):
             button.setEnabled(True)
 
-    def _receipt_document(self, *, thermal: bool) -> tuple[bytes, PrintPreferences]:
-        """Render the stored invoice and return it with the configured printer.
-
-        The A4 layout is used for the on-screen preview and saved PDFs; ``thermal``
-        renders the same sale at the roll width chosen in Settings > Printer so it
-        prints on the counter's 80 mm receipt printer.
-        """
+    def _require_sale(self) -> uuid.UUID | None:
+        """Return the invoice the document buttons act on, or warn and return None."""
 
         if self._last_sale_id is None:
-            raise ConflictError("Complete a sale before generating an invoice.")
-        with self._session_factory() as session:
-            sale = session.execute(
-                select(Sale).options(selectinload(Sale.items)).where(Sale.id == self._last_sale_id)
-            ).scalar_one()
-            methods = session.scalars(
-                select(Payment.method).where(
-                    Payment.sale_id == sale.id, Payment.direction == PaymentDirection.INCOMING
-                )
-            )
-            method_text = ", ".join(dict.fromkeys(m.value for m in methods)) or "UNPAID"
-            receipt = SaleReceiptData.from_sale(sale, method_text)
-            shop = load_shop_profile(session, self._settings)
-            preferences = load_print_preferences(session, self._settings)
-        generator = ReceiptGenerator()
-        if thermal and preferences.receipt.width_mm is not None:
-            return generator.generate_thermal(receipt, shop, preferences.receipt.width_mm), (
-                preferences
-            )
-        return generator.generate_a4(receipt, shop), preferences
-
-    def _receipt_payload(self) -> bytes:
-        return self._receipt_document(thermal=False)[0]
+            show_error(self, ConflictError("Complete a sale before generating an invoice."))
+            return None
+        return self._last_sale_id
 
     def _save_last_pdf(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save invoice", "delivery-challan-invoice.pdf", "PDF documents (*.pdf)"
-        )
-        if path:
-            self._worker = start_worker(
-                lambda: PrinterService().save_pdf(Path(path), self._receipt_payload()),
-                succeeded=lambda saved: QMessageBox.information(
-                    self, "Invoice saved", f"Saved to {saved}"
-                ),
-                failed=lambda error: show_error(self, error),
-            )
+        if (sale_id := self._require_sale()) is not None:
+            self._documents.save_pdf(sale_id, suggested_name=f"{self._last_invoice_number}.pdf")
 
     def _preview_last(self) -> None:
-        def operation() -> tuple[Path, PrintPreferences]:
-            payload, preferences = self._receipt_document(thermal=False)
-            return write_temporary_pdf(payload, f"invoice-{self._last_invoice_number}"), preferences
-
-        def preview(result: object) -> None:
-            path, preferences = cast(tuple[Path, PrintPreferences], result)
-            open_print_preview(
-                path,
-                self,
-                printer_name=preferences.printer_name,
-                suggested_filename=f"{self._last_invoice_number}.pdf",
-            )
-
-        self._worker = start_worker(
-            operation, succeeded=preview, failed=lambda error: show_error(self, error)
-        )
+        if (sale_id := self._require_sale()) is not None:
+            self._documents.preview(sale_id)
 
     def _print_last_receipt(self) -> None:
-        """Send the receipt straight to the configured thermal printer."""
-
-        def operation() -> tuple[Path, PrintPreferences]:
-            payload, preferences = self._receipt_document(thermal=True)
-            return write_temporary_pdf(payload, f"receipt-{self._last_invoice_number}"), preferences
-
-        def print_document(result: object) -> None:
-            path, preferences = cast(tuple[Path, PrintPreferences], result)
-            service = PrinterService()
-            try:
-                printed = service.print_pdf(
-                    path,
-                    self,
-                    printer_name=preferences.printer_name,
-                    prompt=not service.resolve_printer_name(preferences.printer_name),
-                )
-            except Exception as error:
-                show_error(self, error)
-                return
-            if printed:
-                QMessageBox.information(
-                    self,
-                    "Invoice sent to printer",
-                    f"Invoice {self._last_invoice_number} was sent to "
-                    f"{service.resolve_printer_name(preferences.printer_name) or 'the printer'} "
-                    f"on {preferences.receipt.label} paper.",
-                )
-
-        self._worker = start_worker(
-            operation, succeeded=print_document, failed=lambda error: show_error(self, error)
-        )
+        if (sale_id := self._require_sale()) is not None:
+            self._documents.print_receipt(sale_id)

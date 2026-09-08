@@ -88,7 +88,13 @@ The confirmation lists exactly which invoices were settled and by how much.
 **Account Statement** is the dealer's full ledger: every invoice as a charge, every payment as a
 credit, in date order, with the running balance after each line. The header totals show the amount
 invoiced, the amount paid, the outstanding balance, and the credit still available against the
-dealer's limit. **Sales History** remains available for an invoice-only view.
+dealer's limit. **Save PDF** and **Print Preview** produce the statement as a document to hand or
+email to the dealer.
+
+**Sales History** lists that dealer's invoices with their total, paid, and balance, and carries the
+same **Save PDF**, **Print Preview**, and **Print Invoice** actions as the sales screen, so any past
+invoice can be reprinted from here. Double-clicking a row opens the preview. **Customers >
+Purchase History** works the same way.
 
 Payments are immutable, as they are everywhere in the application. Correct a mistake by recording a
 compensating transaction rather than editing history.

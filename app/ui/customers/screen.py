@@ -23,9 +23,11 @@ from PySide6.QtWidgets import (
 )
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.config.settings import Settings
 from app.repositories.customer_repository import CustomerRepository
 from app.security.authentication import AuthenticatedUser
 from app.services.catalog_service import CustomerService
+from app.ui.documents import InvoiceDocumentActions, InvoiceHistoryDialog
 from app.ui.widgets import (
     RowsTableModel,
     configure_table,
@@ -35,7 +37,7 @@ from app.ui.widgets import (
     show_success,
 )
 from app.ui.workers import FunctionWorker, start_worker
-from app.utils.formatting import format_date
+from app.utils.formatting import format_date, format_money
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,13 +95,15 @@ class CustomersScreen(QWidget):
         self,
         session_factory: sessionmaker[Session],
         actor: AuthenticatedUser,
-        currency: str,
+        settings: Settings,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._session_factory = session_factory
         self._actor = actor
-        self._currency = currency
+        self._settings = settings
+        self._currency = settings.app_currency
+        self._documents = InvoiceDocumentActions(self, session_factory, settings)
         self._worker: FunctionWorker | None = None
         self._ids: list[uuid.UUID] = []
         self._data: list[CustomerFormData] = []
@@ -326,33 +330,29 @@ class CustomersScreen(QWidget):
             return
         customer_id = self._ids[row]
 
-        def operation() -> list[tuple[object, ...]]:
+        def operation() -> tuple[list[tuple[object, ...]], list[uuid.UUID]]:
             with self._session_factory() as session:
-                return [
-                    (
-                        sale.invoice_number,
-                        format_date(sale.sale_date),
-                        f"{self._currency} {sale.total:,.2f}",
-                        sale.payment_status.value,
-                        sale.status.value,
-                    )
-                    for sale in CustomerRepository(session).sales(customer_id)
-                ]
+                sales = list(CustomerRepository(session).sales(customer_id))
+                return (
+                    [
+                        (
+                            sale.invoice_number,
+                            format_date(sale.sale_date),
+                            format_money(sale.total, self._currency),
+                            format_money(sale.paid_amount, self._currency),
+                            format_money(sale.remaining_amount, self._currency),
+                            sale.payment_status.value.replace("_", " ").title(),
+                        )
+                        for sale in sales
+                    ],
+                    [sale.id for sale in sales],
+                )
 
-        def display(rows: object) -> None:
-            dialog = QDialog(self)
-            dialog.setWindowTitle("Customer purchase history")
-            dialog.resize(700, 400)
-            layout = QVBoxLayout(dialog)
-            model = RowsTableModel(("Invoice", "Date", "Total", "Payment", "Status"), dialog)
-            model.set_rows(rows)  # type: ignore[arg-type]
-            table = QTableView()
-            table.setModel(model)
-            layout.addWidget(table)
-            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-            buttons.rejected.connect(dialog.reject)
-            layout.addWidget(buttons)
-            dialog.exec()
+        def display(result: object) -> None:
+            rows, sale_ids = cast(tuple[list[tuple[object, ...]], list[uuid.UUID]], result)
+            InvoiceHistoryDialog(
+                "Customer purchase history", rows, sale_ids, self._documents, self
+            ).exec()
 
         self._worker = start_worker(
             operation, succeeded=display, failed=lambda error: show_error(self, error)

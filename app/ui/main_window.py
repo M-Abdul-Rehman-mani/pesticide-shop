@@ -286,13 +286,13 @@ class MainWindow(QMainWindow):
         self._add_page(
             sidebar,
             "Customers",
-            lambda: CustomersScreen(factory, actor, settings.app_currency),
+            lambda: CustomersScreen(factory, actor, settings),
             Permission.MANAGE_CUSTOMERS,
         )
         self._add_page(
             sidebar,
             "Dealers",
-            lambda: DealersScreen(factory, actor, settings.app_currency),
+            lambda: DealersScreen(factory, actor, settings),
             Permission.MANAGE_DEALERS,
         )
         self._add_page(

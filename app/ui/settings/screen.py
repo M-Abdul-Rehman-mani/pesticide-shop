@@ -33,12 +33,14 @@ from app.email.email_service import OutgoingEmail
 from app.email.smtp_client import SMTPConfig, SMTPEmailService
 from app.models.email_history import EmailHistory
 from app.models.enums import EmailStatus, SettingCategory
+from app.printing.alignment_test import alignment_test_page
 from app.printing.print_preview import open_print_preview
 from app.printing.printer_service import (
     DEFAULT_RECEIPT_FORMAT,
     RECEIPT_FORMATS,
     SYSTEM_DEFAULT_PRINTER,
     PrinterService,
+    ReceiptFormat,
     receipt_format,
     write_temporary_pdf,
 )
@@ -162,30 +164,103 @@ class SettingsScreen(QWidget):
         self.receipt_width.setCurrentIndex(
             max(0, self.receipt_width.findData(DEFAULT_RECEIPT_FORMAT.key))
         )
+        self.print_width = QSpinBox()
+        self.print_width.setRange(30, 80)
+        self.print_width.setSuffix(" mm")
+        self.print_width.setToolTip(
+            "How wide a strip the print head can mark. A thermal roll always has a "
+            "blank margin the printer cannot reach."
+        )
         self.printer_summary = QLabel()
         self.printer_summary.setWordWrap(True)
         preview = QPushButton("Preview Sample Receipt")
-        preview.setProperty("secondary", True)
+        alignment = QPushButton("Print Alignment Test")
+        for secondary in (preview, alignment):
+            secondary.setProperty("secondary", True)
         preview.setToolTip("Show how a receipt will look on the selected printer and paper")
+        alignment.setToolTip("Print a ruler strip that shows what this printer can actually mark")
         preview.clicked.connect(self._preview_sample_receipt)
+        alignment.clicked.connect(self._print_alignment_test)
         form.addRow("Default printer", self.printer)
         form.addRow("Default receipt format", self.receipt_width)
+        form.addRow("Printable width", self.print_width)
         form.addRow("", self.printer_summary)
         form.addRow("", preview)
+        form.addRow("", alignment)
         self.printer.currentIndexChanged.connect(self._update_printer_summary)
-        self.receipt_width.currentIndexChanged.connect(self._update_printer_summary)
-        self._update_printer_summary()
+        self.receipt_width.currentIndexChanged.connect(self._receipt_format_changed)
+        self.print_width.valueChanged.connect(self._update_printer_summary)
+        self._receipt_format_changed()
         self.tabs.addTab(tab, "Printer")
+
+    def _selected_receipt_format(self) -> ReceiptFormat:
+        return receipt_format(str(self.receipt_width.currentData() or ""))
+
+    def _receipt_format_changed(self) -> None:
+        """Follow the chosen roll's standard printable strip unless it is overridden."""
+
+        chosen = self._selected_receipt_format()
+        thermal = chosen.print_width_mm is not None
+        self.print_width.setEnabled(thermal)
+        if thermal and chosen.print_width_mm is not None:
+            self.print_width.setMaximum(chosen.width_mm or 80)
+            self.print_width.setValue(chosen.print_width_mm)
+        self._update_printer_summary()
+
+    def _print_alignment_test(self) -> None:
+        """Print the calibration strip straight to the selected printer."""
+
+        printer_name = str(self.printer.currentData() or SYSTEM_DEFAULT_PRINTER)
+        chosen = self._selected_receipt_format()
+        if chosen.width_mm is None:
+            QMessageBox.information(
+                self,
+                "Thermal formats only",
+                "The alignment test checks a thermal roll. Choose 58 mm or 80 mm first.",
+            )
+            return
+        paper = chosen.width_mm
+        printable = self.print_width.value()
+
+        def operation() -> Path:
+            return write_temporary_pdf(
+                alignment_test_page(paper, printable), f"alignment-{paper}-{printable}"
+            )
+
+        def send(result: object) -> None:
+            path = cast(Path, result)
+            service = PrinterService()
+            try:
+                service.print_pdf(
+                    path,
+                    self,
+                    printer_name=printer_name,
+                    prompt=not service.resolve_printer_name(printer_name),
+                )
+            except Exception as error:
+                show_error(self, error)
+
+        self._worker = start_worker(
+            operation, succeeded=send, failed=lambda error: show_error(self, error)
+        )
 
     def _update_printer_summary(self) -> None:
         service = PrinterService()
         selected = str(self.printer.currentData() or SYSTEM_DEFAULT_PRINTER)
         resolved = service.resolve_printer_name(selected)
-        chosen = receipt_format(str(self.receipt_width.currentData() or ""))
-        self.printer_summary.setText(
+        chosen = self._selected_receipt_format()
+        summary = (
             f"Invoices print on {resolved or 'no printer (install one first)'} "
             f"using {chosen.label} paper. The print preview follows this choice."
         )
+        if chosen.width_mm is not None:
+            blank = (chosen.width_mm - self.print_width.value()) / 2
+            summary += (
+                f" Receipts are laid out across {self.print_width.value()} mm, leaving "
+                f"{blank:.1f} mm blank on each side of the roll. Use the alignment test "
+                "if the right-hand column is cut off."
+            )
+        self.printer_summary.setText(summary)
 
     def _preview_sample_receipt(self) -> None:
         """Render a sample invoice so the printer choice can be checked at once."""
@@ -297,6 +372,7 @@ class SettingsScreen(QWidget):
             (SettingCategory.EMAIL, "owner_email"),
             (SettingCategory.PRINTER, "default_printer"),
             (SettingCategory.PRINTER, "receipt_width"),
+            (SettingCategory.PRINTER, "print_width"),
             (SettingCategory.RECEIPT, "footer"),
             (SettingCategory.BACKUP, "directory"),
             (SettingCategory.BACKUP, "retention_days"),
@@ -353,6 +429,10 @@ class SettingsScreen(QWidget):
         )
         if width_index >= 0:
             self.receipt_width.setCurrentIndex(width_index)
+        self._receipt_format_changed()
+        stored_print_width = (data.get((SettingCategory.PRINTER, "print_width")) or "").strip()
+        if stored_print_width.isdigit():
+            self.print_width.setValue(int(stored_print_width))
         self._update_printer_summary()
 
     def save(self) -> None:
@@ -368,6 +448,7 @@ class SettingsScreen(QWidget):
             (SettingCategory.EMAIL, "owner_email", self.owner_email.text(), False),
             (SettingCategory.PRINTER, "default_printer", self.printer.currentData(), False),
             (SettingCategory.PRINTER, "receipt_width", self.receipt_width.currentData(), False),
+            (SettingCategory.PRINTER, "print_width", str(self.print_width.value()), False),
             (SettingCategory.RECEIPT, "footer", self.receipt_footer.toPlainText(), False),
             (SettingCategory.SECURITY, "session_timeout", str(self.session_timeout.value()), False),
             (SettingCategory.BACKUP, "directory", self.backup_directory.text(), False),
