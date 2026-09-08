@@ -75,9 +75,11 @@ strip, and a solid `START`/`END` bar spanning it.
 - Install the thermal printer's Windows driver and print its own self-test before selecting it in
   the application.
 - Set the driver's paper size to the roll, e.g. `80 x 297 mm` or the vendor's `80mm x Receipt`.
-  The application reuses a page size the driver already declares when one matches the roll width,
-  because receipt drivers substitute their default when handed a custom size, which scales or crops
-  the output.
+  Receipt drivers also advertise the roll as one continuous page -- a POS-80 reports
+  `72 x 3276 mm`. The application prints at the receipt's own size and replaces any page the
+  driver substitutes, because a 3.3 m page feeds metres of blank paper and shrinks the receipt to
+  an unreadable strip. The print preview footer shows the page actually in use, so it should read
+  something like `Custom (80 x 109 mm)`, never a height in the hundreds or thousands.
 - Check the driver's own "paper width" or "print width" setting matches the roll. A driver set to
   58 mm while an 80 mm roll is loaded prints a narrow, cropped receipt.
 - If the printer feeds extra paper after each receipt, that is the driver's cut/feed setting, not

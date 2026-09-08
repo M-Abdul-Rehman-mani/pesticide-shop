@@ -24,6 +24,10 @@ from app.utils.exceptions import InfrastructureError
 #: performs the final scale.
 MAX_RENDER_DPI = 300
 
+#: Ceiling on the rasterised page, so a driver that still reports a metres-long
+#: roll cannot make the application allocate gigabytes for one receipt.
+MAX_RENDER_PIXELS = 40_000_000
+
 SYSTEM_DEFAULT_PRINTER = ""
 
 
@@ -150,7 +154,6 @@ class PrinterService:
             "",
             QPageSize.SizeMatchPolicy.FuzzyMatch,
         )
-        page_size = self._driver_page_size(printer, page_size) or page_size
         orientation = (
             QPageLayout.Orientation.Landscape
             if size_points.width() > size_points.height()
@@ -160,39 +163,35 @@ class PrinterService:
         layout.setMode(QPageLayout.Mode.FullPageMode)
         printer.setPageLayout(layout)
         printer.setFullPage(True)
+        self._verify_page_layout(printer, size_points)
         return printer
 
     @staticmethod
-    def _driver_page_size(printer: QPrinter, wanted: QPageSize) -> QPageSize | None:
-        """Prefer a page size the printer itself declares, matched on roll width.
+    def _verify_page_layout(printer: QPrinter, wanted_points: QSizeF) -> None:
+        """Fall back to a plain custom size if the driver substituted its own roll.
 
-        Windows receipt drivers ship fixed roll definitions and quietly substitute
-        their default when handed a custom size, which scales or crops the receipt.
-        Reusing the driver's own definition avoids that; the height is free-running
-        on a roll, so only the width has to line up.
+        Receipt drivers advertise a continuous roll as a single enormous page -- a
+        POS-80 reports 72 x 3276 mm. Accepting that feeds metres of blank paper and
+        shrinks the receipt to an illegible sliver, so a page that does not match the
+        document is replaced with an explicit custom size.
         """
 
-        info = QPrinterInfo(printer)
-        if info.isNull():
-            return None
-        wanted_width = wanted.size(QPageSize.Unit.Millimeter).width()
-        supported = [
-            candidate
-            for candidate in info.supportedPageSizes()
-            if abs(candidate.size(QPageSize.Unit.Millimeter).width() - wanted_width) <= 1.0
-        ]
-        if not supported:
-            return None
-        wanted_height = wanted.size(QPageSize.Unit.Millimeter).height()
-        # Among same-width roll definitions, take the one whose length wastes the
-        # least paper while still holding the receipt.
-        tall_enough = [
-            candidate
-            for candidate in supported
-            if candidate.size(QPageSize.Unit.Millimeter).height() >= wanted_height - 1.0
-        ]
-        pool = tall_enough or supported
-        return min(pool, key=lambda size: size.size(QPageSize.Unit.Millimeter).height())
+        applied = printer.pageLayout().fullRect(QPageLayout.Unit.Point)
+        matches = (
+            abs(applied.width() - wanted_points.width()) <= 2.0
+            and abs(applied.height() - wanted_points.height()) <= 2.0
+        )
+        if matches:
+            return
+        printer.setPageSize(
+            QPageSize(
+                QSizeF(wanted_points),
+                QPageSize.Unit.Point,
+                "",
+                QPageSize.SizeMatchPolicy.ExactMatch,
+            )
+        )
+        printer.setPageMargins(QMarginsF(0, 0, 0, 0), QPageLayout.Unit.Point)
 
     def print_pdf(
         self,
@@ -276,10 +275,13 @@ class PrinterService:
         """Rasterise at the printer resolution, capped at ``MAX_RENDER_DPI``."""
 
         scale = min(1.0, MAX_RENDER_DPI / resolution) if resolution else 1.0
-        return QSize(
-            max(1, int(target.width() * scale)),
-            max(1, int(target.height() * scale)),
-        )
+        width = max(1, int(target.width() * scale))
+        height = max(1, int(target.height() * scale))
+        if width * height > MAX_RENDER_PIXELS:
+            shrink = (MAX_RENDER_PIXELS / (width * height)) ** 0.5
+            width = max(1, int(width * shrink))
+            height = max(1, int(height * shrink))
+        return QSize(width, height)
 
     @staticmethod
     def _fitted(target: QRect, image_size: QSize) -> QRect:

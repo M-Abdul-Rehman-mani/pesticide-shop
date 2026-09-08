@@ -489,3 +489,61 @@ def test_printable_width_setting_is_validated(
                 key="print_width",
                 value=invalid,
             )
+
+
+@pytest.mark.ui
+def test_a_continuous_roll_page_is_replaced_with_the_receipt_size(qapp: QApplication) -> None:
+    """A POS-80 advertises its roll as 72 x 3276 mm; accepting that wastes metres.
+
+    Reported from a Windows 10 counter: the preview showed "Custom (72 x 3276 mm)",
+    the receipt shrank to an illegible sliver, and the printer fed a huge length of
+    blank paper.
+    """
+
+    from PySide6.QtCore import QMarginsF, QSizeF
+    from PySide6.QtGui import QPageLayout, QPageSize
+
+    service = PrinterService()
+    document = service.load(
+        write_temporary_pdf(
+            ReceiptGenerator().generate_thermal(sample_receipt(), ShopProfile(name="Shop"), 80),
+            "roll-substitution",
+        )
+    )
+    wanted = document.pagePointSize(0)
+    printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+    printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+    printer.setPageSize(
+        QPageSize(
+            QSizeF(72 * 72 / 25.4, 3276 * 72 / 25.4),
+            QPageSize.Unit.Point,
+            "roll",
+            QPageSize.SizeMatchPolicy.ExactMatch,
+        )
+    )
+    assert printer.pageLayout().fullRect(QPageLayout.Unit.Millimeter).height() == pytest.approx(
+        3276, abs=1
+    )
+
+    service.prepare(document, printer)
+
+    applied = printer.pageLayout().fullRect(QPageLayout.Unit.Millimeter)
+    assert applied.width() == pytest.approx(80, abs=1)
+    assert applied.height() == pytest.approx(wanted.height() * MILLIMETRES_PER_POINT, abs=1)
+    assert applied.height() < 300, "the receipt must not span a continuous roll"
+    assert printer.pageLayout().margins() == QMarginsF(0, 0, 0, 0)
+
+
+@pytest.mark.ui
+def test_render_size_is_capped_for_an_absurd_page(qapp: QApplication) -> None:
+    """Even a metres-long page must not allocate an unbounded raster."""
+
+    from PySide6.QtCore import QPoint, QRect, QSize
+
+    from app.printing.printer_service import MAX_RENDER_PIXELS
+
+    huge = QRect(QPoint(0, 0), QSize(850, 38_700))
+    rendered = PrinterService._render_size(huge, 203)
+    assert rendered.width() * rendered.height() <= MAX_RENDER_PIXELS
+    modest = PrinterService._render_size(QRect(QPoint(0, 0), QSize(640, 900)), 203)
+    assert (modest.width(), modest.height()) == (640, 900)
