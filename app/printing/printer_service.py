@@ -11,18 +11,21 @@ from functools import lru_cache
 from pathlib import Path
 
 from PySide6.QtCore import QMarginsF, QPoint, QRect, QSize, QSizeF, Qt
-from PySide6.QtGui import QPageLayout, QPageSize, QPainter
+from PySide6.QtGui import QImage, QPageLayout, QPageSize, QPainter
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter, QPrinterInfo
 from PySide6.QtWidgets import QDialog, QWidget
 
 from app.utils.exceptions import InfrastructureError
 
-#: Highest resolution a page is rasterised at before the printer scales it.
-#: Rendering an A4 page at a printer's native 1200 dpi would allocate hundreds of
-#: megabytes for no visible gain, so raster detail is capped and the printer driver
-#: performs the final scale.
-MAX_RENDER_DPI = 300
+#: Pages are rasterised at the printer's own resolution so glyph edges land on
+#: device pixels. Rendering below it and letting the driver scale up is what makes
+#: thermal receipts look soft and grey.
+#:
+#: A roll narrower than this is treated as a receipt printer: its output is reduced
+#: to pure black and white rather than left as anti-aliased grey, because a thermal
+#: head is a one-bit device and dithering grey produces broken, faint strokes.
+THERMAL_PAGE_LIMIT_MM = 90.0
 
 #: Ceiling on the rasterised page, so a driver that still reports a metres-long
 #: roll cannot make the application allocate gigabytes for one receipt.
@@ -249,8 +252,11 @@ class PrinterService:
     def _paint(document: QPdfDocument, printer: QPrinter) -> None:
         painter = QPainter(printer)
         try:
-            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
             resolution = max(printer.resolution(), 1)
+            thermal = PrinterService.is_thermal_page(printer)
+            # Smoothing helps a photographic scale-down but only softens a receipt
+            # that is already being drawn at one image pixel per printer dot.
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, not thermal)
             for page in range(document.pageCount()):
                 if page and not printer.newPage():
                     raise RuntimeError("The printer could not start a new page.")
@@ -263,6 +269,8 @@ class PrinterService:
                 image = document.render(page, PrinterService._render_size(target, resolution))
                 if image.isNull():
                     continue
+                if thermal:
+                    image = PrinterService._to_bitonal(image)
                 painter.drawImage(
                     PrinterService._fitted(target, image.size()),
                     image,
@@ -271,17 +279,44 @@ class PrinterService:
             painter.end()
 
     @staticmethod
-    def _render_size(target: QRect, resolution: int) -> QSize:
-        """Rasterise at the printer resolution, capped at ``MAX_RENDER_DPI``."""
+    def is_thermal_page(printer: QPrinter) -> bool:
+        """Report whether the printer is set to a receipt roll rather than a sheet."""
 
-        scale = min(1.0, MAX_RENDER_DPI / resolution) if resolution else 1.0
-        width = max(1, int(target.width() * scale))
-        height = max(1, int(target.height() * scale))
+        width = printer.pageLayout().fullRect(QPageLayout.Unit.Millimeter).width()
+        return 0 < width <= THERMAL_PAGE_LIMIT_MM
+
+    @staticmethod
+    def _render_size(target: QRect, resolution: int) -> QSize:
+        """Rasterise one device pixel per printer dot, within the memory ceiling."""
+
+        width = max(1, target.width())
+        height = max(1, target.height())
         if width * height > MAX_RENDER_PIXELS:
             shrink = (MAX_RENDER_PIXELS / (width * height)) ** 0.5
             width = max(1, int(width * shrink))
             height = max(1, int(height * shrink))
         return QSize(width, height)
+
+    @staticmethod
+    def _to_bitonal(image: QImage) -> QImage:
+        """Flatten a rendered page to solid black on white for a thermal head.
+
+        The head can only burn a dot or not. Handing it grey anti-aliased edges lets
+        the driver dither them into scattered dots, which reads as faint, ragged
+        text; thresholding here keeps every stroke solid.
+        """
+
+        flattened = QImage(image.size(), QImage.Format.Format_RGB32)
+        flattened.fill(Qt.GlobalColor.white)
+        painter = QPainter(flattened)
+        try:
+            painter.drawImage(0, 0, image)
+        finally:
+            painter.end()
+        return flattened.convertToFormat(
+            QImage.Format.Format_Mono,
+            Qt.ImageConversionFlag.MonoOnly | Qt.ImageConversionFlag.ThresholdDither,
+        )
 
     @staticmethod
     def _fitted(target: QRect, image_size: QSize) -> QRect:

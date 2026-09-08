@@ -547,3 +547,73 @@ def test_render_size_is_capped_for_an_absurd_page(qapp: QApplication) -> None:
     assert rendered.width() * rendered.height() <= MAX_RENDER_PIXELS
     modest = PrinterService._render_size(QRect(QPoint(0, 0), QSize(640, 900)), 203)
     assert (modest.width(), modest.height()) == (640, 900)
+
+
+@pytest.mark.ui
+def test_receipts_are_flattened_to_solid_black_for_the_print_head(qapp: QApplication) -> None:
+    """A thermal head burns a dot or not, so grey anti-aliasing must not reach it."""
+
+    from PySide6.QtCore import QSize
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    service = PrinterService()
+    document = service.load(
+        write_temporary_pdf(
+            ReceiptGenerator().generate_thermal(
+                sample_receipt(), ShopProfile(name="Green Valley Crop Care"), 80
+            ),
+            "quality",
+        )
+    )
+    points = document.pagePointSize(0)
+    dots_per_mm = 8  # 203 dpi
+    size = QSize(
+        round(points.width() * MILLIMETRES_PER_POINT * dots_per_mm),
+        round(points.height() * MILLIMETRES_PER_POINT * dots_per_mm),
+    )
+    rendered = document.render(0, size)
+
+    def tones(image: QImage) -> tuple[float, float]:
+        flattened = QImage(image.size(), QImage.Format.Format_RGB32)
+        flattened.fill(QColor("white"))
+        painter = QPainter(flattened)
+        painter.drawImage(0, 0, image)
+        painter.end()
+        black = grey = 0
+        for y in range(flattened.height()):
+            for x in range(flattened.width()):
+                value = QColor(flattened.pixel(x, y)).value()
+                if value < 64:
+                    black += 1
+                elif value < 200:
+                    grey += 1
+        total = flattened.width() * flattened.height()
+        return black * 100 / total, grey * 100 / total
+
+    _grey_black, grey_fuzz = tones(rendered)
+    assert grey_fuzz > 0, "the source render should contain anti-aliased edges"
+
+    bitonal = service._to_bitonal(rendered)
+    assert bitonal.depth() == 1
+    solid_black, remaining_fuzz = tones(bitonal)
+    assert remaining_fuzz == 0.0
+    assert solid_black > _grey_black, "edge pixels should become ink, not disappear"
+
+
+@pytest.mark.ui
+def test_only_roll_pages_are_treated_as_thermal(qapp: QApplication) -> None:
+    from PySide6.QtGui import QPageSize
+
+    printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+    printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+    printer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+    assert PrinterService.is_thermal_page(printer) is False
+
+    service = PrinterService()
+    document = service.load(
+        write_temporary_pdf(
+            ReceiptGenerator().generate_thermal(sample_receipt(), ShopProfile(), 80), "roll-page"
+        )
+    )
+    service.prepare(document, printer)
+    assert PrinterService.is_thermal_page(printer) is True

@@ -86,6 +86,18 @@ strip, and a solid `START`/`END` bar spanning it.
   the receipt layout.
 - Print through the Windows driver, not a generic text-only driver: invoices are rendered as a page
   image so they can carry the logo and table rules.
+- Raise the driver's **print density** / **darkness** if receipts still look pale. That is a
+  hardware setting the application cannot reach, and it is the usual cause of faint output once the
+  page geometry is right. Old or low-grade thermal paper also prints grey.
+
+## Print quality on a thermal head
+
+Receipts are rasterised at the printer's own resolution -- one image pixel per printer dot -- and
+then reduced to pure black and white. A thermal head can only burn a dot or leave it blank, so any
+grey handed to the driver is dithered into scattered dots, which reads as faint, ragged text.
+Flattening the page first keeps every stroke solid.
+
+Sheet printers are unaffected: pages wider than 90 mm keep their full greyscale rendering.
 
 PDF export does not require a printer. Customer/dealer and owner emails attach the same generated
 invoice through the persistent email outbox.

@@ -497,6 +497,8 @@ class ReceiptGenerator:
 
     @staticmethod
     def _thermal_rule(width: float) -> Table:
+        # A hairline lands on well under one dot of a 203 dpi head and prints as a
+        # broken dotted line, so the separator is given a full dot of weight.
         table = Table([[""]], colWidths=[width], rowHeights=[1 * mm])
-        table.setStyle(TableStyle([("LINEABOVE", (0, 0), (-1, 0), 0.5, colors.black)]))
+        table.setStyle(TableStyle([("LINEABOVE", (0, 0), (-1, 0), 1.0, colors.black)]))
         return table
