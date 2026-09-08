@@ -11,6 +11,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (
+    QComboBox,
     QDateEdit,
     QFrame,
     QGridLayout,
@@ -40,6 +41,7 @@ from app.ui.widgets import (
     PageHeader,
     RowsTableModel,
     configure_date_edit,
+    configure_searchable_combo,
     configure_table,
     show_error,
 )
@@ -245,6 +247,11 @@ class ProductTab(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(10)
+        # The tab label is only the short product name, so the full name -- with
+        # formulation and pack size -- is named here.
+        self.heading = QLabel(product.display_name)
+        self.heading.setObjectName("SectionTitle")
+        self.heading.setWordWrap(True)
         self.summary = QLabel("Loading…")
         self.summary.setObjectName("PageSubtitle")
         self.summary.setWordWrap(True)
@@ -267,10 +274,40 @@ class ProductTab(QWidget):
         self.batch_table.setMinimumHeight(120)
         batch_layout.addWidget(batch_heading)
         batch_layout.addWidget(self.batch_table, 1)
+        layout.addWidget(self.heading)
         layout.addWidget(self.summary)
         layout.addWidget(self.cards)
         layout.addWidget(self.chart, 3)
         layout.addWidget(batch_card, 2)
+
+    @staticmethod
+    def _stock_note(metrics: ProductMetrics) -> str:
+        """Describe stock against the reorder level without nonsense at zero.
+
+        A product with no reorder level set cannot be "at or below" it, so saying
+        so for every unstocked product is noise.
+        """
+
+        if not metrics.minimum_stock:
+            return (
+                "No stock on hand; no reorder level set."
+                if not metrics.in_stock
+                else f"Stock {metrics.in_stock:,}; no reorder level set."
+            )
+        if metrics.in_stock <= metrics.minimum_stock:
+            return (
+                f"Stock {metrics.in_stock:,} is at or below the reorder level of "
+                f"{metrics.minimum_stock:,} — reorder soon."
+            )
+        return (
+            f"Stock {metrics.in_stock:,} is above the reorder level of {metrics.minimum_stock:,}."
+        )
+
+    def set_product(self, product: ProductSummary) -> None:
+        """Track a renamed or reactivated product without rebuilding the tab."""
+
+        self.product = product
+        self.heading.setText(product.display_name)
 
     def display(
         self,
@@ -286,13 +323,7 @@ class ProductTab(QWidget):
         self.cards.set_value("Active Batches", f"{metrics.active_batches:,}")
         self.cards.set_value("Expiring in 90 Days", f"{metrics.expiring_units:,}")
         self.cards.set_value("Stock Value", format_money(metrics.stock_value, self._currency))
-        stock_note = (
-            f"Stock {metrics.in_stock:,} is at or below the reorder level of "
-            f"{metrics.minimum_stock:,} — reorder soon."
-            if metrics.in_stock <= metrics.minimum_stock
-            else f"Stock {metrics.in_stock:,} is above the reorder level of "
-            f"{metrics.minimum_stock:,}."
-        )
+        stock_note = self._stock_note(metrics)
         last_sold = (
             f"Last sold {format_date(metrics.last_sold)}."
             if metrics.last_sold
@@ -371,14 +402,27 @@ class DashboardScreen(QWidget):
         heading.addWidget(self.to_date)
         heading.addWidget(refresh)
         layout.addWidget(filter_bar)
+        jump_row = QHBoxLayout()
+        jump_row.setContentsMargins(2, 0, 2, 0)
+        self.product_jump = QComboBox()
+        configure_searchable_combo(self.product_jump, "Type a product name to open its tab")
+        self.product_jump.setToolTip("Jump straight to a product instead of scrolling the tabs")
+        jump_row.addWidget(QLabel("Go to product"))
+        jump_row.addWidget(self.product_jump, 1)
+        jump_row.addStretch()
+        layout.addLayout(jump_row)
         self.tabs = QTabWidget()
         self.tabs.setUsesScrollButtons(True)
-        self.tabs.setElideMode(Qt.TextElideMode.ElideRight)
+        # Eliding squeezes a long catalogue's tabs down to "A...", "SE...", which
+        # names nothing. Full labels plus scroll buttons stay readable instead.
+        self.tabs.setElideMode(Qt.TextElideMode.ElideNone)
+        self.tabs.tabBar().setExpanding(False)
         self.tabs.setDocumentMode(True)
         self.overview = OverviewTab(currency)
         self.tabs.addTab(self.overview, "All Products")
         layout.addWidget(self.tabs, 1)
         self.tabs.currentChanged.connect(self._tab_changed)
+        self.product_jump.currentIndexChanged.connect(self._jump_to_product)
         self.from_date.dateChanged.connect(self._period_changed)
         self.to_date.dateChanged.connect(self._period_changed)
 
@@ -481,16 +525,36 @@ class DashboardScreen(QWidget):
                 self._product_tabs[product.id] = tab
                 self.tabs.insertTab(position, tab, product.name)
             else:
-                existing.product = product
+                existing.set_product(product)
                 self.tabs.setTabText(self.tabs.indexOf(existing), product.name)
         for product in products:
             tab = self._product_tabs[product.id]
-            self.tabs.setTabToolTip(self.tabs.indexOf(tab), product.name)
+            self.tabs.setTabToolTip(self.tabs.indexOf(tab), product.display_name)
+        self._refill_product_jump(products)
         if current is not None and self.tabs.indexOf(current) >= 0:
             self.tabs.setCurrentWidget(current)
         visible = self.tabs.currentWidget()
         if isinstance(visible, ProductTab) and not visible.loaded:
             self._load_product(visible)
+
+    def _refill_product_jump(self, products: list[ProductSummary]) -> None:
+        """Rebuild the jump list without letting it fire a tab change."""
+
+        blocked = self.product_jump.blockSignals(True)
+        try:
+            self.product_jump.clear()
+            self.product_jump.addItem("", None)
+            for product in products:
+                self.product_jump.addItem(product.display_name, product.id)
+            self.product_jump.setCurrentIndex(0)
+        finally:
+            self.product_jump.blockSignals(blocked)
+
+    def _jump_to_product(self) -> None:
+        product_id = self.product_jump.currentData()
+        tab = self._product_tabs.get(product_id) if product_id else None
+        if tab is not None:
+            self.tabs.setCurrentWidget(tab)
 
     def _load_product(self, tab: ProductTab) -> None:
         product_id = tab.product.id

@@ -7,7 +7,8 @@ import traceback
 from collections.abc import Callable
 from typing import Any
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, Slot
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, SignalInstance, Slot
+from shiboken6 import isValid
 
 logger = logging.getLogger(__name__)
 
@@ -30,11 +31,27 @@ class FunctionWorker(QRunnable):
             result = self._function()
         except Exception as exc:
             logger.error("Background operation failed\n%s", traceback.format_exc())
-            self.signals.failed.emit(exc)
+            self._emit(self.signals.failed, exc)
         else:
-            self.signals.succeeded.emit(result)
+            self._emit(self.signals.succeeded, result)
         finally:
-            self.signals.finished.emit()
+            self._emit(self.signals.finished)
+
+    def _emit(self, signal: SignalInstance, *arguments: Any) -> None:
+        """Deliver a result unless the screen waiting for it has been closed.
+
+        Logging out or navigating away destroys a screen while its query may still
+        be running; emitting into the deleted receiver then raises from a pool
+        thread, where nothing can handle it.
+        """
+
+        if not isValid(self.signals):
+            return
+        try:
+            signal.emit(*arguments)
+        except RuntimeError:
+            # The receiver was destroyed between the check and the emit.
+            logger.debug("Dropped a background result for a closed screen")
 
 
 #: Every worker that is still running. ``QThreadPool`` does not own the Python

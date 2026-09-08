@@ -21,7 +21,12 @@ from app.models.enums import PaymentMethod
 from app.models.inventory import StockBatch
 from app.models.product import Product
 from app.models.supplier import Supplier
-from app.reports.report_service import DateRange, ProductSummary, ReportService
+from app.reports.report_service import (
+    DateRange,
+    ProductMetrics,
+    ProductSummary,
+    ReportService,
+)
 from app.security.authentication import AuthenticatedUser
 from app.services.dto import (
     CreatePesticideSaleCommand,
@@ -75,7 +80,10 @@ def test_products_are_listed_for_the_dashboard_tabs(db_session: Session, product
     reports = ReportService(db_session)
     listed = reports.products()
     assert [summary.id for summary in listed] == [product.id]
-    assert listed[0].name == product.display_name
+    # The tab label is the short name; the full name is kept for tooltips.
+    assert listed[0].name == product.name
+    assert listed[0].full_name == product.display_name
+    assert listed[0].display_name == product.display_name
     assert listed[0].is_active is True
 
     product.is_active = False
@@ -263,3 +271,80 @@ def test_changing_the_period_marks_product_tabs_stale(
     tab.loaded = True
     screen.from_date.setDate(screen.from_date.date().addDays(-3))
     assert tab.loaded is False
+
+
+@pytest.mark.ui
+def test_product_tabs_stay_readable_for_a_large_catalogue(
+    qtbot: QtBot, database_engine: Engine
+) -> None:
+    """A long catalogue must not elide every tab down to "A...", "SE...".
+
+    Reported from a shop with 23 products: the tab bar named nothing.
+    """
+
+    from PySide6.QtCore import Qt
+
+    factory = sessionmaker[Session](bind=database_engine, expire_on_commit=False, autoflush=False)
+    screen = DashboardScreen(factory, TIMEZONE, "PKR")
+    qtbot.addWidget(screen)
+    products = [
+        ProductSummary(uuid.uuid4(), f"PRODUCT {index:02d} EC", True, f"PRODUCT {index:02d} EC 1-L")
+        for index in range(23)
+    ]
+    screen._rebuild_product_tabs(products)
+
+    assert screen.tabs.elideMode() == Qt.TextElideMode.ElideNone
+    assert screen.tabs.usesScrollButtons() is True
+    assert screen.tabs.count() == len(products) + 1
+    # Tabs carry the short name; the full one is available on hover.
+    assert screen.tabs.tabText(1) == "PRODUCT 00 EC"
+    assert screen.tabs.tabToolTip(1) == "PRODUCT 00 EC 1-L"
+    assert all(
+        "…" not in screen.tabs.tabText(index) and "..." not in screen.tabs.tabText(index)
+        for index in range(screen.tabs.count())
+    )
+
+
+@pytest.mark.ui
+def test_the_product_search_opens_that_products_tab(qtbot: QtBot, database_engine: Engine) -> None:
+    factory = sessionmaker[Session](bind=database_engine, expire_on_commit=False, autoflush=False)
+    screen = DashboardScreen(factory, TIMEZONE, "PKR")
+    qtbot.addWidget(screen)
+    products = [
+        ProductSummary(uuid.uuid4(), f"PRODUCT {index}", True, f"PRODUCT {index} 1-L")
+        for index in range(6)
+    ]
+    screen._rebuild_product_tabs(products)
+    assert screen.product_jump.count() == len(products) + 1  # a blank entry leads
+
+    wanted = products[4]
+    screen.product_jump.setCurrentIndex(screen.product_jump.findData(wanted.id))
+    current = screen.tabs.currentWidget()
+    assert isinstance(current, ProductTab)
+    assert current.product.id == wanted.id
+    assert current.heading.text() == wanted.full_name
+    assert screen.tabs.tabText(screen.tabs.currentIndex()) == wanted.name
+
+
+def test_stock_note_does_not_invent_a_reorder_level() -> None:
+    """A product with no reorder level cannot be "at or below" it."""
+
+    def note(in_stock: int, minimum: int) -> str:
+        return ProductTab._stock_note(
+            ProductMetrics(
+                units_sold=0,
+                sales=Decimal("0.00"),
+                profit=Decimal("0.00"),
+                in_stock=in_stock,
+                active_batches=0,
+                expiring_units=0,
+                minimum_stock=minimum,
+                stock_value=Decimal("0.00"),
+                last_sold=None,
+            )
+        )
+
+    assert note(0, 0) == "No stock on hand; no reorder level set."
+    assert note(40, 0) == "Stock 40; no reorder level set."
+    assert "reorder soon" in note(5, 20)
+    assert "above the reorder level" in note(90, 20)

@@ -110,6 +110,10 @@ narrowed to that product — units sold, revenue, profit, stock on hand, active 
 soon, and stock value at cost — plus its daily sales and profit charts, a reorder note comparing
 stock against the minimum level, and a table of its live batches with expiry, quantities, and prices.
 
+Tabs are labelled with the short product name, with the full name -- formulation and pack size --
+on hover and as the heading inside the tab. A large catalogue scrolls rather than shrinking its
+labels, and **Go to product** above the tabs jumps straight to one by name instead of scrolling.
+
 The reporting period at the top applies to every tab. Product tabs load when you open them, so a
 large catalogue stays quick; press **Refresh** to reload the current view and pick up newly added
 products.

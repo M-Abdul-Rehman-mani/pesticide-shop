@@ -66,7 +66,9 @@ class ReceiptFormat:
 A4_FORMAT = ReceiptFormat("A4", "A4", None)
 THERMAL_58_FORMAT = ReceiptFormat("58", "58 mm thermal", 58, 48)
 THERMAL_80_FORMAT = ReceiptFormat("80", "80 mm thermal", 80, 72)
-RECEIPT_FORMATS: tuple[ReceiptFormat, ...] = (A4_FORMAT, THERMAL_58_FORMAT, THERMAL_80_FORMAT)
+#: Offered in the order a counter is most likely to want them, so the 80 mm roll
+#: is both the default and the first choice in the settings list.
+RECEIPT_FORMATS: tuple[ReceiptFormat, ...] = (THERMAL_80_FORMAT, THERMAL_58_FORMAT, A4_FORMAT)
 DEFAULT_RECEIPT_FORMAT = THERMAL_80_FORMAT
 
 

@@ -242,6 +242,14 @@ QTabBar::tab {
 }
 QTabBar::tab:hover { color: #1f7651; background: #edf5f1; }
 QTabBar::tab:selected { color: #176d49; border-bottom-color: #2b9869; font-weight: 750; }
+/* A long product catalogue scrolls its tabs, so the arrows must be visible. */
+QTabBar::scroller { width: 34px; }
+QTabBar QToolButton {
+    background: #eef4f1; border: 1px solid #d3e0da; border-radius: 5px;
+    margin: 2px 1px; width: 15px;
+}
+QTabBar QToolButton:hover { background: #dcebe3; }
+QTabBar QToolButton:disabled { background: #f4f7f5; border-color: #e6eeea; }
 QDialogButtonBox QPushButton { min-width: 84px; }
 QMessageBox { background: #f7faf8; }
 QCheckBox { spacing: 7px; }

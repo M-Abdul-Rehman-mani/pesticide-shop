@@ -79,11 +79,20 @@ class TopSellingModel:
 
 @dataclass(frozen=True, slots=True)
 class ProductSummary:
-    """Identity of one product, used to build the dashboard's product tabs."""
+    """Identity of one product, used to build the dashboard's product tabs.
+
+    ``name`` is the short product name that fits a tab; ``full_name`` carries the
+    formulation and pack size for tooltips and headings.
+    """
 
     id: uuid.UUID
     name: str
     is_active: bool
+    full_name: str = ""
+
+    @property
+    def display_name(self) -> str:
+        return self.full_name or self.name
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,7 +362,12 @@ class ReportService:
         if not include_inactive:
             statement = statement.where(Product.is_active.is_(True))
         return [
-            ProductSummary(product.id, product.display_name, product.is_active)
+            ProductSummary(
+                product.id,
+                product.name,
+                product.is_active,
+                product.display_name,
+            )
             for product in self._session.scalars(statement)
         ]
 
