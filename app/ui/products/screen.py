@@ -48,6 +48,7 @@ from app.ui.workers import FunctionWorker, start_worker
 class ProductFormData:
     name: str
     manufacturer: str
+    barcode: str
     active_ingredient: str
     formulation: str
     pack_size: str
@@ -88,6 +89,8 @@ class ProductDialog(QDialog):
         if data:
             self.category.setCurrentText(data.category)
         self.registration = QLineEdit(data.registration_number if data else "")
+        self.barcode = QLineEdit(data.barcode if data else "")
+        self.barcode.setPlaceholderText("Scan or type the pack barcode (optional)")
         self.unit = QComboBox()
         self.unit.setEditable(True)
         self.unit.addItems(("PACK", "BOTTLE", "BAG", "SACHET", "LITRE", "KG"))
@@ -109,6 +112,7 @@ class ProductDialog(QDialog):
             ("Pack size", self.pack_size),
             ("Category", self.category),
             ("Registration number", self.registration),
+            ("Barcode", self.barcode),
             ("Stock unit", self.unit),
             ("Description / usage", self.description),
             ("Default purchase price", self.purchase),
@@ -128,6 +132,7 @@ class ProductDialog(QDialog):
         return ProductFormData(
             self.name.text(),
             self.manufacturer.text(),
+            self.barcode.text(),
             self.active_ingredient.text(),
             self.formulation.text(),
             self.pack_size.text(),
@@ -292,6 +297,7 @@ class ProductsScreen(QWidget):
                         ProductFormData(
                             p.name,
                             p.manufacturer,
+                            p.barcode or "",
                             p.active_ingredient,
                             p.formulation,
                             p.pack_size,
@@ -371,6 +377,7 @@ class ProductsScreen(QWidget):
                         default_purchase_price=data.purchase_price,
                         default_sale_price=data.sale_price,
                         minimum_stock=data.minimum_stock,
+                        barcode=data.barcode,
                     )
                 else:
                     service.create(
@@ -387,6 +394,7 @@ class ProductsScreen(QWidget):
                         default_purchase_price=data.purchase_price,
                         default_sale_price=data.sale_price,
                         minimum_stock=data.minimum_stock,
+                        barcode=data.barcode,
                     )
 
         self._worker = start_worker(

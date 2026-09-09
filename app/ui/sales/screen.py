@@ -35,11 +35,12 @@ from sqlalchemy.orm import Session, selectinload, sessionmaker
 from app.config.settings import Settings
 from app.models.customer import Customer
 from app.models.dealer import Dealer
-from app.models.enums import SettingCategory
+from app.models.enums import SaleStatus, SettingCategory
 from app.models.inventory import StockBatch
 from app.models.product import Product
 from app.models.sale import Sale, SaleItem
 from app.security.authentication import AuthenticatedUser
+from app.security.permissions import Permission, has_permission
 from app.services.catalog_service import CustomerService, DealerService
 from app.services.dto import CreatePesticideSaleCommand, PesticideSaleLineInput
 from app.services.pesticide_sale_service import PesticideSaleService
@@ -58,7 +59,7 @@ from app.ui.widgets import (
     wrap_scroll,
 )
 from app.ui.workers import FunctionWorker, start_worker
-from app.utils.exceptions import ConflictError
+from app.utils.exceptions import ConflictError, NotFoundError
 from app.utils.formatting import format_date
 
 
@@ -127,6 +128,7 @@ class SalesScreen(QWidget):
         self._customers: list[tuple[uuid.UUID, str, str | None, str | None]] = []
         self._dealers: list[tuple[uuid.UUID, str, str | None, str | None]] = []
         self._last_sale_id: uuid.UUID | None = None
+        self._barcodes: dict[str, uuid.UUID] = {}
         self._last_invoice_number = "invoice"
         self._documents = InvoiceDocumentActions(self, session_factory, settings)
         root_layout = QVBoxLayout(self)
@@ -184,12 +186,22 @@ class SalesScreen(QWidget):
 
         stock_group, stock_layout = QGroupBox("Add Product Batch"), QHBoxLayout()
         stock_group.setLayout(stock_layout)
+        self.scan = QLineEdit()
+        self.scan.setPlaceholderText("Scan barcode")
+        self.scan.setClearButtonEnabled(True)
+        self.scan.setMaximumWidth(190)
+        self.scan.setToolTip(
+            "Scan a product barcode to select its batch. Most scanners send Enter, "
+            "which adds the item straight to the invoice."
+        )
         self.batch, self.quantity, self.unit_price = QComboBox(), QSpinBox(), MoneyEdit()
         configure_searchable_combo(self.batch, "Type a product or batch number")
         self.quantity.setRange(1, 1_000_000)
         add = QPushButton("+  Add batch")
         add.setToolTip("Add this batch and quantity to the invoice")
         for stock_widget in (
+            QLabel("Barcode"),
+            self.scan,
             QLabel("Product / batch"),
             self.batch,
             QLabel("Qty"),
@@ -257,6 +269,7 @@ class SalesScreen(QWidget):
         self.recipient.currentIndexChanged.connect(self._recipient_changed)
         self.batch.currentIndexChanged.connect(self._batch_changed)
         add.clicked.connect(self._add_batch)
+        self.scan.returnPressed.connect(self._scan_barcode)
         self.discount.textChanged.connect(self._calculate)
         self.tax.textChanged.connect(self._calculate)
         self.complete.clicked.connect(self.save)
@@ -283,7 +296,7 @@ class SalesScreen(QWidget):
         def operation() -> tuple[
             list[tuple[uuid.UUID, str, str | None, str | None]],
             list[tuple[uuid.UUID, str, str | None, str | None]],
-            list[tuple[uuid.UUID, str, str, int, Decimal]],
+            list[tuple[uuid.UUID, str, str, int, Decimal, str]],
         ]:
             with self._session_factory() as session:
                 customers = list(
@@ -334,6 +347,7 @@ class SalesScreen(QWidget):
                             b.batch_number,
                             b.quantity_available,
                             b.selling_price,
+                            b.product.barcode or "",
                         )
                         for b in batches
                     ],
@@ -461,16 +475,21 @@ class SalesScreen(QWidget):
             tuple[
                 list[tuple[uuid.UUID, str, str | None, str | None]],
                 list[tuple[uuid.UUID, str, str | None, str | None]],
-                list[tuple[uuid.UUID, str, str, int, Decimal]],
+                list[tuple[uuid.UUID, str, str, int, Decimal, str]],
             ],
             result,
         )
         self.batch.clear()
-        for batch_id, product, number, available, price in batches:
+        self._barcodes = {}
+        for batch_id, product, number, available, price, barcode in batches:
             self.batch.addItem(
                 f"{product} | Batch {number} | Available {available}",
                 (batch_id, product, number, available, price),
             )
+            # First batch wins: stock is listed soonest-to-expire, which is the one
+            # that should leave the shelf first.
+            if barcode:
+                self._barcodes.setdefault(barcode, batch_id)
         self._set_recipients()
         self._batch_changed()
 
@@ -495,6 +514,35 @@ class SalesScreen(QWidget):
             _batch_id, _product, _number, available, price = data
             self.quantity.setMaximum(available)
             self.unit_price.setText(f"{price:.2f}")
+
+    def _scan_barcode(self) -> None:
+        """Select the scanned product's batch and add it to the invoice.
+
+        Scanners type the code and press Enter, so one scan should be one line.
+        """
+
+        code = "".join(self.scan.text().split())
+        self.scan.clear()
+        if not code:
+            return
+        batch_id = self._barcodes.get(code)
+        if batch_id is None:
+            show_error(
+                self,
+                NotFoundError(
+                    f"No sellable stock matches barcode {code}. Check the product's "
+                    "barcode, or that a batch is still in stock."
+                ),
+            )
+            return
+        for index in range(self.batch.count()):
+            data = self.batch.itemData(index)
+            if data and data[0] == batch_id:
+                self.batch.setCurrentIndex(index)
+                break
+        self.quantity.setValue(1)
+        self._add_batch()
+        self.scan.setFocus()
 
     def _add_batch(self) -> None:
         data = self.batch.currentData()
@@ -784,6 +832,7 @@ class SalesScreen(QWidget):
                 ("View details", self._view_sale),
                 ("Print preview", self._preview_sale),
                 ("Print invoice", self._print_sale),
+                ("Void sale", self._void_sale),
             ),
         )
         self.sales_count.setText(record_count_text(len(rows), "sale"))
@@ -828,6 +877,62 @@ class SalesScreen(QWidget):
     def _print_sale(self, row: int) -> None:
         if self._select_history_row(row):
             self._print_last_receipt()
+
+    def _void_sale(self, row: int) -> None:
+        """Cancel a sale, returning its stock and clearing the dealer's debt."""
+
+        if row >= len(self._history_sales):
+            return
+        sale = self._history_sales[row]
+        if not has_permission(self._actor.role, Permission.VOID_SALE):
+            QMessageBox.information(self, "Not permitted", "Your role cannot void a sale.")
+            return
+        if sale.status is not SaleStatus.COMPLETED:
+            QMessageBox.information(self, "Already voided", "This sale is already voided.")
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Void {sale.invoice_number}")
+        form = QFormLayout(dialog)
+        explanation = QLabel(
+            f"Voiding {sale.invoice_number} returns its stock to the batches it came "
+            "from and removes the charge from the recipient's account. The invoice is "
+            "kept and marked voided; it stops counting in reports and statements.\n\n"
+            "Payments must be reversed before an invoice can be voided."
+        )
+        explanation.setWordWrap(True)
+        reason = QLineEdit()
+        reason.setPlaceholderText("Wrong product, wrong quantity, customer cancelled…")
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Void sale")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(explanation)
+        form.addRow("Reason *", reason)
+        form.addRow(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        sale_id, void_reason = sale.id, reason.text()
+
+        def operation() -> None:
+            with self._session_factory.begin() as session:
+                PesticideSaleService(session).void(sale_id, self._actor, reason=void_reason)
+
+        def voided(_result: object) -> None:
+            QMessageBox.information(
+                self, "Sale voided", f"{sale.invoice_number} was voided and its stock returned."
+            )
+            self._last_sale_id = None
+            for button in (self.save_pdf, self.preview, self.print_invoice):
+                button.setEnabled(False)
+            self._load_choices()
+            self._refresh_sales_history()
+            self.sale_completed.emit(sale.invoice_number)
+
+        self._worker = start_worker(
+            operation, succeeded=voided, failed=lambda error: show_error(self, error)
+        )
 
     def _select_history_row(self, row: int) -> bool:
         if row >= len(self._history_sales):

@@ -36,6 +36,11 @@ rejected.
 
 ## Creating and printing a sale
 
+Scan a product barcode into the **Barcode** box to add it straight to the invoice — most scanners
+type the code and press Enter, so one scan is one line. The batch closest to expiry is chosen, which
+is the stock that should leave the shelf first. Set a product's barcode under **Products > Edit >
+Barcode**; it must be unique across the catalogue.
+
 Open **Sales** and choose Customer or Dealer. The shortcut button under the name follows that
 choice: **+ Add walk-in customer** for a counter sale, **+ Add dealer** to open a full dealer form
 without leaving the invoice. A new record is selected for the sale as soon as it is saved.
@@ -53,6 +58,12 @@ order/territory/store, a product/policy/batch/quantity/cartons table, the boxed 
 the prepared/approved/dealer signature lines. It carries no prices — it is the goods document.
 **Print Invoice** produces the priced thermal receipt for the customer, with item, quantity, price
 and sub total columns and the grand total. See `docs/printing.md`.
+
+Every copy after the first is stamped **DUPLICATE**, so two apparent originals cannot circulate.
+Opening the print preview does not count as issuing a copy; printing or saving one does.
+
+The status bar shows a count when invoice emails are waiting to be sent. A number that keeps growing
+means the background worker is not running, and those messages are queued rather than delivered.
 
 When the recipient has an email address, their PDF is queued automatically. If the owner email is
 configured, a separate owner copy is queued. Email failure never reverses a sale; inspect and retry
@@ -76,6 +87,21 @@ through Adjust Stock, so the movement ledger stays the single record of every st
 **Delete batch** removes a batch from sales and stock figures. It writes the remaining quantity off
 through an audited adjustment and deactivates the batch; the batch row itself is kept because
 invoices and the movement ledger refer to it. A reason is required.
+
+## Correcting mistakes
+
+Nothing is edited or erased; a correction is always a new, audited entry.
+
+**Void a sale** — the three-dot menu on any row of **All Sales**. Voiding returns the stock to the
+batches it came from, removes the charge from the dealer's account, and marks the invoice voided so
+it stops counting in reports, dealer statements, and payment allocation. A reason is required, and
+only OWNER and MANAGER may do it. An invoice with payments against it must have those reversed
+first, so the cash trail stays explicit.
+
+**Reverse a dealer payment** — **Dealers > Reverse a payment**. Choose the entry and give a reason;
+an opposite entry is recorded that puts the invoice balance and the dealer's account back where they
+were. The original stays visible on the statement, with the reversal beneath it. A payment can only
+be reversed once, and a reversal cannot itself be reversed.
 
 ## Dealer accounts and staged payments
 

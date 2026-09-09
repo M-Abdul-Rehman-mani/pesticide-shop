@@ -31,6 +31,8 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     pack_size: Mapped[str] = mapped_column(
         String(80), nullable=False, default="", server_default=""
     )
+    #: Scanned at the counter; unique when set so a scan resolves to one product.
+    barcode: Mapped[str | None] = mapped_column(String(64), unique=True)
     registration_number: Mapped[str] = mapped_column(
         String(100), nullable=False, default="", server_default=""
     )

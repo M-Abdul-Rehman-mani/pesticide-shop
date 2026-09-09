@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
@@ -25,6 +25,7 @@ class SaleDocument:
     payload: bytes
     invoice_number: str
     preferences: PrintPreferences
+    is_duplicate: bool = False
 
 
 def build_sale_document(
@@ -33,12 +34,15 @@ def build_sale_document(
     sale_id: uuid.UUID,
     *,
     thermal: bool = False,
+    with_amounts: bool = False,
+    record_issue: bool = False,
 ) -> SaleDocument:
     """Render one sale's invoice.
 
     The A4 layout is used for previews and saved PDFs; ``thermal`` renders the same
     sale at the roll width chosen in Settings > Printer so it prints on the
-    counter's receipt printer.
+    counter's receipt printer. ``record_issue`` counts the copy as issued, which is
+    what makes every later copy print as a duplicate; a preview leaves it alone.
     """
 
     with session_factory() as session:
@@ -53,7 +57,8 @@ def build_sale_document(
             )
         )
         method_text = ", ".join(dict.fromkeys(method.value for method in methods)) or "UNPAID"
-        receipt = SaleReceiptData.from_sale(sale, method_text)
+        already_issued = sale.print_count > 0
+        receipt = replace(SaleReceiptData.from_sale(sale, method_text), is_duplicate=already_issued)
         shop = load_shop_profile(session, settings)
         preferences = load_print_preferences(session, settings)
         invoice_number = sale.invoice_number
@@ -66,6 +71,11 @@ def build_sale_document(
             preferences.effective_print_width_mm,
         )
         if thermal and preferences.receipt.width_mm is not None
-        else generator.generate_a4(receipt, shop)
+        else generator.generate_a4(receipt, shop, with_amounts=with_amounts)
     )
-    return SaleDocument(payload, invoice_number, preferences)
+    if record_issue:
+        with session_factory.begin() as session:
+            issued = session.get(Sale, sale_id)
+            if issued is not None:
+                issued.print_count += 1
+    return SaleDocument(payload, invoice_number, preferences, is_duplicate=already_issued)

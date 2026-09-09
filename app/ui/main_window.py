@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import ClassVar
+from typing import ClassVar, cast
 
-from PySide6.QtCore import QByteArray, QRect, QSettings, Qt, Signal
+from PySide6.QtCore import QByteArray, QRect, QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -23,10 +23,13 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app import __version__
 from app.config.settings import Settings
+from app.models.email_history import EmailHistory
+from app.models.enums import EmailStatus
 from app.security.authentication import AuthenticatedUser
 from app.security.permissions import Permission, has_permission
 from app.ui.customers.screen import CustomersScreen
@@ -43,6 +46,7 @@ from app.ui.shop_settings.screen import ShopSettingsScreen
 from app.ui.suppliers.screen import SuppliersScreen
 from app.ui.users.screen import UsersScreen
 from app.ui.widgets import mark_columns_user_sized
+from app.ui.workers import start_worker
 
 #: Bumped when column layouts change meaning, so installs upgrading from an
 #: earlier build pick up the new automatic sizing instead of stale widths.
@@ -118,6 +122,13 @@ class MainWindow(QMainWindow):
         status.setSizeGripEnabled(False)
         shortcuts = QLabel("Ctrl+N  New sale    Ctrl+R  Refresh    Ctrl+F  Search")
         shortcuts.setObjectName("RecordCount")
+        self._outbox_label = QLabel()
+        self._outbox_label.setObjectName("RecordCount")
+        self._outbox_label.setToolTip(
+            "Invoice emails wait here until the background worker sends them. "
+            "A growing queue means the worker is not running."
+        )
+        status.addPermanentWidget(self._outbox_label)
         status.addPermanentWidget(shortcuts)
         self.setStatusBar(status)
         self._build_pages(sidebar_layout)
@@ -125,6 +136,11 @@ class MainWindow(QMainWindow):
         self._preferences = QSettings("CropCare", "PesticideShop")
         self._restore_ui_preferences()
         self._install_shortcuts()
+        self._outbox_timer = QTimer(self)
+        self._outbox_timer.setInterval(60_000)
+        self._outbox_timer.timeout.connect(self._check_outbox)
+        self._outbox_timer.start()
+        self._check_outbox()
         self._session_monitor = SessionTimeoutMonitor(settings.app_session_timeout_minutes, self)
         self._session_monitor.timed_out.connect(self._timed_out)
         application = QApplication.instance()
@@ -345,6 +361,36 @@ class MainWindow(QMainWindow):
                 purchases.purchase_completed.connect(lambda _reference: refresh_sales())
         if dashboard is not None:
             dashboard.setProperty("refreshesAfterTransactions", True)
+
+    def _check_outbox(self) -> None:
+        """Surface invoice emails that are queued but not going anywhere.
+
+        Delivery runs in a Celery worker. When that is not running -- the common
+        case on a single shop PC -- messages pile up silently, so the count is put
+        in front of the operator rather than left in a log.
+        """
+
+        def operation() -> int:
+            with self._session_factory() as session:
+                return int(
+                    session.scalar(
+                        select(func.count())
+                        .select_from(EmailHistory)
+                        .where(EmailHistory.status == EmailStatus.PENDING)
+                    )
+                    or 0
+                )
+
+        def show(result: object) -> None:
+            pending = int(cast(int, result))
+            if not pending:
+                self._outbox_label.clear()
+                self._outbox_label.setStyleSheet("")
+                return
+            self._outbox_label.setText(f"{pending} email{'s' if pending != 1 else ''} queued")
+            self._outbox_label.setStyleSheet("color: #b26a00; font-weight: 700;")
+
+        start_worker(operation, succeeded=show, failed=lambda _error: None)
 
     def _refresh_transaction_pages(self, _reference: str) -> None:
         for name in ("Dashboard", "Inventory", "Products", "Customers", "Dealers", "Suppliers"):

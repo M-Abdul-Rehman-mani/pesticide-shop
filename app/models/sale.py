@@ -13,6 +13,7 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -78,6 +79,9 @@ class Sale(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     status: Mapped[SaleStatus] = mapped_column(Enum(SaleStatus, name="sale_status"), nullable=False)
     notes: Mapped[str | None] = mapped_column(Text)
+    #: How many times a printable copy has been issued. Anything after the first is
+    #: stamped DUPLICATE so two apparent originals cannot circulate.
+    print_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
 
     customer: Mapped[Customer | None] = relationship(lazy="joined")
     dealer: Mapped[Dealer | None] = relationship(lazy="joined")

@@ -20,7 +20,12 @@ from app.security.authentication import AuthenticatedUser
 from app.security.permissions import Permission, has_permission, require_permission
 from app.services.audit_service import AuditService
 from app.utils.exceptions import ConflictError, NotFoundError, ValidationError
-from app.utils.validators import nonnegative_money, normalize_email, normalize_phone
+from app.utils.validators import (
+    nonnegative_money,
+    normalize_barcode,
+    normalize_email,
+    normalize_phone,
+)
 
 
 class CustomerService:
@@ -435,6 +440,7 @@ class ProductService:
         default_purchase_price: Decimal = Decimal("0.00"),
         default_sale_price: Decimal = Decimal("0.00"),
         minimum_stock: int = 0,
+        barcode: str | None = None,
     ) -> Product:
         require_permission(actor.role, Permission.MANAGE_INVENTORY)
         if not manufacturer.strip() or not name.strip():
@@ -442,6 +448,7 @@ class ProductService:
         if minimum_stock < 0:
             raise ValidationError("Minimum stock cannot be negative.")
         product = Product(
+            barcode=normalize_barcode(barcode),
             manufacturer=manufacturer.strip(),
             name=name.strip(),
             active_ingredient=active_ingredient.strip(),
@@ -462,7 +469,9 @@ class ProductService:
         try:
             self._session.flush()
         except IntegrityError as exc:
-            raise ConflictError("That product variant already exists.") from exc
+            raise ConflictError(
+                "That product variant or barcode is already used by another product."
+            ) from exc
         self._audit.record(
             actor_id=actor.id,
             action="PRODUCT_CREATED",
@@ -524,6 +533,7 @@ class ProductService:
         default_purchase_price: Decimal,
         default_sale_price: Decimal,
         minimum_stock: int,
+        barcode: str | None = None,
     ) -> Product:
         require_permission(actor.role, Permission.MANAGE_INVENTORY)
         product = self._session.get(Product, product_id)
@@ -534,6 +544,7 @@ class ProductService:
         if minimum_stock < 0:
             raise ValidationError("Minimum stock cannot be negative.")
         old = {"name": product.display_name, "manufacturer": product.manufacturer}
+        product.barcode = normalize_barcode(barcode)
         product.manufacturer = manufacturer.strip()
         product.name = name.strip()
         product.category = category.strip().upper() or "PESTICIDE"
@@ -553,7 +564,9 @@ class ProductService:
         try:
             self._session.flush()
         except IntegrityError as exc:
-            raise ConflictError("That product variant already exists.") from exc
+            raise ConflictError(
+                "That product variant or barcode is already used by another product."
+            ) from exc
         self._audit.record(
             actor_id=actor.id,
             action="PRODUCT_UPDATED",

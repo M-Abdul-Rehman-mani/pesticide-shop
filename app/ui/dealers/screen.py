@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
@@ -30,12 +31,13 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config.settings import Settings
 from app.models.dealer import Dealer
-from app.models.enums import PaymentMethod
+from app.models.enums import PaymentDirection, PaymentMethod
 from app.models.sale import Sale
 from app.printing.preferences import load_print_preferences
 from app.printing.print_preview import open_print_preview
 from app.printing.printer_service import PrinterService, write_temporary_pdf
 from app.reports.pdf_exporter import PDFReportExporter
+from app.reports.report_service import DateRange
 from app.security.authentication import AuthenticatedUser
 from app.services.catalog_service import DealerService
 from app.services.dealer_account_service import (
@@ -208,6 +210,7 @@ class DealersScreen(QWidget):
         self._active: list[bool] = []
         self._balances: list[Decimal] = []
         self._documents = InvoiceDocumentActions(self, session_factory, settings)
+        self._statement_period_days: int | None = None
         layout = QVBoxLayout(self)
         header = QHBoxLayout()
         title = QLabel("Dealers")
@@ -366,6 +369,7 @@ class DealersScreen(QWidget):
                 ("View", self._view),
                 ("Edit", self._edit_row),
                 ("Record payment", self._record_payment_row),
+                ("Reverse a payment", self._reverse_payment_row),
                 ("Account statement", self._statement_row),
                 ("Sales history", self._history_row),
                 ("Activate / deactivate", self._toggle_active),
@@ -542,6 +546,105 @@ class DealersScreen(QWidget):
         if self._select_row(row):
             self._record_payment()
 
+    def _reverse_payment_row(self, row: int) -> None:
+        if self._select_row(row):
+            self._reverse_payment()
+
+    def _reverse_payment(self) -> None:
+        """Undo a mistyped payment by recording its opposite."""
+
+        row = self._selected()
+        if row is None or row >= len(self._ids):
+            QMessageBox.information(self, "Select dealer", "Select a dealer first.")
+            return
+        dealer_id = self._ids[row]
+
+        def operation() -> list[tuple[str, str, str, str, uuid.UUID, bool]]:
+            with self._session_factory() as session:
+                service = DealerAccountService(session)
+                entries = []
+                for payment in service.payments(dealer_id):
+                    incoming = payment.direction is PaymentDirection.INCOMING
+                    entries.append(
+                        (
+                            format_date(payment.created_at),
+                            "Received" if incoming else "Reversal / refund",
+                            format_money(payment.amount, self._currency),
+                            payment.reference or "—",
+                            payment.id,
+                            incoming,
+                        )
+                    )
+                return entries
+
+        def choose(result: object) -> None:
+            entries = cast(list[tuple[str, str, str, str, uuid.UUID, bool]], result)
+            reversible = [entry for entry in entries if entry[5]]
+            if not reversible:
+                QMessageBox.information(
+                    self, "No payments", "This dealer has no received payments to reverse."
+                )
+                return
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Reverse a dealer payment")
+            dialog.resize(720, 400)
+            layout = QVBoxLayout(dialog)
+            note = QLabel(
+                "Payments are never edited. Reversing one records an opposite entry that "
+                "puts the invoice and the dealer's balance back where they were."
+            )
+            note.setWordWrap(True)
+            model = RowsTableModel(("Date", "Type", "Amount", "Reference"), dialog)
+            model.set_rows([entry[:4] for entry in entries])
+            table = QTableView()
+            table.setModel(model)
+            configure_table(table, stretch_column=3, minimum_section_size=80)
+            reason = QLineEdit()
+            reason.setPlaceholderText("Entered twice, wrong amount, wrong dealer…")
+            form = QFormLayout()
+            form.addRow("Reason *", reason)
+            buttons = QDialogButtonBox(
+                QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+            )
+            buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Reverse payment")
+            buttons.accepted.connect(dialog.accept)
+            buttons.rejected.connect(dialog.reject)
+            layout.addWidget(note)
+            layout.addWidget(table, 1)
+            layout.addLayout(form)
+            layout.addWidget(buttons)
+            if entries:
+                table.selectRow(0)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            selected = table.selectionModel().selectedRows()
+            if not selected:
+                QMessageBox.information(self, "Select a payment", "Choose the payment to reverse.")
+                return
+            entry = entries[selected[0].row()]
+            if not entry[5]:
+                QMessageBox.information(
+                    self, "Not reversible", "That entry is already a reversal or refund."
+                )
+                return
+            payment_id, entered_reason = entry[4], reason.text()
+
+            def reverse() -> None:
+                with self._session_factory.begin() as session:
+                    DealerAccountService(session).reverse_payment(
+                        payment_id, actor=self._actor, reason=entered_reason
+                    )
+
+            self._worker = start_worker(
+                reverse,
+                succeeded=lambda _result: self._saved("Payment reversed."),
+                failed=lambda error: show_error(self, error),
+            )
+
+        self._worker = start_worker(
+            operation, succeeded=choose, failed=lambda error: show_error(self, error)
+        )
+
     def _statement_row(self, row: int) -> None:
         if self._select_row(row):
             self._statement()
@@ -626,9 +729,20 @@ class DealersScreen(QWidget):
             return
         dealer_id = self._ids[row]
 
+        period_days = self._statement_period_days
+
         def operation() -> DealerStatement:
             with self._session_factory() as session:
-                return DealerAccountService(session).statement(dealer_id)
+                window = (
+                    None
+                    if period_days is None
+                    else DateRange.local_days(
+                        date.today() - timedelta(days=period_days - 1),
+                        date.today(),
+                        self._settings.app_timezone,
+                    )
+                )
+                return DealerAccountService(session).statement(dealer_id, period=window)
 
         def display(result: object) -> None:
             statement = cast(DealerStatement, result)
@@ -636,7 +750,13 @@ class DealersScreen(QWidget):
             dialog.setWindowTitle(f"Account statement — {statement.dealer_name}")
             dialog.resize(980, 500)
             layout = QVBoxLayout(dialog)
-            summary_parts = [
+            summary_parts = []
+            if period_days is not None:
+                summary_parts.append(
+                    f"Last {period_days} days, opening "
+                    f"{format_money(statement.opening_balance, self._currency)}"
+                )
+            summary_parts += [
                 f"Invoiced {format_money(statement.invoiced, self._currency)}",
                 f"Paid {format_money(statement.paid, self._currency)}",
                 f"Outstanding {format_money(statement.outstanding, self._currency)}",
@@ -674,6 +794,18 @@ class DealersScreen(QWidget):
                 record_count_text(len(statement.entries), "account entry", "account entries")
             )
             count.setObjectName("RecordCount")
+            window = QComboBox()
+            for label, days in (
+                ("All history", None),
+                ("Last 30 days", 30),
+                ("Last 90 days", 90),
+                ("Last 365 days", 365),
+            ):
+                window.addItem(label, days)
+            window.setCurrentIndex(max(0, window.findData(period_days)))
+            window.currentIndexChanged.connect(
+                lambda _index: self._reopen_statement(dialog, window.currentData())
+            )
             save = QPushButton("Save PDF")
             preview = QPushButton("Print Preview")
             close_button = QPushButton("Close")
@@ -685,6 +817,8 @@ class DealersScreen(QWidget):
             actions = QHBoxLayout()
             actions.addWidget(count)
             actions.addStretch()
+            actions.addWidget(QLabel("Period"))
+            actions.addWidget(window)
             actions.addWidget(save)
             actions.addWidget(preview)
             actions.addWidget(close_button)
@@ -696,6 +830,13 @@ class DealersScreen(QWidget):
         self._worker = start_worker(
             operation, succeeded=display, failed=lambda error: show_error(self, error)
         )
+
+    def _reopen_statement(self, dialog: QDialog, period_days: int | None) -> None:
+        """Reload the statement for a different window."""
+
+        self._statement_period_days = period_days
+        dialog.reject()
+        self._statement()
 
     def _statement_document(self, statement: DealerStatement) -> bytes:
         """Render the statement as a PDF the dealer can be handed or emailed."""

@@ -78,6 +78,8 @@ class SaleReceiptData:
     territory: str = ""
     policy: str = ""
     store: str = ""
+    #: Set when a copy has already been issued, so the document is stamped.
+    is_duplicate: bool = False
 
     @classmethod
     def from_sale(cls, sale: Sale, payment_methods: str = "See payment record") -> SaleReceiptData:
@@ -170,7 +172,13 @@ class ReceiptGenerator:
             logger.warning("Shop logo could not be read: %s", shop.logo_path, exc_info=True)
             return None
 
-    def generate_a4(self, receipt: SaleReceiptData, shop: ShopProfile) -> bytes:
+    def generate_a4(
+        self,
+        receipt: SaleReceiptData,
+        shop: ShopProfile,
+        *,
+        with_amounts: bool = False,
+    ) -> bytes:
         """Render the A4 delivery challan.
 
         The layout follows the shop's existing pre-printed challan: identity block,
@@ -195,6 +203,8 @@ class ReceiptGenerator:
         width = document.width - 2 * _FRAME_PADDING
         available = document.height - 2 * _FRAME_PADDING
         story = self._challan_story(receipt, shop, width)
+        if with_amounts:
+            story.extend(self._challan_amounts(receipt, shop, width))
         used = self._story_height(story, width)
         # The signature block sits at the foot of the page, so the line table keeps
         # an open area beneath it exactly as the pre-printed form does.
@@ -251,6 +261,8 @@ class ReceiptGenerator:
             Paragraph("<u>DELIVERY CHALLAN / INVOICE</u>", title),
             Spacer(1, 2 * mm),
         ]
+        if receipt.is_duplicate:
+            story.append(Paragraph("DUPLICATE COPY", self._duplicate_style(title)))
 
         def field(text: str, style: ParagraphStyle = value) -> Paragraph:
             return Paragraph(text, style)
@@ -440,6 +452,64 @@ class ReceiptGenerator:
         ]
 
     @staticmethod
+    def _duplicate_style(parent: ParagraphStyle) -> ParagraphStyle:
+        return ParagraphStyle(
+            "DuplicateStamp",
+            parent=parent,
+            fontSize=10,
+            leading=13,
+            textColor=colors.HexColor("#8A1F1F"),
+        )
+
+    def _challan_amounts(
+        self, receipt: SaleReceiptData, shop: ShopProfile, width: float
+    ) -> list[Flowable]:
+        """Priced summary for the copy sent by email.
+
+        The printed challan is a goods document and carries no money, but a dealer
+        receiving it by email needs to know what they are being charged.
+        """
+
+        label = ParagraphStyle("AmountLabel", fontName="Helvetica", fontSize=9, leading=12)
+        value = ParagraphStyle("AmountValue", parent=label, alignment=TA_RIGHT)
+        strong = ParagraphStyle("AmountStrong", parent=label, fontName="Helvetica-Bold")
+        strong_value = ParagraphStyle("AmountStrongValue", parent=strong, alignment=TA_RIGHT)
+        rows = [
+            ("Subtotal", receipt.subtotal, False),
+            ("Discount", receipt.discount, False),
+            ("Tax", receipt.tax, False),
+            ("TOTAL", receipt.total, True),
+            ("Paid", receipt.paid, False),
+            ("Balance", receipt.remaining, True),
+        ]
+        table = Table(
+            [
+                [
+                    Paragraph(name, strong if bold else label),
+                    Paragraph(self._amount(amount, shop.currency), strong_value if bold else value),
+                ]
+                for name, amount, bold in rows
+            ],
+            colWidths=[width * 0.22, width * 0.22],
+            hAlign="RIGHT",
+        )
+        table.setStyle(
+            TableStyle(
+                [
+                    ("LINEABOVE", (0, 3), (-1, 3), 0.8, colors.black),
+                    ("TOPPADDING", (0, 0), (-1, -1), 2),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+                ]
+            )
+        )
+        return [
+            Spacer(1, 4 * mm),
+            table,
+            Spacer(1, 2 * mm),
+            Paragraph(f"Payment: {escape(receipt.payment_methods)}", label),
+        ]
+
+    @staticmethod
     def _challan_field_style() -> TableStyle:
         return TableStyle(
             [
@@ -566,6 +636,7 @@ class ReceiptGenerator:
         left = ParagraphStyle("ThermalLeft", parent=normal, alignment=TA_LEFT)
         bold = ParagraphStyle("ThermalBold", parent=normal, fontName="Helvetica-Bold")
         bold_right = ParagraphStyle("ThermalBoldRight", parent=bold, alignment=TA_RIGHT)
+        bold_center = ParagraphStyle("ThermalBoldCenter", parent=bold, alignment=TA_CENTER)
         heading = ParagraphStyle(
             "ThermalHeading",
             parent=center,
@@ -580,6 +651,8 @@ class ReceiptGenerator:
             story.append(Paragraph(escape(shop.name), heading))
         for contact_line in self._thermal_contact(shop):
             story.append(Paragraph(contact_line, center))
+        if receipt.is_duplicate:
+            story.append(Paragraph("*** DUPLICATE COPY ***", bold_center))
         story.extend(
             [
                 Spacer(1, 1.5 * mm),

@@ -51,3 +51,20 @@ def nonnegative_money(value: Decimal | str | int, *, field: str = "Amount") -> D
     if result < 0:
         raise ValidationError(f"{field} cannot be negative.")
     return result
+
+
+def normalize_barcode(value: str | None) -> str | None:
+    """Return a tidy barcode, or ``None`` when the product has none.
+
+    Scanners emit surrounding whitespace and sometimes a trailing newline, and an
+    empty string would collide with every other blank barcode on the unique index.
+    """
+
+    if value is None:
+        return None
+    cleaned = "".join(value.split())
+    if not cleaned:
+        return None
+    if len(cleaned) > 64:
+        raise ValidationError("A barcode may be at most 64 characters.")
+    return cleaned

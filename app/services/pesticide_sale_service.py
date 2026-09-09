@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -278,3 +279,76 @@ class PesticideSaleService:
             entity_type="Sale",
             entity_id=sale.id,
         )
+
+    def void(self, sale_id: uuid.UUID, actor: AuthenticatedUser, *, reason: str) -> Sale:
+        """Cancel a completed sale, returning its stock and clearing the debt.
+
+        Money is deliberately left alone: any payment must be reversed first, so the
+        cash trail stays explicit instead of being unwound implicitly here. A voided
+        sale drops out of reports, dealer statements, and payment allocation, which
+        all select completed sales only.
+        """
+
+        require_permission(actor.role, Permission.VOID_SALE)
+        if not reason.strip():
+            raise ValidationError("A reason is required to void a sale.")
+        sale = self._session.execute(
+            select(Sale).where(Sale.id == sale_id).with_for_update(of=Sale)
+        ).scalar_one_or_none()
+        if sale is None:
+            raise NotFoundError("Sale was not found.")
+        if sale.status is not SaleStatus.COMPLETED:
+            raise ConflictError("Only a completed sale can be voided.")
+        if sale.paid_amount > 0:
+            raise ConflictError(
+                "This invoice has payments against it. Reverse them first, then void it."
+            )
+        items = list(self._session.scalars(select(SaleItem).where(SaleItem.sale_id == sale.id)))
+        batches = {
+            batch.id: batch
+            for batch in self._session.scalars(
+                select(StockBatch)
+                .where(StockBatch.id.in_([item.stock_batch_id for item in items]))
+                .order_by(StockBatch.id)
+                .with_for_update(of=StockBatch)
+            )
+        }
+        voided_at = datetime.now(UTC)
+        for item in items:
+            batch = batches.get(item.stock_batch_id)
+            if batch is None:
+                raise NotFoundError("A stock batch for this sale no longer exists.")
+            if batch.quantity_available + item.quantity > batch.quantity_received:
+                raise ConflictError(
+                    f"Returning batch {batch.batch_number} would exceed the quantity received."
+                )
+            batch.quantity_available += item.quantity
+            self._session.add(
+                StockMovement(
+                    batch_id=batch.id,
+                    transaction_type=InventoryTransactionType.ADJUSTMENT,
+                    quantity_change=item.quantity,
+                    balance_after=batch.quantity_available,
+                    reference_id=sale.id,
+                    reference_type="Sale Void",
+                    performed_by=actor.id,
+                    created_at=voided_at,
+                    notes=f"Voided {sale.invoice_number}: {reason.strip()}",
+                )
+            )
+        if sale.dealer_id:
+            dealer = self._session.execute(
+                select(Dealer).where(Dealer.id == sale.dealer_id).with_for_update(of=Dealer)
+            ).scalar_one()
+            dealer.balance -= sale.remaining_amount
+        sale.status = SaleStatus.VOIDED
+        self._audit.record(
+            actor_id=actor.id,
+            action="SALE_VOIDED",
+            entity_type="Sale",
+            entity_id=sale.id,
+            old_value={"status": SaleStatus.COMPLETED.value, "total": str(sale.total)},
+            new_value={"status": SaleStatus.VOIDED.value, "reason": reason.strip()},
+        )
+        self._session.flush()
+        return sale

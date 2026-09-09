@@ -89,13 +89,12 @@ markers = [
 branch = true
 source = ["app"]
 omit = [
-  # Platform adapters are exercised by smoke/integration tests, while the numeric
-  # quality gate intentionally measures deterministic domain and service logic.
+  # Screens and platform adapters are exercised by smoke tests; the numeric gate
+  # measures deterministic domain and service logic. Printing is no longer in this
+  # list: it is covered directly by tests/test_printing.py.
   "app/ui/*",
   "app/main.py",
   "app/tasks/*",
-  "app/printing/printer_service.py",
-  "app/printing/invoice_generator.py",
   "app/config/logging.py",
   "app/database/connection.py",
   "app/database/session.py",

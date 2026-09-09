@@ -87,7 +87,7 @@ class InvoiceDocumentActions:
                     f"{document.preferences.receipt.label} paper.",
                 )
 
-        self._render(sale_id, thermal=True, succeeded=send)
+        self._render(sale_id, thermal=True, succeeded=send, record_issue=True)
 
     def save_pdf(self, sale_id: uuid.UUID, *, suggested_name: str | None = None) -> None:
         """Write the A4 invoice to a file the operator chooses."""
@@ -102,7 +102,9 @@ class InvoiceDocumentActions:
             return
 
         def operation() -> Path:
-            document = build_sale_document(self._session_factory, self._settings, sale_id)
+            document = build_sale_document(
+                self._session_factory, self._settings, sale_id, record_issue=True
+            )
             return PrinterService().save_pdf(Path(path), document.payload)
 
         start_worker(
@@ -119,10 +121,15 @@ class InvoiceDocumentActions:
         *,
         thermal: bool,
         succeeded: Callable[[object], object],
+        record_issue: bool = False,
     ) -> None:
         start_worker(
             lambda: build_sale_document(
-                self._session_factory, self._settings, sale_id, thermal=thermal
+                self._session_factory,
+                self._settings,
+                sale_id,
+                thermal=thermal,
+                record_issue=record_issue,
             ),
             succeeded=succeeded,
             failed=lambda error: show_error(self._parent, error),

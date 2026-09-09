@@ -14,11 +14,12 @@ from app.models.dealer import Dealer
 from app.models.enums import PaymentDirection, PaymentMethod, SaleStatus
 from app.models.payment import Payment
 from app.models.sale import Sale
+from app.reports.report_service import DateRange
 from app.security.authentication import AuthenticatedUser
 from app.security.permissions import Permission, require_permission
 from app.services.audit_service import AuditService
 from app.services.money_service import payment_status
-from app.utils.exceptions import NotFoundError, ValidationError
+from app.utils.exceptions import ConflictError, NotFoundError, ValidationError
 from app.utils.validators import nonnegative_money
 
 ZERO = Decimal("0.00")
@@ -68,6 +69,8 @@ class DealerStatement:
     paid: Decimal
     outstanding: Decimal
     credit_limit: Decimal
+    #: Balance carried into the statement when a date range is applied.
+    opening_balance: Decimal = Decimal("0.00")
 
     @property
     def available_credit(self) -> Decimal | None:
@@ -186,8 +189,18 @@ class DealerAccountService:
             balance=dealer.balance,
         )
 
-    def statement(self, dealer_id: uuid.UUID) -> DealerStatement:
-        """Return every charge and payment for a dealer with a running balance."""
+    def statement(
+        self,
+        dealer_id: uuid.UUID,
+        *,
+        period: DateRange | None = None,
+    ) -> DealerStatement:
+        """Return charges and payments for a dealer with a running balance.
+
+        Without a period the whole account is returned. With one, the balance still
+        opens from everything that came before, so a range never reads as though the
+        dealer started from zero.
+        """
 
         dealer = self._session.get(Dealer, dealer_id)
         if dealer is None:
@@ -209,6 +222,16 @@ class DealerAccountService:
                 .order_by(Payment.created_at)
             )
         )
+        refunds = list(
+            self._session.scalars(
+                select(Payment)
+                .where(
+                    Payment.dealer_id == dealer_id,
+                    Payment.direction == PaymentDirection.OUTGOING,
+                )
+                .order_by(Payment.created_at)
+            )
+        )
         events: list[tuple[datetime, str, str, str, Decimal, Decimal]] = [
             (sale.sale_date, INVOICE, sale.invoice_number, "Invoice raised", sale.total, ZERO)
             for sale in sales
@@ -224,16 +247,35 @@ class DealerAccountService:
             )
             for payment in payments
         )
+        # A reversal is a charge back onto the account.
+        events.extend(
+            (
+                refund.created_at,
+                PAYMENT,
+                refund.reference or "—",
+                f"{refund.method.value.replace('_', ' ').title()} reversed",
+                refund.amount,
+                ZERO,
+            )
+            for refund in refunds
+        )
         events.sort(key=lambda event: (event[0], event[1]))
         entries: list[StatementEntry] = []
         balance = ZERO
+        opening = ZERO
         for occurred_at, kind, reference, detail, charge, credit in events:
             balance += charge - credit
+            if period is not None and not period.start <= occurred_at < period.end:
+                # Outside the window: it still moves the balance the range opens from.
+                opening = balance
+                continue
             entries.append(
                 StatementEntry(occurred_at, kind, reference, detail, charge, credit, balance)
             )
         invoiced = sum((sale.total for sale in sales), ZERO)
-        paid = sum((payment.amount for payment in payments), ZERO)
+        paid = sum((payment.amount for payment in payments), ZERO) - sum(
+            (refund.amount for refund in refunds), ZERO
+        )
         return DealerStatement(
             dealer_name=dealer.display_name,
             entries=tuple(entries),
@@ -241,6 +283,7 @@ class DealerAccountService:
             paid=paid,
             outstanding=invoiced - paid,
             credit_limit=dealer.credit_limit,
+            opening_balance=opening,
         )
 
     @staticmethod
@@ -250,3 +293,91 @@ class DealerAccountService:
             return f"{method} to account credit"
         sale = payment.sale
         return f"{method} to {sale.invoice_number}" if sale else method
+
+    def reverse_payment(
+        self, payment_id: uuid.UUID, *, actor: AuthenticatedUser, reason: str
+    ) -> Payment:
+        """Undo a payment by recording its opposite, never by editing history.
+
+        A mistyped amount would otherwise be permanent: payments are immutable, so
+        the correction is an outgoing entry of the same size that puts the invoice
+        and the dealer's balance back where they were.
+        """
+
+        require_permission(actor.role, Permission.MANAGE_DEALERS)
+        if not reason.strip():
+            raise ValidationError("A reason is required to reverse a payment.")
+        original = self._session.get(Payment, payment_id)
+        if original is None:
+            raise NotFoundError("Payment was not found.")
+        if original.direction is not PaymentDirection.INCOMING:
+            raise ConflictError("Only a received payment can be reversed.")
+        if original.dealer_id is None:
+            raise ConflictError("This payment is not against a dealer account.")
+        if self._is_reversed(original):
+            raise ConflictError("This payment has already been reversed.")
+        dealer = self._session.execute(
+            select(Dealer).where(Dealer.id == original.dealer_id).with_for_update(of=Dealer)
+        ).scalar_one()
+        reference = f"Reversal of {original.reference}" if original.reference else "Reversal"
+        reversal = Payment(
+            sale_id=original.sale_id,
+            dealer_id=dealer.id,
+            method=original.method,
+            direction=PaymentDirection.OUTGOING,
+            amount=original.amount,
+            reference=reference[:160],
+            notes=reason.strip(),
+            received_by=actor.id,
+        )
+        self._session.add(reversal)
+        if original.sale_id is not None:
+            sale = self._session.execute(
+                select(Sale).where(Sale.id == original.sale_id).with_for_update(of=Sale)
+            ).scalar_one()
+            sale.paid_amount -= original.amount
+            sale.remaining_amount += original.amount
+            sale.payment_status = payment_status(sale.total, sale.paid_amount)
+        dealer.balance += original.amount
+        self._audit.record(
+            actor_id=actor.id,
+            action="DEALER_PAYMENT_REVERSED",
+            entity_type="Payment",
+            entity_id=original.id,
+            old_value={"amount": str(original.amount), "direction": "INCOMING"},
+            new_value={
+                "amount": str(original.amount),
+                "direction": "OUTGOING",
+                "reason": reason.strip(),
+                "balance": str(dealer.balance),
+            },
+        )
+        self._session.flush()
+        return reversal
+
+    def _is_reversed(self, payment: Payment) -> bool:
+        """Report whether an offsetting entry already exists for this payment."""
+
+        statement = select(Payment.id).where(
+            Payment.dealer_id == payment.dealer_id,
+            Payment.direction == PaymentDirection.OUTGOING,
+            Payment.amount == payment.amount,
+            Payment.created_at >= payment.created_at,
+        )
+        statement = (
+            statement.where(Payment.sale_id == payment.sale_id)
+            if payment.sale_id is not None
+            else statement.where(Payment.sale_id.is_(None))
+        )
+        return self._session.scalar(statement.limit(1)) is not None
+
+    def payments(self, dealer_id: uuid.UUID) -> list[Payment]:
+        """Return a dealer's payment entries, newest first, for the reversal list."""
+
+        return list(
+            self._session.scalars(
+                select(Payment)
+                .where(Payment.dealer_id == dealer_id)
+                .order_by(Payment.created_at.desc())
+            )
+        )
