@@ -345,3 +345,115 @@ def test_dealers_screen_shows_advance_credit_as_credit(
     assert screen._balance_text(Decimal("0.00")) == "PKR 0.00"
     assert screen._balance_text(Decimal("-500.00")) == "PKR 500.00 credit"
     QThreadPool.globalInstance().waitForDone(5000)
+
+
+@pytest.mark.ui
+def test_payment_dialog_returns_a_real_enum_member(qtbot: QtBot) -> None:
+    """Qt stores a StrEnum as a plain string, so it must be converted back.
+
+    Recording a dealer payment crashed with
+    ``AttributeError: 'str' object has no attribute 'value'`` because the dialog
+    handed the service a bare string.
+    """
+
+    from app.ui.dealers.screen import DealerPaymentDialog
+
+    dialog = DealerPaymentDialog("Malik Agri Traders", Decimal("11250.00"), "PKR")
+    qtbot.addWidget(dialog)
+    assert dialog.method.count() == len(list(PaymentMethod))
+    for index in range(dialog.method.count()):
+        dialog.method.setCurrentIndex(index)
+        chosen = dialog.payment_method()
+        assert isinstance(chosen, PaymentMethod)
+        # The audit trail reads ``.value``, which only a real member has.
+        assert chosen.value == dialog.method.currentData()
+
+
+@pytest.mark.ui
+def test_payment_editor_rows_carry_real_enum_members(qtbot: QtBot) -> None:
+    """The sale screen's split-payment rows share the same conversion."""
+
+    from app.ui.forms import PaymentEditor
+
+    editor = PaymentEditor()
+    qtbot.addWidget(editor)
+    editor.add_row(method=PaymentMethod.BANK_TRANSFER, amount="250.00")
+    values = editor.values()
+    assert values, "a row with an amount should produce a payment"
+    for payment in values:
+        assert isinstance(payment.method, PaymentMethod)
+    assert values[-1].method is PaymentMethod.BANK_TRANSFER
+
+
+@pytest.mark.ui
+def test_a_payment_chosen_in_the_dialog_reaches_the_service(
+    qtbot: QtBot,
+    db_session: Session,
+    owner: AuthenticatedUser,
+    supplier: Supplier,
+    product: Product,
+) -> None:
+    """Exercise the dialog-to-service boundary that the crash came through."""
+
+    from app.ui.dealers.screen import DealerPaymentDialog
+
+    dealer = _dealer(db_session, owner)
+    batch = _batch(db_session, owner, supplier, product, batch_number="DIALOG")
+    sale = _credit_sale(db_session, owner, dealer, batch, quantity=10)
+
+    dialog = DealerPaymentDialog(dealer.display_name, dealer.balance, "PKR")
+    qtbot.addWidget(dialog)
+    dialog.method.setCurrentIndex(dialog.method.findData(PaymentMethod.BANK_TRANSFER.value))
+    dialog.amount.setText("600.00")
+
+    result = DealerAccountService(db_session).record_payment(
+        dealer.id,
+        actor=owner,
+        method=dialog.payment_method(),
+        amount=dialog.amount.decimal_value("Payment"),
+        reference=dialog.reference.text(),
+        notes=dialog.notes.toPlainText(),
+    )
+    db_session.flush()
+    assert result.amount == Decimal("600.00")
+    assert [entry.invoice_number for entry in result.settled] == [sale.invoice_number]
+    payment = db_session.scalars(select(Payment).where(Payment.dealer_id == dealer.id)).one()
+    assert payment.method is PaymentMethod.BANK_TRANSFER
+
+
+@pytest.mark.ui
+def test_every_enum_combo_returns_a_real_member(qtbot: QtBot) -> None:
+    """The same StrEnum trap existed in the supplier-payment and user-role dialogs.
+
+    Qt flattens a ``StrEnum`` to a string in item data, and both the supplier
+    payment audit trail and the role policy expect a real member.
+    """
+
+    from PySide6.QtWidgets import QComboBox
+
+    from app.models.enums import UserRole
+    from app.ui.widgets import populate_enum_combo, selected_enum
+
+    for enum_type in (PaymentMethod, UserRole):
+        combo = QComboBox()
+        qtbot.addWidget(combo)
+        populate_enum_combo(combo, enum_type)
+        assert combo.count() == len(list(enum_type))
+        for index in range(combo.count()):
+            combo.setCurrentIndex(index)
+            member = selected_enum(combo, enum_type)
+            assert isinstance(member, enum_type)
+            assert member.value  # the audit trail reads this
+
+
+@pytest.mark.ui
+def test_populate_enum_combo_preselects_a_member(qtbot: QtBot) -> None:
+    from PySide6.QtWidgets import QComboBox
+
+    from app.ui.widgets import populate_enum_combo, selected_enum
+
+    combo = QComboBox()
+    qtbot.addWidget(combo)
+    populate_enum_combo(combo, PaymentMethod, current=PaymentMethod.MOBILE_WALLET)
+    assert selected_enum(combo, PaymentMethod) is PaymentMethod.MOBILE_WALLET
+    assert combo.currentText() == "Mobile Wallet"

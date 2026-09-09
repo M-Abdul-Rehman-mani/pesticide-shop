@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 
 from app.models.enums import PaymentMethod
 from app.services.dto import PaymentInput
-from app.ui.widgets import configure_table
+from app.ui.widgets import configure_table, populate_enum_combo, selected_enum
 from app.utils.validators import nonnegative_money
 
 
@@ -68,9 +68,7 @@ class PaymentEditor(QWidget):
         row = self.table.rowCount()
         self.table.insertRow(row)
         methods = QComboBox()
-        for candidate in PaymentMethod:
-            methods.addItem(candidate.value.replace("_", " ").title(), candidate)
-        methods.setCurrentIndex(list(PaymentMethod).index(method))
+        populate_enum_combo(methods, PaymentMethod, current=method)
         self.table.setCellWidget(row, 0, methods)
         self.table.setCellWidget(row, 1, MoneyEdit(amount))
         self.table.setItem(row, 2, QTableWidgetItem(""))
@@ -92,7 +90,7 @@ class PaymentEditor(QWidget):
             if amount > 0:
                 payments.append(
                     PaymentInput(
-                        method=method_widget.currentData(),
+                        method=selected_enum(method_widget, PaymentMethod),
                         amount=amount,
                         reference=(reference_item.text().strip() or None)
                         if reference_item is not None

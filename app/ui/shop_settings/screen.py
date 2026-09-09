@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import cast
 
 from PySide6.QtWidgets import (
@@ -25,6 +26,7 @@ from app.security.authentication import AuthenticatedUser
 from app.services.settings_service import SettingsService
 from app.ui.widgets import show_error, wrap_scroll
 from app.ui.workers import FunctionWorker, start_worker
+from app.utils.paths import store_shop_logo
 
 
 class ShopSettingsScreen(QWidget):
@@ -97,6 +99,8 @@ class ShopSettingsScreen(QWidget):
         logo_row.addWidget(self.logo_path)
         logo_row.addWidget(choose_logo)
         logo_row.addWidget(clear_logo)
+        self.logo_status = QLabel()
+        self.logo_status.setWordWrap(True)
 
         form.addRow("Shop name", self.shop_name)
         form.addRow("Owner name", self.owner_name)
@@ -106,24 +110,60 @@ class ShopSettingsScreen(QWidget):
         form.addRow("Website", self.website)
         form.addRow("Tax / registration", self.tax_information)
         form.addRow("Logo", logo_row)
+        form.addRow("", self.logo_status)
         body_layout.addWidget(group)
         body_layout.addStretch()
         root.addWidget(wrap_scroll(body), 1)
 
         choose_logo.clicked.connect(self._choose_logo)
         clear_logo.clicked.connect(self.logo_path.clear)
+        self.logo_path.textChanged.connect(self._update_logo_status)
         self.save_button.clicked.connect(self.save)
         self._load()
 
     def _choose_logo(self) -> None:
+        """Copy the chosen image into application storage and point at that copy.
+
+        Referencing the file where the operator found it means the logo silently
+        vanishes from receipts once that file is moved, renamed, or the shop runs
+        on a different machine.
+        """
+
         path, _filter = QFileDialog.getOpenFileName(
             self,
             "Choose shop logo",
             "",
             "Images (*.png *.jpg *.jpeg)",
         )
-        if path:
-            self.logo_path.setText(path)
+        if not path:
+            return
+        try:
+            stored = store_shop_logo(Path(path))
+        except OSError as error:
+            QMessageBox.warning(
+                self,
+                "Logo could not be used",
+                f"The image could not be copied into the application:\n{error}",
+            )
+            return
+        self.logo_path.setText(str(stored))
+
+    def _update_logo_status(self) -> None:
+        """Say plainly whether the configured logo can actually be printed."""
+
+        text = self.logo_path.text().strip()
+        if not text:
+            self.logo_status.setText("No logo set. Receipts print the shop name only.")
+            self.logo_status.setStyleSheet("color: #65786f;")
+            return
+        if Path(text).expanduser().is_file():
+            self.logo_status.setText("Logo found; it prints on invoices and receipts.")
+            self.logo_status.setStyleSheet("color: #176d49;")
+        else:
+            self.logo_status.setText(
+                "This image is missing, so nothing will print. Choose the file again."
+            )
+            self.logo_status.setStyleSheet("color: #b8362c;")
 
     def refresh(self) -> None:
         self._load()
@@ -153,6 +193,7 @@ class ShopSettingsScreen(QWidget):
         self.website.setText(data["website"])
         self.tax_information.setText(data["tax_information"])
         self.logo_path.setText(data["logo_path"])
+        self._update_logo_status()
 
     def save(self) -> None:
         values = {

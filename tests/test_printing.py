@@ -36,7 +36,12 @@ from app.printing.printer_service import (
     receipt_format,
     write_temporary_pdf,
 )
-from app.printing.receipt_generator import ReceiptGenerator, ReceiptLine, ShopProfile
+from app.printing.receipt_generator import (
+    ReceiptGenerator,
+    ReceiptLine,
+    SaleReceiptData,
+    ShopProfile,
+)
 from app.printing.sample_receipt import sample_receipt
 from app.security.authentication import AuthenticatedUser
 from app.services.dto import (
@@ -617,3 +622,221 @@ def test_only_roll_pages_are_treated_as_thermal(qapp: QApplication) -> None:
     )
     service.prepare(document, printer)
     assert PrinterService.is_thermal_page(printer) is True
+
+
+def _challan_receipt() -> SaleReceiptData:
+    from datetime import datetime
+
+    return SaleReceiptData(
+        invoice_number="00000373",
+        sold_at=datetime(2026, 9, 7, 10, 0),
+        customer_name="MUDASSIR & BROTHERS",
+        customer_phone="0300-6822186",
+        lines=(
+            ReceiptLine(
+                product="SULPHUR 80% WG 2-KG",
+                batch_number="AMPL-2025/SUL-04",
+                quantity=16,
+                price=Decimal("900.00"),
+                discount=Decimal("0.00"),
+                total=Decimal("14400.00"),
+                cartons=2,
+                loose_packs=0,
+            ),
+        ),
+        subtotal=Decimal("14400.00"),
+        discount=Decimal("0.00"),
+        tax=Decimal("0.00"),
+        total=Decimal("14400.00"),
+        paid=Decimal("0.00"),
+        remaining=Decimal("14400.00"),
+        payment_methods="CREDIT",
+        salesperson="Counter Staff",
+        recipient_type="Dealer",
+        customer_address="MUDASSIR & BROTHERS, MAIN ROAD LODHRAN",
+        customer_identity="36202-0513231-5",
+        order_number="373",
+        territory="LODHRAN",
+        policy="A.NET NET SALE",
+        store="FINISHED",
+    )
+
+
+@pytest.mark.ui
+def test_challan_keeps_the_signature_block_on_one_page(qapp: QApplication) -> None:
+    """The pre-printed form is a single sheet: header, lines, totals, signatures."""
+
+    shop = ShopProfile(
+        name="AVENEX CROP SCIENCES",
+        address="68B, SMALL INDUSTRIAL ESTATE BAHAWALPUR",
+        phone="0301-7428320",
+    )
+    payload = ReceiptGenerator().generate_a4(_challan_receipt(), shop)
+    document = PrinterService().load(write_temporary_pdf(payload, "challan-one-page"))
+    assert document.pageCount() == 1
+    size = document.pagePointSize(0)
+    assert size.width() * MILLIMETRES_PER_POINT == pytest.approx(210, abs=1)
+    assert size.height() * MILLIMETRES_PER_POINT == pytest.approx(297, abs=1)
+
+
+@pytest.mark.ui
+@pytest.mark.parametrize("line_count", [1, 6, 25])
+def test_challan_grows_to_more_pages_rather_than_clipping(
+    qapp: QApplication, line_count: int
+) -> None:
+    from dataclasses import replace as replace_fields
+
+    lines = tuple(
+        ReceiptLine(
+            product=f"PRODUCT {index} 80% WG 2-KG",
+            batch_number=f"AMPL-2025/SUL-{index:02d}",
+            quantity=16,
+            price=Decimal("900.00"),
+            discount=Decimal("0.00"),
+            total=Decimal("14400.00"),
+            cartons=2,
+            loose_packs=1,
+        )
+        for index in range(line_count)
+    )
+    payload = ReceiptGenerator().generate_a4(
+        replace_fields(_challan_receipt(), lines=lines), ShopProfile(name="AVENEX CROP SCIENCES")
+    )
+    document = PrinterService().load(write_temporary_pdf(payload, f"challan-{line_count}"))
+    assert document.pageCount() >= 1
+
+
+@pytest.mark.ui
+def test_receipt_carries_the_counter_columns_and_totals(qapp: QApplication) -> None:
+    """The roll receipt keeps money; the challan does not."""
+
+    shop = ShopProfile(name="RAO NOMAN", address="BAHAWALPUR", phone="0301-7428320")
+    receipt = _challan_receipt()
+    service = PrinterService()
+
+    roll = service.load(
+        write_temporary_pdf(
+            ReceiptGenerator().generate_thermal(receipt, shop, 80), "receipt-columns"
+        )
+    )
+    assert roll.pageCount() == 1
+    roll_text = roll.getAllText(0).text()
+    for wanted in ("Item Name", "Qty.", "Price", "Sub Total", "No of Items", "Grand Total"):
+        assert wanted in roll_text, f"the receipt should show {wanted!r}"
+    assert f"{receipt.total:,.2f}" in roll_text
+
+    # The delivery challan is a quantity document and carries no money.
+    challan = service.load(
+        write_temporary_pdf(ReceiptGenerator().generate_a4(receipt, shop), "challan-columns")
+    )
+    challan_text = challan.getAllText(0).text()
+    for wanted in (
+        "DELIVERY CHALLAN / INVOICE",
+        "PRODUCT",
+        "POLICY",
+        "BATCH NO.",
+        "CARTONS",
+        "Total:",
+        "Prepared By",
+        "Approved By",
+        receipt.customer_identity,
+        receipt.order_number,
+    ):
+        assert wanted in challan_text, f"the challan should show {wanted!r}"
+    for unwanted in ("Grand Total", "Sub Total", "Discount"):
+        assert unwanted not in challan_text, f"the challan should omit {unwanted!r}"
+
+
+@pytest.mark.ui
+def test_the_logo_prints_on_both_documents(qapp: QApplication, tmp_path: Path) -> None:
+    """A configured logo must appear on the challan and the receipt alike."""
+
+    from PySide6.QtCore import QSize
+    from PySide6.QtGui import QColor, QImage, QPainter
+
+    logo = tmp_path / "logo.png"
+    mark = QImage(200, 200, QImage.Format.Format_RGB32)
+    mark.fill(QColor("white"))
+    painter = QPainter(mark)
+    painter.fillRect(20, 20, 160, 160, QColor("black"))
+    painter.end()
+    assert mark.save(str(logo))
+
+    shop = ShopProfile(name="AVENEX CROP SCIENCES", address="BAHAWALPUR", logo_path=logo)
+    receipt = _challan_receipt()
+    generator = ReceiptGenerator()
+    service = PrinterService()
+
+    def ink_above(payload: bytes, name: str, band: float) -> int:
+        document = service.load(write_temporary_pdf(payload, name))
+        points = document.pagePointSize(0)
+        rendered = document.render(
+            0, QSize(round(points.width() / 72 * 100), round(points.height() / 72 * 100))
+        )
+        flattened = QImage(rendered.size(), QImage.Format.Format_RGB32)
+        flattened.fill(QColor("white"))
+        canvas = QPainter(flattened)
+        canvas.drawImage(0, 0, rendered)
+        canvas.end()
+        dark = 0
+        for y in range(int(flattened.height() * band)):
+            for x in range(flattened.width()):
+                if QColor(flattened.pixel(x, y)).value() < 100:
+                    dark += 1
+        return dark
+
+    for payload, name in (
+        (generator.generate_a4(receipt, shop), "logo-challan"),
+        (generator.generate_thermal(receipt, shop, 80), "logo-receipt"),
+    ):
+        with_logo = ink_above(payload, name, 0.18)
+        bare = ReceiptGenerator()
+        without = ink_above(
+            bare.generate_a4(receipt, replace(shop, logo_path=None))
+            if "challan" in name
+            else bare.generate_thermal(receipt, replace(shop, logo_path=None), 80),
+            f"{name}-bare",
+            0.18,
+        )
+        assert with_logo > without, f"{name} should print more ink once a logo is set"
+
+
+@pytest.mark.ui
+def test_a_missing_logo_is_skipped_and_logged(
+    qapp: QApplication, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A logo that no longer exists must not fail silently."""
+
+    shop = ShopProfile(name="AVENEX", logo_path=Path("/nowhere/at/all/logo.png"))
+    with caplog.at_level("WARNING", logger="app.printing.receipt_generator"):
+        payload = ReceiptGenerator().generate_thermal(_challan_receipt(), shop, 80)
+    assert payload.startswith(b"%PDF")
+    assert any("logo is configured but missing" in record.message for record in caplog.records)
+
+
+@pytest.mark.ui
+def test_receipt_shows_paid_and_balance_only_when_owed(qapp: QApplication) -> None:
+    """Paid and Balance share the summary table so the money column stays aligned."""
+
+    shop = ShopProfile(name="AVENEX")
+    service = PrinterService()
+    owing = _challan_receipt()
+    text = (
+        service.load(
+            write_temporary_pdf(ReceiptGenerator().generate_thermal(owing, shop, 80), "owing")
+        )
+        .getAllText(0)
+        .text()
+    )
+    assert "Paid :" in text and "Balance :" in text
+
+    settled = replace(owing, paid=owing.total, remaining=Decimal("0.00"))
+    settled_text = (
+        service.load(
+            write_temporary_pdf(ReceiptGenerator().generate_thermal(settled, shop, 80), "settled")
+        )
+        .getAllText(0)
+        .text()
+    )
+    assert "Balance :" not in settled_text
+    assert "Grand Total" in settled_text

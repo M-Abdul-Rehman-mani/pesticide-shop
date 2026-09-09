@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import tempfile
 from collections.abc import Mapping
@@ -97,3 +98,34 @@ def environment_file_candidates() -> tuple[Path, ...]:
     for candidate in (Path.cwd() / ".env", application_root() / ".env", bundle_root() / ".env"):
         seen.setdefault(candidate, None)
     return tuple(seen)
+
+
+def branding_directory() -> Path:
+    """Return the writable directory that holds the shop's own logo copy."""
+
+    return resolve_writable(Path("branding"))
+
+
+def store_shop_logo(source: Path) -> Path:
+    """Copy a chosen logo into application storage and return the stored path.
+
+    A logo picked from Downloads or a USB stick disappears from receipts the
+    moment that file is moved or the shop runs on another machine, so the image
+    is kept alongside the application's own data instead of being referenced in
+    place.
+    """
+
+    source = source.expanduser()
+    if not source.is_file():
+        raise FileNotFoundError(f"Logo image was not found: {source}")
+    directory = branding_directory()
+    directory.mkdir(parents=True, exist_ok=True)
+    destination = directory / f"shop-logo{source.suffix.lower() or '.png'}"
+    if destination.exists() and source.resolve() == destination.resolve():
+        return destination
+    # Only one stored logo is kept, whatever format the last one used.
+    for stale in directory.glob("shop-logo.*"):
+        if stale != destination:
+            stale.unlink(missing_ok=True)
+    shutil.copyfile(source, destination)
+    return destination

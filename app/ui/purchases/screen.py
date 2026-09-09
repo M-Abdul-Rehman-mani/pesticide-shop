@@ -50,8 +50,10 @@ from app.ui.widgets import (
     configure_date_edit,
     configure_searchable_combo,
     configure_table,
+    populate_enum_combo,
     populate_row_actions,
     record_count_text,
+    selected_enum,
     show_error,
     show_record_details,
     show_success,
@@ -569,8 +571,7 @@ class PurchasesScreen(QWidget):
         dialog.setWindowTitle(f"Pay supplier — {entry.number}")
         form = QFormLayout(dialog)
         method = QComboBox()
-        for candidate in PaymentMethod:
-            method.addItem(candidate.value.replace("_", " ").title(), candidate)
+        populate_enum_combo(method, PaymentMethod)
         amount = MoneyEdit(f"{entry.remaining:.2f}")
         reference = QLineEdit()
         buttons = QDialogButtonBox(
@@ -585,7 +586,7 @@ class PurchasesScreen(QWidget):
         form.addRow(buttons)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        selected_method = cast(PaymentMethod, method.currentData())
+        selected_method = selected_enum(method, PaymentMethod)
         payment_amount = amount.decimal_value("Payment")
         payment_reference = reference.text()
 

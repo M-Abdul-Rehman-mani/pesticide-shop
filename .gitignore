@@ -16,6 +16,8 @@ dist/
 logs/*.log*
 backups/*.sql*
 exports/*
+# The shop's own copy of its logo, written at runtime.
+branding/
 !logs/.gitkeep
 !backups/.gitkeep
 !exports/.gitkeep

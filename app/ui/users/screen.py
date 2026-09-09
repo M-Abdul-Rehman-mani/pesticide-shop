@@ -30,8 +30,10 @@ from app.security.permissions import Permission, has_permission
 from app.ui.widgets import (
     RowsTableModel,
     configure_table,
+    populate_enum_combo,
     populate_row_actions,
     record_count_text,
+    selected_enum,
     show_error,
     show_record_details,
     show_success,
@@ -51,9 +53,10 @@ class UserDialog(QDialog):
         self.password = QLineEdit()
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
         self.role = QComboBox()
-        for role in UserRole:
-            if role is not UserRole.OWNER or allow_owner:
-                self.role.addItem(role.value.replace("_", " ").title(), role)
+        populate_enum_combo(
+            self.role,
+            (role for role in UserRole if role is not UserRole.OWNER or allow_owner),
+        )
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
@@ -212,7 +215,7 @@ class UsersScreen(QWidget):
         full_name = dialog.full_name.text()
         email = dialog.email.text()
         password = dialog.password.text()
-        role = cast(UserRole, dialog.role.currentData())
+        role = selected_enum(dialog.role, UserRole)
 
         def operation() -> None:
             with self._session_factory.begin() as session:

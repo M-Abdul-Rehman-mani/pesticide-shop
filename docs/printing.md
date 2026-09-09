@@ -1,12 +1,36 @@
 # Printing and invoices
 
-Sales produce an A4 delivery challan/invoice and 58 mm or 80 mm thermal receipts. The A4 layout is
-based on the supplied Hanan Spray Center reference and includes recipient/dealer identity, address,
-territory, order number, policy, store, product, batch, quantity, cartons/packs, prices, totals,
-payment details, and signature areas.
+A sale produces two documents, each matching the form the shop already uses:
+
+**The A4 delivery challan** (`DELIVERY CHALLAN / INVOICE`) is the goods document that travels with
+the delivery. It carries the shop identity, invoice number and date, customer name, address, NIC/tax
+number, employee, territory, order number and store, then a line table of `PRODUCT`, `POLICY`,
+`BATCH NO.`, `QTY` and `CARTONS - PACKS`. Beneath an open area sit the boxed quantity and carton
+totals and the `Prepared By` / `Approved By` / `Dealer's Signature & Stamp` lines.
+
+It deliberately shows **no prices or amounts** — it records what was delivered, not what was
+charged, exactly like the pre-printed pad. Amounts belong on the customer's receipt.
+
+**The thermal receipt** is the priced counter document: shop name and address, invoice number,
+customer and date, then an `Item Name` / `Qty.` / `Price` / `Sub Total` table, and a summary block
+pairing `No of Items` and `Total Qty` on the left with `Total`, `Discount` and `Grand Total` on the
+right. When a balance is outstanding it also prints `Paid` and `Balance`.
 
 Set the shop name, owner, address, phone, email, registration/tax details, logo, currency, and
-footer under **Shop Settings**.
+footer under **Shop Settings**; they brand both documents.
+
+## The shop logo
+
+**Shop Settings > Logo > Choose…** copies the image into the application's own `branding` folder and
+stores that copy's path. Referencing the file where it was found means the logo silently disappears
+from every document once that file is moved, renamed, or the shop runs on another machine.
+
+The line under the field states whether the logo can actually be printed. If it reads that the image
+is missing, choose the file again. A configured logo that cannot be read is also recorded in
+`logs/application.log` rather than being skipped in silence.
+
+A thermal head prints pure black and white, so a colour or shaded logo comes out as a smudge. Supply
+a high-contrast, solid-black version for receipts to look crisp.
 
 ## Choosing the printer and paper
 

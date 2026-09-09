@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
+from enum import StrEnum
+from typing import TypeVar
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QPersistentModelIndex, Qt
 from PySide6.QtWidgets import (
@@ -196,6 +198,36 @@ def wrap_scroll(widget: QWidget) -> QScrollArea:
     scroll.setFrameShape(QFrame.Shape.NoFrame)
     scroll.setWidget(widget)
     return scroll
+
+
+_EnumT = TypeVar("_EnumT", bound=StrEnum)
+
+
+def populate_enum_combo(
+    combo: QComboBox,
+    members: Iterable[_EnumT],
+    *,
+    current: _EnumT | None = None,
+) -> None:
+    """Fill a combo with enum members, labelled for display.
+
+    The member's *value* is stored rather than the member itself: Qt keeps item
+    data as a variant, and a ``StrEnum`` round-trips through it as a plain string.
+    Pair this with :func:`selected_enum` to get the member back.
+    """
+
+    for member in members:
+        combo.addItem(member.value.replace("_", " ").title(), member.value)
+    if current is not None:
+        index = combo.findData(current.value)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+
+
+def selected_enum(combo: QComboBox, enum_type: type[_EnumT]) -> _EnumT:
+    """Return the chosen member, converting Qt's stored string back to the enum."""
+
+    return enum_type(str(combo.currentData()))
 
 
 def configure_searchable_combo(combo: QComboBox, placeholder: str) -> None:

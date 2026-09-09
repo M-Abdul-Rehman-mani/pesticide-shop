@@ -91,3 +91,48 @@ def test_environment_file_candidates_cover_cwd_and_the_executable_directory() ->
     assert Path.cwd() / ".env" in candidates
     assert paths.application_root() / ".env" in candidates
     assert len(set(candidates)) == len(candidates)
+
+
+def test_a_chosen_logo_is_copied_into_application_storage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A logo referenced where the operator found it disappears when that moves."""
+
+    storage = tmp_path / "appdata"
+    monkeypatch.setattr(paths, "resolve_writable", lambda relative: storage / relative)
+    source = tmp_path / "downloads" / "company-logo.PNG"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"\x89PNG\r\n\x1a\n fake image")
+
+    stored = paths.store_shop_logo(source)
+    assert stored == storage / "branding" / "shop-logo.png"
+    assert stored.read_bytes() == source.read_bytes()
+
+    # The receipt keeps printing after the original is deleted.
+    source.unlink()
+    assert stored.is_file()
+
+
+def test_storing_a_new_logo_replaces_the_previous_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    storage = tmp_path / "appdata"
+    monkeypatch.setattr(paths, "resolve_writable", lambda relative: storage / relative)
+    first = tmp_path / "one.png"
+    first.write_bytes(b"first")
+    second = tmp_path / "two.jpg"
+    second.write_bytes(b"second")
+
+    paths.store_shop_logo(first)
+    stored = paths.store_shop_logo(second)
+    assert stored.name == "shop-logo.jpg"
+    assert stored.read_bytes() == b"second"
+    assert sorted(path.name for path in stored.parent.glob("shop-logo.*")) == ["shop-logo.jpg"]
+
+    # Re-storing the stored file is a no-op rather than a self-copy.
+    assert paths.store_shop_logo(stored) == stored
+
+
+def test_storing_a_missing_logo_is_reported(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        paths.store_shop_logo(tmp_path / "absent.png")

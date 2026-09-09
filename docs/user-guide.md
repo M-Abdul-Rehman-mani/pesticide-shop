@@ -45,10 +45,14 @@ line or invoice discounts, tax, and one or more payments, then complete the sale
 
 The application locks the selected batches while saving, refuses overselling and dealer credit-limit
 violations, deducts the exact quantities, records the movement ledger and payment status, updates the
-dealer balance, and preserves the sale. Use **Save PDF** or **Print Preview** after completion. The A4
-delivery challan/invoice contains the shop identity, invoice/date, customer/dealer details, NIC/tax
-identity, order/territory/store/policy, product/batch/quantity/price lines, totals, payment balance,
-and prepared/approved/recipient signature areas.
+dealer balance, and preserves the sale.
+
+Two documents come out of a completed sale. **Save PDF** and **Print Preview** produce the A4
+delivery challan: shop identity, invoice and date, customer details and NIC/tax identity,
+order/territory/store, a product/policy/batch/quantity/cartons table, the boxed quantity totals, and
+the prepared/approved/dealer signature lines. It carries no prices — it is the goods document.
+**Print Invoice** produces the priced thermal receipt for the customer, with item, quantity, price
+and sub total columns and the grand total. See `docs/printing.md`.
 
 When the recipient has an email address, their PDF is queued automatically. If the owner email is
 configured, a separate owner copy is queued. Email failure never reverses a sale; inspect and retry

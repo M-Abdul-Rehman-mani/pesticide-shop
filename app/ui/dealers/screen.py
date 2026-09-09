@@ -49,8 +49,10 @@ from app.ui.forms import MoneyEdit
 from app.ui.widgets import (
     RowsTableModel,
     configure_table,
+    populate_enum_combo,
     populate_row_actions,
     record_count_text,
+    selected_enum,
     show_error,
     show_record_details,
     show_success,
@@ -150,8 +152,7 @@ class DealerPaymentDialog(QDialog):
         self.amount = MoneyEdit()
         self.amount.setPlaceholderText("0.00")
         self.method = QComboBox()
-        for candidate in PaymentMethod:
-            self.method.addItem(candidate.value.replace("_", " ").title(), candidate)
+        populate_enum_combo(self.method, PaymentMethod)
         self.reference = QLineEdit()
         self.reference.setPlaceholderText("Cheque number, transfer reference, receipt no.")
         self.notes = QTextEdit()
@@ -185,7 +186,7 @@ class DealerPaymentDialog(QDialog):
         self.accept()
 
     def payment_method(self) -> PaymentMethod:
-        return cast(PaymentMethod, self.method.currentData())
+        return selected_enum(self.method, PaymentMethod)
 
 
 class DealersScreen(QWidget):
