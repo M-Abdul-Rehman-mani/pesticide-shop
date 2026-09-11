@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
@@ -15,9 +16,11 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QTableView,
     QTabWidget,
@@ -29,6 +32,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config.settings import Settings
+from app.email.configuration import OWNER_EMAIL_SEPARATOR, parse_owner_emails
 from app.email.email_service import OutgoingEmail
 from app.email.smtp_client import SMTPConfig, SMTPEmailService
 from app.models.email_history import EmailHistory
@@ -55,6 +59,7 @@ from app.services.settings_service import SettingsService
 from app.tasks.email_tasks import send_email
 from app.ui.widgets import RowsTableModel, show_error
 from app.ui.workers import FunctionWorker, start_worker
+from app.utils.exceptions import ValidationError
 from app.utils.formatting import format_date
 
 
@@ -116,9 +121,18 @@ class SettingsScreen(QWidget):
         self.currency = QLineEdit(self._settings.app_currency)
         self.timezone = QLineEdit(self._settings.app_timezone)
         self.invoice_prefix = QLineEdit("INV")
+        self.return_prefix = QLineEdit("RET")
+        self.return_prefix.setToolTip("Numbers the credit note raised when goods come back")
         form.addRow("Currency", self.currency)
         form.addRow("Timezone", self.timezone)
         form.addRow("Invoice prefix", self.invoice_prefix)
+        form.addRow("Return prefix", self.return_prefix)
+        prefix_note = QLabel(
+            "Prefixes may be 1-12 letters, numbers, or hyphens. Changing one affects documents "
+            "issued from then on; those already issued keep their numbers."
+        )
+        prefix_note.setWordWrap(True)
+        form.addRow(prefix_note)
         self.tabs.addTab(tab, "General")
 
     def _build_email(self) -> None:
@@ -128,13 +142,13 @@ class SettingsScreen(QWidget):
         self.smtp_port.setRange(1, 65535)
         self.smtp_port.setValue(self._settings.smtp_port)
         self.smtp_username = QLineEdit(self._settings.smtp_username or "")
+        self.smtp_username.setPlaceholderText("The mailbox you sign in with, e.g. shop@gmail.com")
         self.smtp_password = QLineEdit()
         self.smtp_password.setEchoMode(QLineEdit.EchoMode.Password)
         self.smtp_password.setPlaceholderText("Leave blank to keep the saved password")
         self.smtp_tls = QCheckBox("Use STARTTLS")
         self.smtp_tls.setChecked(self._settings.smtp_use_tls)
         self.smtp_from = QLineEdit(self._settings.smtp_from_email or "")
-        self.owner_email = QLineEdit(self._settings.owner_email or "")
         test = QPushButton("Send Test Email")
         test.setProperty("secondary", True)
         test.clicked.connect(self._send_test_email)
@@ -144,9 +158,87 @@ class SettingsScreen(QWidget):
         form.addRow("Password", self.smtp_password)
         form.addRow("Security", self.smtp_tls)
         form.addRow("Sender email", self.smtp_from)
-        form.addRow("Owner email", self.owner_email)
+        form.addRow("Owner emails", self._build_owner_emails())
+        gmail_note = QLabel(
+            "Gmail: the username is the full address, and the password must be a 16-character "
+            "App Password generated with 2-Step Verification on — Google refuses account "
+            "passwords over SMTP. Host smtp.gmail.com, port 587, STARTTLS on."
+        )
+        gmail_note.setWordWrap(True)
+        form.addRow(gmail_note)
         form.addRow("", test)
         self.tabs.addTab(tab, "Email")
+
+    def _build_owner_emails(self) -> QWidget:
+        """A list of the people copied on every invoice, with add and remove."""
+
+        panel = QWidget()
+        # Without this the form stretches the row and strands the hint far below it.
+        panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        entry_row = QHBoxLayout()
+        self.owner_email_entry = QLineEdit()
+        self.owner_email_entry.setPlaceholderText("owner@example.com")
+        self.owner_email_entry.returnPressed.connect(self._add_owner_email)
+        add = QPushButton("Add")
+        add.setProperty("secondary", True)
+        add.clicked.connect(self._add_owner_email)
+        self.remove_owner_email = QPushButton("Remove")
+        self.remove_owner_email.setProperty("danger", True)
+        self.remove_owner_email.clicked.connect(self._remove_owner_email)
+        entry_row.addWidget(self.owner_email_entry, 1)
+        entry_row.addWidget(add)
+        entry_row.addWidget(self.remove_owner_email)
+        self.owner_emails = QListWidget()
+        self.owner_emails.setFixedHeight(96)
+        self.owner_emails.setAlternatingRowColors(True)
+        self.owner_emails.itemSelectionChanged.connect(self._owner_email_selection_changed)
+        hint = QLabel("Everyone listed gets a copy of every invoice and the daily report.")
+        hint.setObjectName("FieldHint")
+        hint.setWordWrap(True)
+        layout.addLayout(entry_row)
+        layout.addWidget(self.owner_emails)
+        layout.addWidget(hint)
+        self._set_owner_emails(parse_owner_emails(self._settings.owner_email))
+        return panel
+
+    def _set_owner_emails(self, addresses: Sequence[str]) -> None:
+        self.owner_emails.clear()
+        self.owner_emails.addItems(list(addresses))
+        self._owner_email_selection_changed()
+
+    def _owner_email_addresses(self) -> tuple[str, ...]:
+        return tuple(
+            item.text()
+            for index in range(self.owner_emails.count())
+            if (item := self.owner_emails.item(index)) is not None
+        )
+
+    def _owner_email_selection_changed(self) -> None:
+        self.remove_owner_email.setEnabled(bool(self.owner_emails.selectedItems()))
+
+    def _add_owner_email(self) -> None:
+        typed = self.owner_email_entry.text().strip()
+        if not typed:
+            return
+        addresses = parse_owner_emails(typed)
+        if not addresses:
+            show_error(self, ValidationError(f"{typed} is not a valid email address."))
+            return
+        existing = {address.lower() for address in self._owner_email_addresses()}
+        added = [address for address in addresses if address.lower() not in existing]
+        if not added:
+            show_error(self, ValidationError("That address is already on the list."))
+            return
+        self.owner_emails.addItems(added)
+        self.owner_email_entry.clear()
+
+    def _remove_owner_email(self) -> None:
+        for item in self.owner_emails.selectedItems():
+            self.owner_emails.takeItem(self.owner_emails.row(item))
+        self._owner_email_selection_changed()
 
     def _build_printer(self) -> None:
         tab, form = self._tab_form()
@@ -377,6 +469,7 @@ class SettingsScreen(QWidget):
             (SettingCategory.GENERAL, "currency"),
             (SettingCategory.GENERAL, "timezone"),
             (SettingCategory.GENERAL, "invoice_prefix"),
+            (SettingCategory.GENERAL, "return_prefix"),
             (SettingCategory.EMAIL, "smtp_host"),
             (SettingCategory.EMAIL, "smtp_port"),
             (SettingCategory.EMAIL, "smtp_username"),
@@ -410,10 +503,10 @@ class SettingsScreen(QWidget):
             ((SettingCategory.GENERAL, "currency"), self.currency),
             ((SettingCategory.GENERAL, "timezone"), self.timezone),
             ((SettingCategory.GENERAL, "invoice_prefix"), self.invoice_prefix),
+            ((SettingCategory.GENERAL, "return_prefix"), self.return_prefix),
             ((SettingCategory.EMAIL, "smtp_host"), self.smtp_host),
             ((SettingCategory.EMAIL, "smtp_username"), self.smtp_username),
             ((SettingCategory.EMAIL, "smtp_from_email"), self.smtp_from),
-            ((SettingCategory.EMAIL, "owner_email"), self.owner_email),
         )
         for key, widget in mappings:
             if data.get(key) is not None:
@@ -424,6 +517,8 @@ class SettingsScreen(QWidget):
             self.smtp_port.setValue(int(port))
         if tls := data.get((SettingCategory.EMAIL, "smtp_use_tls")):
             self.smtp_tls.setChecked(tls.lower() == "true")
+        if (owners := data.get((SettingCategory.EMAIL, "owner_email"))) is not None:
+            self._set_owner_emails(parse_owner_emails(owners))
         if directory := data.get((SettingCategory.BACKUP, "directory")):
             self.backup_directory.setText(directory)
         if retention := data.get((SettingCategory.BACKUP, "retention_days")):
@@ -453,12 +548,18 @@ class SettingsScreen(QWidget):
             (SettingCategory.GENERAL, "currency", self.currency.text(), False),
             (SettingCategory.GENERAL, "timezone", self.timezone.text(), False),
             (SettingCategory.GENERAL, "invoice_prefix", self.invoice_prefix.text(), False),
+            (SettingCategory.GENERAL, "return_prefix", self.return_prefix.text(), False),
             (SettingCategory.EMAIL, "smtp_host", self.smtp_host.text(), False),
             (SettingCategory.EMAIL, "smtp_port", str(self.smtp_port.value()), False),
             (SettingCategory.EMAIL, "smtp_username", self.smtp_username.text(), False),
             (SettingCategory.EMAIL, "smtp_use_tls", str(self.smtp_tls.isChecked()).lower(), False),
             (SettingCategory.EMAIL, "smtp_from_email", self.smtp_from.text(), False),
-            (SettingCategory.EMAIL, "owner_email", self.owner_email.text(), False),
+            (
+                SettingCategory.EMAIL,
+                "owner_email",
+                OWNER_EMAIL_SEPARATOR.join(self._owner_email_addresses()),
+                False,
+            ),
             (SettingCategory.PRINTER, "default_printer", self.printer.currentData(), False),
             (SettingCategory.PRINTER, "receipt_width", self.receipt_width.currentData(), False),
             (SettingCategory.PRINTER, "print_width", str(self.print_width.value()), False),
@@ -501,7 +602,7 @@ class SettingsScreen(QWidget):
 
     def _send_test_email(self) -> None:
         entered_password = self.smtp_password.text()
-        recipient = self.owner_email.text()
+        recipient = next(iter(self._owner_email_addresses()), "")
         host = self.smtp_host.text()
         port = self.smtp_port.value()
         from_email = self.smtp_from.text()

@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from app.config.settings import get_settings
 from app.database.session import SessionFactory
+from app.email.configuration import parse_owner_emails
 from app.models.email_history import EmailHistory
 from app.models.enums import EmailStatus, SettingCategory
 from app.reports.pdf_exporter import PDFReportExporter
@@ -29,8 +30,10 @@ def generate_daily_owner_report(report_date: str | None = None) -> str | None:
     period = DateRange.local_days(selected_date, selected_date, settings.app_timezone)
     with SessionFactory.begin() as session:
         stored = SettingsService(session, settings.app_secret_key.get_secret_value())
-        owner_email = stored.get(SettingCategory.EMAIL, "owner_email", settings.owner_email)
-        if not owner_email:
+        owner_emails = parse_owner_emails(
+            stored.get(SettingCategory.EMAIL, "owner_email", settings.owner_email)
+        )
+        if not owner_emails:
             return None
         shop_name = stored.get(SettingCategory.SHOP, "name", "Pesticide Shop") or "Pesticide Shop"
         currency = (
@@ -77,20 +80,25 @@ def generate_daily_owner_report(report_date: str | None = None) -> str | None:
             landscape_page=False,
         )
         report_id = uuid.uuid5(uuid.NAMESPACE_URL, f"pesticide-shop-daily-report:{selected_date}")
-        history = EmailHistory(
-            recipient=owner_email,
-            subject=f"Daily Shop Report - {selected_date:%d-%b-%Y}",
-            template="daily_owner_report",
-            entity_type="DailyReport",
-            entity_id=report_id,
-            status=EmailStatus.PENDING,
-            attempts=0,
-            body_text=f"Attached is the {shop_name} daily report for {selected_date:%d-%b-%Y}.",
-            attachment_name=f"daily-report-{selected_date.isoformat()}.pdf",
-            attachment_data=payload,
-        )
-        session.add(history)
+        messages = [
+            EmailHistory(
+                recipient=owner_email,
+                subject=f"Daily Shop Report - {selected_date:%d-%b-%Y}",
+                template="daily_owner_report",
+                entity_type="DailyReport",
+                entity_id=report_id,
+                status=EmailStatus.PENDING,
+                attempts=0,
+                body_text=f"Attached is the {shop_name} daily report for {selected_date:%d-%b-%Y}.",
+                attachment_name=f"daily-report-{selected_date.isoformat()}.pdf",
+                attachment_data=payload,
+            )
+            for owner_email in owner_emails
+        ]
+        session.add_all(messages)
         session.flush()
-        email_id = str(history.id)
-    send_email.delay(email_id)
-    return email_id
+        email_ids = [str(message.id) for message in messages]
+    for email_id in email_ids:
+        send_email.delay(email_id)
+    # The first id identifies the run; every owner gets the same report.
+    return email_ids[0]

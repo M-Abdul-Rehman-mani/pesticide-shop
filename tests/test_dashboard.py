@@ -474,3 +474,42 @@ def test_the_dashboard_loads_a_party_tab_when_it_is_opened(
     assert (screen.customers.loaded, screen.dealers.loaded) == (False, True), (
         "only the side that was opened should be queried"
     )
+
+
+def test_the_ranking_agrees_with_the_metric_card_above_it(
+    db_session: Session,
+    owner: AuthenticatedUser,
+    supplier: Supplier,
+    product: Product,
+    customer: Customer,
+) -> None:
+    """A multi-line invoice must not be counted once per line.
+
+    Summing invoice totals across a join to the lines multiplied the revenue by the
+    line count: a three-line 900 invoice ranked the customer at 2,700 while the card
+    directly above it said 900.
+    """
+
+    batches = [
+        _stock(db_session, owner, supplier, product, batch_number=f"RANK-{index}")
+        for index in range(3)
+    ]
+    PesticideSaleService(db_session).create(
+        CreatePesticideSaleCommand(
+            lines=tuple(PesticideSaleLineInput(batch.id, 2) for batch in batches),
+            payments=(),
+            customer_id=customer.id,
+        ),
+        owner,
+    )
+    db_session.flush()
+
+    reports = ReportService(db_session)
+    period = DateRange.today(TIMEZONE)
+    card = reports.customer_dashboard(period)
+    rows = reports.top_customers(period)
+
+    assert len(rows) == 1
+    assert rows[0].sales == card.sales == Decimal("900.00")
+    assert rows[0].invoices == card.invoices == 1
+    assert rows[0].units == 6, "units still add up across the lines"

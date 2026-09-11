@@ -104,7 +104,9 @@ class SaleReturnService:
         the credit either reduces what is still owed or is refunded in cash.
         """
 
-        require_permission(actor.role, Permission.CREATE_SALE)
+        # Taking goods back hands money or credit out again, so it carries the same
+        # authority as voiding a sale rather than the authority to make one.
+        require_permission(actor.role, Permission.RECORD_RETURN)
         if not reason.strip():
             raise ValidationError("A reason is required to record a return.")
         if not lines:
@@ -246,6 +248,7 @@ class SaleReturnService:
                 Payment(
                     sale_id=sale.id,
                     dealer_id=sale.dealer_id,
+                    sale_return_id=document.id,
                     method=method,
                     direction=PaymentDirection.INCOMING,
                     amount=against_balance,
@@ -265,6 +268,7 @@ class SaleReturnService:
                 Payment(
                     sale_id=sale.id,
                     dealer_id=sale.dealer_id,
+                    sale_return_id=document.id,
                     method=method,
                     direction=PaymentDirection.OUTGOING,
                     amount=refundable,

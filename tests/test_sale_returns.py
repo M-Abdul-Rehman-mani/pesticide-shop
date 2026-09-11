@@ -520,3 +520,195 @@ def test_sale_returns_tab_lists_recorded_credit_notes(
     # Opening the invoice from a credit note has to land on the sales list.
     screen._open_returned_invoice(0)
     assert screen.sales_search.text() == sale.invoice_number
+
+
+def test_moving_an_invoice_between_dealers_moves_the_balance_with_it(
+    db_session: Session, owner: AuthenticatedUser, supplier: Supplier, product: Product
+) -> None:
+    """Re-addressing an invoice left the old dealer charged and the new one at zero."""
+
+    first = DealerService(db_session).create(
+        actor=owner, name="Dealer A", phone="03001110000", credit_limit=Decimal("100000.00")
+    )
+    second = DealerService(db_session).create(
+        actor=owner, name="Dealer B", phone="03002220000", credit_limit=Decimal("100000.00")
+    )
+    db_session.flush()
+    batch = _batch(db_session, owner, supplier, product, batch_number="MOVE-1")
+    service = PesticideSaleService(db_session)
+    sale = _sale(db_session, owner, batch, quantity=10, dealer=first)
+    assert first.balance == Decimal("1500.00")
+
+    service.amend(
+        sale.id,
+        CreatePesticideSaleCommand(
+            lines=(PesticideSaleLineInput(batch.id, 10),), payments=(), dealer_id=second.id
+        ),
+        owner,
+    )
+    db_session.flush()
+    assert (first.balance, second.balance) == (Decimal("0.00"), Decimal("1500.00"))
+
+    # Moving it on to a retail customer clears the dealer account entirely.
+    customer = Customer(name="Retail Buyer", phone="03004440000")
+    db_session.add(customer)
+    db_session.flush()
+    service.amend(
+        sale.id,
+        CreatePesticideSaleCommand(
+            lines=(PesticideSaleLineInput(batch.id, 10),), payments=(), customer_id=customer.id
+        ),
+        owner,
+    )
+    db_session.flush()
+    assert (first.balance, second.balance) == (Decimal("0.00"), Decimal("0.00"))
+
+    # And bringing it back to a dealer charges the whole invoice, not the difference.
+    service.amend(
+        sale.id,
+        CreatePesticideSaleCommand(
+            lines=(PesticideSaleLineInput(batch.id, 10),), payments=(), dealer_id=first.id
+        ),
+        owner,
+    )
+    db_session.flush()
+    assert (first.balance, second.balance) == (Decimal("1500.00"), Decimal("0.00"))
+
+
+def test_amending_onto_a_new_dealer_checks_their_whole_credit_limit(
+    db_session: Session, owner: AuthenticatedUser, supplier: Supplier, product: Product
+) -> None:
+    """The receiving dealer takes the full invoice against their limit."""
+
+    first = DealerService(db_session).create(
+        actor=owner, name="Roomy Dealer", phone="03001110001", credit_limit=Decimal("100000.00")
+    )
+    tight = DealerService(db_session).create(
+        actor=owner, name="Tight Dealer", phone="03002220001", credit_limit=Decimal("1000.00")
+    )
+    db_session.flush()
+    batch = _batch(db_session, owner, supplier, product, batch_number="LIMIT-1")
+    sale = _sale(db_session, owner, batch, quantity=10, dealer=first)
+
+    with pytest.raises(ConflictError, match="credit limit"):
+        PesticideSaleService(db_session).amend(
+            sale.id,
+            CreatePesticideSaleCommand(
+                lines=(PesticideSaleLineInput(batch.id, 10),), payments=(), dealer_id=tight.id
+            ),
+            owner,
+        )
+    assert (first.balance, tight.balance) == (Decimal("1500.00"), Decimal("0.00"))
+
+
+def test_a_return_credit_cannot_be_reversed_as_if_it_were_a_payment(
+    db_session: Session, owner: AuthenticatedUser, supplier: Supplier, product: Product
+) -> None:
+    """Reversing it would re-charge the dealer for goods that are back on the shelf."""
+
+    from app.services.dealer_account_service import DealerAccountService
+
+    dealer = _dealer(db_session, owner)
+    batch = _batch(db_session, owner, supplier, product, batch_number="NOREV-1")
+    sale = _sale(db_session, owner, batch, quantity=10, dealer=dealer)
+    item = db_session.scalars(select(SaleItem).where(SaleItem.sale_id == sale.id)).one()
+    document = SaleReturnService(db_session).record(
+        sale.id, (ReturnLineInput(item.id, 10),), owner, reason="All returned"
+    )
+    db_session.flush()
+    assert dealer.balance == Decimal("0.00")
+
+    credit = db_session.scalars(
+        select(Payment).where(
+            Payment.sale_id == sale.id, Payment.direction == PaymentDirection.INCOMING
+        )
+    ).one()
+    assert credit.sale_return_id == document.id
+    assert credit.is_return_credit is True
+
+    with pytest.raises(ConflictError, match="returned goods"):
+        DealerAccountService(db_session).reverse_payment(credit.id, actor=owner, reason="mistake")
+    assert dealer.balance == Decimal("0.00"), "returned goods are never re-charged"
+    assert batch.quantity_available == 50
+
+
+def test_a_refund_paid_out_with_a_return_is_not_read_as_a_reversal(
+    db_session: Session, owner: AuthenticatedUser, supplier: Supplier, product: Product
+) -> None:
+    """A paid invoice refunds cash; that refund must not hide a real payment."""
+
+    from app.services.dealer_account_service import DealerAccountService
+
+    dealer = _dealer(db_session, owner)
+    batch = _batch(db_session, owner, supplier, product, batch_number="REFUND-1")
+    sale = _sale(db_session, owner, batch, quantity=10, dealer=dealer, paid=Decimal("1500.00"))
+    item = db_session.scalars(select(SaleItem).where(SaleItem.sale_id == sale.id)).one()
+    SaleReturnService(db_session).record(
+        sale.id, (ReturnLineInput(item.id, 10),), owner, reason="All returned"
+    )
+    db_session.flush()
+
+    payment = db_session.scalars(
+        select(Payment).where(
+            Payment.sale_id == sale.id,
+            Payment.direction == PaymentDirection.INCOMING,
+            Payment.sale_return_id.is_(None),
+        )
+    ).one()
+    # The original payment is still reversible: the refund beside it is not a reversal.
+    reversal = DealerAccountService(db_session).reverse_payment(
+        payment.id, actor=owner, reason="Cheque bounced"
+    )
+    db_session.flush()
+    assert reversal.direction is PaymentDirection.OUTGOING
+    assert reversal.amount == Decimal("1500.00")
+
+
+def test_a_salesperson_cannot_record_a_return(
+    db_session: Session,
+    owner: AuthenticatedUser,
+    owner_model: object,
+    supplier: Supplier,
+    product: Product,
+) -> None:
+    """A return hands money back, so it needs the same authority as a void."""
+
+    from dataclasses import replace as dataclass_replace
+
+    from app.models.enums import UserRole
+    from app.utils.exceptions import PermissionDeniedError
+
+    batch = _batch(db_session, owner, supplier, product, batch_number="PERM-1")
+    sale = _sale(db_session, owner, batch, quantity=4)
+    item = db_session.scalars(select(SaleItem).where(SaleItem.sale_id == sale.id)).one()
+    salesperson = dataclass_replace(owner, role=UserRole.SALESPERSON)
+
+    with pytest.raises(PermissionDeniedError):
+        SaleReturnService(db_session).record(
+            sale.id, (ReturnLineInput(item.id, 1),), salesperson, reason="Wrong pack"
+        )
+    assert batch.quantity_available == 46, "nothing goes back on the shelf"
+
+
+def test_a_dealer_statement_names_a_return_credit_for_what_it_is(
+    db_session: Session, owner: AuthenticatedUser, supplier: Supplier, product: Product
+) -> None:
+    """On the ledger a return must read as goods coming back, not as cash received."""
+
+    from app.services.dealer_account_service import DealerAccountService
+
+    dealer = _dealer(db_session, owner)
+    batch = _batch(db_session, owner, supplier, product, batch_number="STMT-1")
+    sale = _sale(db_session, owner, batch, quantity=10, dealer=dealer)
+    item = db_session.scalars(select(SaleItem).where(SaleItem.sale_id == sale.id)).one()
+    SaleReturnService(db_session).record(
+        sale.id, (ReturnLineInput(item.id, 4),), owner, reason="Leaking pack"
+    )
+    db_session.flush()
+
+    statement = DealerAccountService(db_session).statement(dealer.id)
+    credit = next(entry for entry in statement.entries if entry.reference.startswith("RET-"))
+    assert credit.detail == f"Goods returned against {sale.invoice_number}"
+    assert credit.credit == Decimal("600.00")
+    # The ledger and the account agree on what is left owed.
+    assert statement.outstanding == dealer.balance == Decimal("900.00")

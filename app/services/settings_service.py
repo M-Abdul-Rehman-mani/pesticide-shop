@@ -106,10 +106,26 @@ class SettingsService:
                     "Document prefixes may contain 1-12 letters, numbers, or hyphens."
                 )
             return prefix
+        if (category, key) == (SettingCategory.EMAIL, "smtp_username") and cleaned:
+            # Nobody's SMTP username contains a space. A shop name typed here is the
+            # usual mistake, and the provider only reports it as a bad password.
+            if any(character.isspace() for character in cleaned):
+                raise ValidationError(
+                    "The SMTP username is the mailbox you sign in with, usually the full "
+                    "email address such as shop@gmail.com. It cannot contain spaces."
+                )
+            return cleaned
+        if (category, key) == (SettingCategory.EMAIL, "owner_email"):
+            # Several people can be copied on every invoice, so this one holds a list.
+            from app.email.configuration import OWNER_EMAIL_SEPARATOR, parse_owner_emails
+
+            addresses = parse_owner_emails(cleaned)
+            if cleaned and not addresses:
+                raise ValidationError("Enter one or more valid email addresses.")
+            return OWNER_EMAIL_SEPARATOR.join(addresses)
         if category in {SettingCategory.SHOP, SettingCategory.EMAIL} and key in {
             "email",
             "billing_email",
-            "owner_email",
             "smtp_from_email",
         }:
             return normalize_email(cleaned) or ""

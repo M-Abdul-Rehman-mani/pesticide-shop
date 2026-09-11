@@ -234,6 +234,14 @@ def test_a_reissued_invoice_is_stamped_duplicate(
     roll = build_sale_document(factory, settings, sale.id, thermal=True)
     assert "DUPLICATE" in text_of(roll.payload, "copy-roll")
 
+    # The copy is claimed by the database, so the count cannot be lost between a
+    # read and a write when two counters print the same invoice at once.
+    db_session.refresh(sale)
+    assert sale.print_count == 2
+    from app.printing.invoice_documents import _claim_copy
+
+    assert [_claim_copy(factory, sale.id) for _ in range(3)] == [3, 4, 5]
+
 
 @pytest.mark.ui
 def test_the_emailed_copy_carries_amounts(qapp: object) -> None:

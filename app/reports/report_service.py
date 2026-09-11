@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.sql import Subquery
 
 from app.models.customer import Customer
 from app.models.dealer import Dealer
@@ -685,19 +686,35 @@ class ReportService:
             average_sale=(sales / invoices) if invoices else Decimal("0.00"),
         )
 
+    @staticmethod
+    def _units_per_sale() -> Subquery:
+        """Units per invoice, aggregated before any join.
+
+        Summing an invoice total across a join to its lines multiplies that total by
+        the number of lines -- a three-line 900 invoice ranked as 2,700. Rolling the
+        lines up first keeps one row per sale, so the totals stay the totals.
+        """
+
+        return (
+            select(SaleItem.sale_id.label("sale_id"), func.sum(SaleItem.quantity).label("units"))
+            .group_by(SaleItem.sale_id)
+            .subquery()
+        )
+
     def top_customers(self, period: DateRange, *, limit: int = 25) -> list[PartyRow]:
         """Rank customers by what they bought in the period."""
 
+        units = self._units_per_sale()
         rows = self._session.execute(
             select(
                 Customer,
-                func.count(func.distinct(Sale.id)),
-                func.coalesce(func.sum(SaleItem.quantity), 0),
+                func.count(Sale.id),
+                func.coalesce(func.sum(units.c.units), 0),
                 func.coalesce(func.sum(Sale.total), Decimal("0.00")),
                 func.max(Sale.sale_date),
             )
             .join(Sale, Sale.customer_id == Customer.id)
-            .outerjoin(SaleItem, SaleItem.sale_id == Sale.id)
+            .outerjoin(units, units.c.sale_id == Sale.id)
             .where(
                 Sale.status == SaleStatus.COMPLETED,
                 Sale.sale_date >= period.start,
@@ -706,33 +723,35 @@ class ReportService:
             .group_by(Customer.id)
             .order_by(func.coalesce(func.sum(Sale.total), Decimal("0.00")).desc())
             .limit(limit)
-        )
+        ).all()
+        outstanding = self._customer_outstanding([customer.id for customer, *_rest in rows])
         return [
             PartyRow(
                 name=customer.name,
                 contact=customer.phone or "",
                 invoices=int(invoices or 0),
-                units=int(units or 0),
+                units=int(units_sold or 0),
                 sales=Decimal(sales or 0),
-                outstanding=self._customer_outstanding(customer.id),
+                outstanding=outstanding.get(customer.id, Decimal("0.00")),
                 last_sold=last_sold,
             )
-            for customer, invoices, units, sales, last_sold in rows
+            for customer, invoices, units_sold, sales, last_sold in rows
         ]
 
     def top_dealers(self, period: DateRange, *, limit: int = 25) -> list[PartyRow]:
         """Rank dealers by what they bought, alongside what they still owe."""
 
+        units = self._units_per_sale()
         rows = self._session.execute(
             select(
                 Dealer,
-                func.count(func.distinct(Sale.id)),
-                func.coalesce(func.sum(SaleItem.quantity), 0),
+                func.count(Sale.id),
+                func.coalesce(func.sum(units.c.units), 0),
                 func.coalesce(func.sum(Sale.total), Decimal("0.00")),
                 func.max(Sale.sale_date),
             )
             .join(Sale, Sale.dealer_id == Dealer.id)
-            .outerjoin(SaleItem, SaleItem.sale_id == Sale.id)
+            .outerjoin(units, units.c.sale_id == Sale.id)
             .where(
                 Sale.status == SaleStatus.COMPLETED,
                 Sale.sale_date >= period.start,
@@ -747,20 +766,28 @@ class ReportService:
                 name=dealer.display_name,
                 contact=dealer.phone or "",
                 invoices=int(invoices or 0),
-                units=int(units or 0),
+                units=int(units_sold or 0),
                 sales=Decimal(sales or 0),
                 outstanding=dealer.balance,
                 last_sold=last_sold,
             )
-            for dealer, invoices, units, sales, last_sold in rows
+            for dealer, invoices, units_sold, sales, last_sold in rows
         ]
 
-    def _customer_outstanding(self, customer_id: uuid.UUID) -> Decimal:
-        value = self._session.scalar(
-            select(func.coalesce(func.sum(Sale.remaining_amount), Decimal("0.00"))).where(
-                Sale.customer_id == customer_id,
+    def _customer_outstanding(self, customer_ids: list[uuid.UUID]) -> dict[uuid.UUID, Decimal]:
+        """Total unpaid invoice value per customer, in one query for the whole list."""
+
+        if not customer_ids:
+            return {}
+        rows = self._session.execute(
+            select(
+                Sale.customer_id, func.coalesce(func.sum(Sale.remaining_amount), Decimal("0.00"))
+            )
+            .where(
+                Sale.customer_id.in_(customer_ids),
                 Sale.status == SaleStatus.COMPLETED,
                 Sale.remaining_amount > 0,
             )
+            .group_by(Sale.customer_id)
         )
-        return Decimal(value or 0)
+        return {customer_id: Decimal(total or 0) for customer_id, total in rows}

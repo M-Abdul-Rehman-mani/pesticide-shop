@@ -94,7 +94,7 @@ def test_batch_purchase_and_dealer_sale_are_atomic(
         ),
         owner,
         shop_name="Avenex Crop Sciences",
-        owner_email="owner@example.invalid",
+        owner_emails=("owner@example.invalid", "partner@example.invalid"),
     )
     db_session.flush()
 
@@ -120,7 +120,11 @@ def test_batch_purchase_and_dealer_sale_are_atomic(
     recipients = set(
         db_session.scalars(select(EmailHistory.recipient).where(EmailHistory.entity_id == sale.id))
     )
-    assert recipients == {"hanan@example.invalid", "owner@example.invalid"}
+    assert recipients == {
+        "hanan@example.invalid",
+        "owner@example.invalid",
+        "partner@example.invalid",
+    }, "every owner address gets its own copy"
 
     payload = ReceiptGenerator().generate_a4(
         SaleReceiptData.from_sale(sale, "CASH"),

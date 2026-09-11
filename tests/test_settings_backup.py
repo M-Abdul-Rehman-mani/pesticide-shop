@@ -281,3 +281,135 @@ def test_a_second_data_export_of_the_same_span_keeps_the_first(
     assert second.workbook.name.endswith("_2.xlsx")
     # Both halves of one export share a name, so a folder stays readable.
     assert second.csv_archive.name == second.workbook.name.replace(".xlsx", ".csv.zip")
+
+
+def test_the_return_prefix_is_configurable_and_numbers_the_credit_note(
+    db_session: Session, owner: AuthenticatedUser
+) -> None:
+    """The prefix was validated but had nowhere to be set; it is on General now."""
+
+    from app.services.document_service import DocumentNumberService
+
+    settings = get_settings()
+    service = SettingsService(db_session, settings.app_secret_key.get_secret_value())
+    stored = service.set(
+        actor=owner, category=SettingCategory.GENERAL, key="return_prefix", value="cn"
+    )
+    db_session.flush()
+    assert stored.value == "CN", "prefixes are normalised to upper case"
+    assert service.get(SettingCategory.GENERAL, "return_prefix") == "CN"
+
+    with pytest.raises(ValidationError):
+        service.set(
+            actor=owner,
+            category=SettingCategory.GENERAL,
+            key="return_prefix",
+            value="far too long a prefix",
+        )
+
+    number = DocumentNumberService(db_session).next_number(
+        "sale_return",
+        service.get(SettingCategory.GENERAL, "return_prefix") or "RET",
+        datetime.now(),
+    )
+    assert number.startswith("CN-")
+
+
+@pytest.mark.ui
+def test_the_settings_screen_round_trips_both_document_prefixes(
+    qtbot: object, database_engine: object, owner: AuthenticatedUser
+) -> None:
+    from sqlalchemy.orm import sessionmaker
+
+    from app.ui.settings.screen import SettingsScreen
+
+    factory = sessionmaker[Session](bind=database_engine, expire_on_commit=False, autoflush=False)  # type: ignore[arg-type]
+    screen = SettingsScreen(factory, owner, get_settings())
+    qtbot.addWidget(screen)  # type: ignore[attr-defined]
+    assert screen.invoice_prefix.text() == "INV"
+    assert screen.return_prefix.text() == "RET"
+
+
+def test_a_shop_name_is_refused_as_an_smtp_username(
+    db_session: Session, owner: AuthenticatedUser
+) -> None:
+    """Gmail reports this only as a bad password, so it is caught at entry instead."""
+
+    settings = get_settings()
+    service = SettingsService(db_session, settings.app_secret_key.get_secret_value())
+
+    with pytest.raises(ValidationError, match="cannot contain spaces"):
+        service.set(
+            actor=owner,
+            category=SettingCategory.EMAIL,
+            key="smtp_username",
+            value="Khan Zari Services",
+        )
+
+    stored = service.set(
+        actor=owner,
+        category=SettingCategory.EMAIL,
+        key="smtp_username",
+        value="  shop@gmail.com  ",
+    )
+    db_session.flush()
+    assert stored.value == "shop@gmail.com", "surrounding whitespace is trimmed, not rejected"
+
+
+def test_owner_emails_are_stored_as_a_list(db_session: Session, owner: AuthenticatedUser) -> None:
+    """Several people are copied on every invoice, so the one key holds a list."""
+
+    from app.email.configuration import load_owner_emails, parse_owner_emails
+
+    settings = get_settings()
+    service = SettingsService(db_session, settings.app_secret_key.get_secret_value())
+    stored = service.set(
+        actor=owner,
+        category=SettingCategory.EMAIL,
+        key="owner_email",
+        value="Owner@Shop.com, partner@shop.com; owner@shop.com",
+    )
+    db_session.flush()
+    assert stored.value == "owner@shop.com, partner@shop.com", "duplicates are dropped"
+    assert load_owner_emails(db_session, settings) == ("owner@shop.com", "partner@shop.com")
+
+    # A shop that set one address before this was a list keeps working untouched.
+    assert parse_owner_emails("solo@shop.com") == ("solo@shop.com",)
+
+    with pytest.raises(ValidationError, match="valid email"):
+        service.set(
+            actor=owner, category=SettingCategory.EMAIL, key="owner_email", value="not-an-email"
+        )
+
+    # Clearing the list is allowed; nobody is copied.
+    cleared = service.set(actor=owner, category=SettingCategory.EMAIL, key="owner_email", value="")
+    db_session.flush()
+    assert cleared.value == ""
+    assert load_owner_emails(db_session, settings) == ()
+
+
+@pytest.mark.ui
+def test_the_settings_screen_adds_and_removes_owner_emails(
+    qtbot: object, database_engine: object, owner: AuthenticatedUser
+) -> None:
+    from sqlalchemy.orm import sessionmaker
+
+    from app.ui.settings.screen import SettingsScreen
+
+    factory = sessionmaker[Session](bind=database_engine, expire_on_commit=False, autoflush=False)  # type: ignore[arg-type]
+    screen = SettingsScreen(factory, owner, get_settings())
+    qtbot.addWidget(screen)  # type: ignore[attr-defined]
+    assert screen._owner_email_addresses() == ()
+    assert screen.remove_owner_email.isEnabled() is False
+
+    screen.owner_email_entry.setText("  Owner@Shop.com ")
+    screen._add_owner_email()
+    screen.owner_email_entry.setText("partner@shop.com")
+    screen._add_owner_email()
+    assert screen._owner_email_addresses() == ("owner@shop.com", "partner@shop.com")
+    assert screen.owner_email_entry.text() == "", "the box clears ready for the next one"
+
+    screen.owner_emails.setCurrentRow(0)
+    assert screen.remove_owner_email.isEnabled() is True
+    screen._remove_owner_email()
+    assert screen._owner_email_addresses() == ("partner@shop.com",)

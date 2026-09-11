@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from app.models.dealer import Dealer
     from app.models.purchase import Purchase
     from app.models.sale import Sale
+    from app.models.sale_return import SaleReturn
     from app.models.user import User
 
 
@@ -36,6 +37,7 @@ class Payment(UUIDPrimaryKeyMixin, Base):
         Index("ix_payments_sale", "sale_id"),
         Index("ix_payments_purchase", "purchase_id"),
         Index("ix_payments_dealer_created", "dealer_id", "created_at"),
+        Index("ix_payments_sale_return", "sale_return_id"),
     )
 
     sale_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -48,6 +50,11 @@ class Payment(UUIDPrimaryKeyMixin, Base):
     #: allocations that settle that dealer's individual invoices.
     dealer_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("dealers.id", ondelete="RESTRICT")
+    )
+    #: Set on the credit and the refund a sale return raises. These are not money
+    #: the shop received, so they can never be reversed as if they were.
+    sale_return_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sale_returns.id", ondelete="RESTRICT")
     )
     method: Mapped[PaymentMethod] = mapped_column(
         Enum(PaymentMethod, name="payment_method", create_type=False), nullable=False
@@ -68,7 +75,14 @@ class Payment(UUIDPrimaryKeyMixin, Base):
     sale: Mapped[Sale | None] = relationship()
     purchase: Mapped[Purchase | None] = relationship()
     dealer: Mapped[Dealer | None] = relationship()
+    sale_return: Mapped[SaleReturn | None] = relationship()
     receiver: Mapped[User] = relationship(lazy="joined")
+
+    @property
+    def is_return_credit(self) -> bool:
+        """True when this entry came from goods coming back, not from a payment."""
+
+        return self.sale_return_id is not None
 
     @property
     def is_account_credit(self) -> bool:

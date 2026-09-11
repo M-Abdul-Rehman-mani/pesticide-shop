@@ -20,6 +20,10 @@ from app.utils.security import hash_password, verify_password
         (UserRole.SALESPERSON, Permission.MANAGE_SETTINGS, False),
         (UserRole.INVENTORY_MANAGER, Permission.RECORD_PURCHASE, True),
         (UserRole.INVENTORY_MANAGER, Permission.CREATE_SALE, False),
+        # Taking goods back hands money out again, so it matches voiding a sale.
+        (UserRole.OWNER, Permission.RECORD_RETURN, True),
+        (UserRole.MANAGER, Permission.RECORD_RETURN, True),
+        (UserRole.SALESPERSON, Permission.RECORD_RETURN, False),
     ],
 )
 def test_role_permissions(role: UserRole, permission: Permission, allowed: bool) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -43,7 +44,7 @@ class PesticideSaleService:
         *,
         invoice_prefix: str = "INV",
         shop_name: str = "Pesticide Shop",
-        owner_email: str | None = None,
+        owner_emails: Sequence[str] = (),
     ) -> Sale:
         require_permission(actor.role, Permission.CREATE_SALE)
         if not command.lines:
@@ -233,12 +234,14 @@ class PesticideSaleService:
                 status.value,
                 "sale_dealer" if dealer else "sale_customer",
             )
-        if owner_email and (
-            recipient is None or owner_email.lower() != (recipient.email or "").lower()
-        ):
-            recipient_name = (
-                dealer.display_name if dealer else customer.name if customer else "Walk-in Customer"
-            )
+        buyer_email = (recipient.email or "").lower() if recipient else ""
+        recipient_name = (
+            dealer.display_name if dealer else customer.name if customer else "Walk-in Customer"
+        )
+        for owner_email in owner_emails:
+            # The buyer already has their copy; a second one to the same mailbox is noise.
+            if owner_email.lower() == buyer_email:
+                continue
             self._notifications.queue(
                 message=QueuedMessage(
                     recipient=owner_email,
@@ -421,15 +424,23 @@ class PesticideSaleService:
             raise NotFoundError("One or more selected stock batches were not found.")
 
         customer = self._session.get(Customer, command.customer_id) if command.customer_id else None
-        dealer = (
-            self._session.execute(
-                select(Dealer).where(Dealer.id == command.dealer_id).with_for_update(of=Dealer)
-            ).scalar_one_or_none()
-            if command.dealer_id
-            else None
-        )
         if command.customer_id and customer is None:
             raise NotFoundError("The selected customer was not found.")
+        # An amendment can move the invoice from one dealer to another, so both
+        # accounts are locked together, in id order, to keep concurrent edits from
+        # deadlocking against each other.
+        wanted_dealers = {id_ for id_ in (command.dealer_id, sale.dealer_id) if id_}
+        accounts = {
+            account.id: account
+            for account in self._session.scalars(
+                select(Dealer)
+                .where(Dealer.id.in_(wanted_dealers))
+                .order_by(Dealer.id)
+                .with_for_update(of=Dealer)
+            )
+        }
+        dealer = accounts.get(command.dealer_id) if command.dealer_id else None
+        previous_dealer = accounts.get(sale.dealer_id) if sale.dealer_id else None
         if command.dealer_id and (dealer is None or not dealer.is_active):
             raise NotFoundError("The selected active dealer was not found.")
 
@@ -477,8 +488,10 @@ class PesticideSaleService:
         if total <= 0:
             raise ValidationError("A completed sale total must be greater than zero.")
         if dealer and dealer.credit_limit > 0:
-            projected = dealer.balance - sale.remaining_amount + total
-            if projected > dealer.credit_limit:
+            # Only the dealer already carrying this invoice gets its weight lifted;
+            # a dealer receiving it takes the whole total against their limit.
+            carried = sale.remaining_amount if previous_dealer is dealer else Decimal("0.00")
+            if dealer.balance - carried + total > dealer.credit_limit:
                 raise ConflictError("This sale would exceed the dealer's credit limit.")
 
         amended_at = datetime.now(UTC)
@@ -559,13 +572,13 @@ class PesticideSaleService:
             current.purchase_cost = batch.purchase_price * line.quantity
             current.other_cost = other_cost
 
-        if dealer is not None:
-            dealer.balance += total - sale.remaining_amount
-        elif sale.dealer_id:
-            previous_dealer = self._session.execute(
-                select(Dealer).where(Dealer.id == sale.dealer_id).with_for_update(of=Dealer)
-            ).scalar_one()
+        # An invoice weighs on a dealer account by what is still owed on it. Lift the
+        # old weight off whoever was carrying it and put the new one on whoever
+        # carries it now; when that is the same dealer the two net out to the change.
+        if previous_dealer is not None:
             previous_dealer.balance -= sale.remaining_amount
+        if dealer is not None:
+            dealer.balance += total
         sale.customer_id = customer.id if customer else None
         sale.dealer_id = dealer.id if dealer else None
         sale.recipient_type = "DEALER" if dealer else "CUSTOMER"

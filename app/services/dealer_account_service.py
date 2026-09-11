@@ -289,9 +289,12 @@ class DealerAccountService:
     @staticmethod
     def _payment_detail(payment: Payment) -> str:
         method = payment.method.value.replace("_", " ").title()
+        sale = payment.sale
+        if payment.is_return_credit:
+            against = f" against {sale.invoice_number}" if sale else ""
+            return f"Goods returned{against}"
         if payment.is_account_credit:
             return f"{method} to account credit"
-        sale = payment.sale
         return f"{method} to {sale.invoice_number}" if sale else method
 
     def reverse_payment(
@@ -312,6 +315,13 @@ class DealerAccountService:
             raise NotFoundError("Payment was not found.")
         if original.direction is not PaymentDirection.INCOMING:
             raise ConflictError("Only a received payment can be reversed.")
+        if original.is_return_credit:
+            # Reversing it would re-charge the dealer for goods that are back on the
+            # shelf. A wrong return is corrected by selling the goods again.
+            raise ConflictError(
+                "This credit came from returned goods, not from a payment, so it cannot be "
+                "reversed. Record a fresh sale for anything that was returned in error."
+            )
         if original.dealer_id is None:
             raise ConflictError("This payment is not against a dealer account.")
         if self._is_reversed(original):
@@ -363,6 +373,8 @@ class DealerAccountService:
             Payment.direction == PaymentDirection.OUTGOING,
             Payment.amount == payment.amount,
             Payment.created_at >= payment.created_at,
+            # A refund handed back with returned goods is not a reversal of anything.
+            Payment.sale_return_id.is_(None),
         )
         statement = (
             statement.where(Payment.sale_id == payment.sale_id)

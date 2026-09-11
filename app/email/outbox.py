@@ -147,3 +147,68 @@ class OutboxDeliveryService:
                 return
             row.status = EmailStatus.FAILED
             row.last_error = f"{error.__class__.__name__}: {error}"[:2000]
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryOutcome:
+    """What happened when an entity's queued messages were sent straight away."""
+
+    sent: int = 0
+    failed: int = 0
+    skipped: bool = False
+
+    @property
+    def attempted(self) -> int:
+        return self.sent + self.failed
+
+
+def deliver_pending_for(
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+    *,
+    entity_type: str,
+    entity_id: uuid.UUID,
+) -> DeliveryOutcome:
+    """Send one record's queued messages now rather than leaving them for the worker.
+
+    A shop running without the background worker would otherwise watch its invoice
+    emails pile up unsent. Delivery still goes through the outbox: the row is written
+    inside the sale's own transaction and only claimed here, after that transaction
+    has committed. So a refused login or a dropped connection leaves a failed record
+    to retry and never touches the sale, and the message can never be sent twice.
+    """
+
+    from app.email.configuration import load_smtp_config
+    from app.email.smtp_client import SMTPEmailService
+
+    with session_factory() as session:
+        config = load_smtp_config(session, settings)
+        pending = list(
+            session.scalars(
+                select(EmailHistory.id)
+                .where(
+                    EmailHistory.entity_type == entity_type,
+                    EmailHistory.entity_id == entity_id,
+                    EmailHistory.status.in_({EmailStatus.PENDING, EmailStatus.FAILED}),
+                )
+                .order_by(EmailHistory.created_at)
+            )
+        )
+    if not pending:
+        return DeliveryOutcome()
+    if not config.host or not config.from_email:
+        # Nothing is configured to send with; the messages stay queued rather than
+        # being marked failed for a reason that has nothing to do with them.
+        logger.info("SMTP is not configured; %d message(s) left queued", len(pending))
+        return DeliveryOutcome(skipped=True)
+    delivery = OutboxDeliveryService(session_factory, SMTPEmailService(config), settings)
+    sent = failed = 0
+    for email_id in pending:
+        try:
+            delivery.deliver(email_id)
+        except Exception:
+            # Already logged and recorded against the row by the delivery service.
+            failed += 1
+        else:
+            sent += 1
+    return DeliveryOutcome(sent=sent, failed=failed)

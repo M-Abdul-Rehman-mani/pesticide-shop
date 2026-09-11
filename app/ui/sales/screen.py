@@ -34,6 +34,8 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from app.config.settings import Settings
+from app.email.configuration import parse_owner_emails
+from app.email.outbox import DeliveryOutcome, deliver_pending_for
 from app.models.customer import Customer
 from app.models.dealer import Dealer
 from app.models.enums import PaymentMethod, SaleStatus, SettingCategory
@@ -793,11 +795,11 @@ class SalesScreen(QWidget):
         self.complete.setEnabled(False)
         editing = self._editing
 
-        def operation() -> tuple[uuid.UUID, str]:
+        def operation() -> tuple[uuid.UUID, str, DeliveryOutcome]:
             with self._session_factory.begin() as session:
                 if editing is not None:
                     amended = PesticideSaleService(session).amend(editing, command, self._actor)
-                    return amended.id, amended.invoice_number
+                    return amended.id, amended.invoice_number, DeliveryOutcome()
                 stored = SettingsService(session, self._settings.app_secret_key.get_secret_value())
                 sale = PesticideSaleService(session).create(
                     command,
@@ -806,11 +808,20 @@ class SalesScreen(QWidget):
                     or "INV",
                     shop_name=stored.get(SettingCategory.SHOP, "name", "Pesticide Shop")
                     or "Pesticide Shop",
-                    owner_email=stored.get(
-                        SettingCategory.EMAIL, "owner_email", self._settings.owner_email
+                    owner_emails=parse_owner_emails(
+                        stored.get(SettingCategory.EMAIL, "owner_email", self._settings.owner_email)
                     ),
                 )
-                return sale.id, sale.invoice_number
+                sale_id, invoice_number = sale.id, sale.invoice_number
+            # Outside the transaction: the sale is committed and safe before a single
+            # byte goes to the mail server, so nothing about email can undo it.
+            outcome = deliver_pending_for(
+                self._session_factory,
+                self._settings,
+                entity_type="Sale",
+                entity_id=sale_id,
+            )
+            return sale_id, invoice_number, outcome
 
         self._worker = start_worker(
             operation,
@@ -820,7 +831,7 @@ class SalesScreen(QWidget):
         )
 
     def _sale_saved(self, result: object) -> None:
-        sale_id, invoice = cast(tuple[uuid.UUID, str], result)
+        sale_id, invoice, delivery = cast(tuple[uuid.UUID, str, DeliveryOutcome], result)
         was_editing = self._editing is not None
         self._leave_edit_mode()
         self._select_invoice(sale_id, invoice)
@@ -829,7 +840,7 @@ class SalesScreen(QWidget):
             "Invoice updated" if was_editing else "Sale completed",
             f"Invoice {invoice} was updated; its stock and balance were adjusted."
             if was_editing
-            else f"Invoice {invoice} was saved and recipient/owner emails were queued.",
+            else f"Invoice {invoice} was saved. {self._delivery_text(delivery)}",
         )
         self.sale_completed.emit(invoice)
         self._cart.clear()
@@ -842,6 +853,26 @@ class SalesScreen(QWidget):
         self._update_cart_state()
         self._load_choices()
         self._refresh_sales_history()
+
+    @staticmethod
+    def _delivery_text(delivery: DeliveryOutcome) -> str:
+        """Say plainly what happened to the invoice emails."""
+
+        if delivery.skipped:
+            return "Its emails are queued; set up SMTP under Settings > Email to send them."
+        if not delivery.attempted:
+            return "No email address was on file, so nothing was sent."
+        if not delivery.failed:
+            return f"{delivery.sent} email(s) were sent."
+        if not delivery.sent:
+            return (
+                f"{delivery.failed} email(s) could not be sent and are waiting to be retried. "
+                "Check Settings > Email History for the reason."
+            )
+        return (
+            f"{delivery.sent} email(s) were sent; {delivery.failed} failed and are waiting "
+            "to be retried. Check Settings > Email History for the reason."
+        )
 
     def _build_sales_history_tab(self) -> None:
         page = QWidget()
@@ -936,8 +967,8 @@ class SalesScreen(QWidget):
         self.returns_count = QLabel("Loading returns…")
         self.returns_count.setObjectName("RecordCount")
         hint = QLabel(
-            "Record a return from All Sales > Record a return. A credit note is never edited; "
-            "correct one by recording the opposite movement."
+            "Record a return from All Sales > Record a return; owners and managers may do so. "
+            "A credit note is never edited — correct one by selling the goods again."
         )
         hint.setObjectName("FieldHint")
         hint.setWordWrap(True)
@@ -1354,6 +1385,11 @@ class SalesScreen(QWidget):
         if row >= len(self._history_sales):
             return
         sale = self._history_sales[row]
+        if not has_permission(self._actor.role, Permission.RECORD_RETURN):
+            QMessageBox.information(
+                self, "Not permitted", "Your role cannot record a return. Ask a manager."
+            )
+            return
         if sale.status is not SaleStatus.COMPLETED:
             QMessageBox.information(self, "Not available", "A voided sale cannot accept a return.")
             return

@@ -4,9 +4,15 @@
 
 Sign in with the owner account, change the temporary password, then open **Shop Settings**. Add the
 shop name, owner name, postal address, contact number, email, website, tax/registration text, and an
-optional PNG/JPEG logo. These values brand new invoices, and the shop name and logo replace the placeholder at the top of the sidebar as soon as they are saved. Under **Settings**, configure the invoice
-prefix, currency, timezone, SMTP account, owner notification email, printer/receipt format, backup,
-and session timeout. Use **Send Test Email** before relying on automatic delivery.
+optional PNG/JPEG logo. These values brand new invoices, and the shop name and logo replace the placeholder at the top of the sidebar as soon as they are saved. Under **Settings**, configure the invoice and
+return prefixes, currency, timezone, SMTP account, owner notification emails, printer/receipt format,
+backup, and session timeout. **Owner emails** takes as many addresses as the shop needs: type one and press **Add**, select one
+and press **Remove**. Everyone on the list gets a copy of every invoice and the daily report. The
+test email goes to the first address.
+
+For Gmail the username is the full address, not the shop name, and the password must be a
+16-character App Password generated with 2-Step Verification switched on — Google refuses ordinary
+account passwords over SMTP. Use **Send Test Email** before relying on automatic delivery.
 
 ## Products and parties
 
@@ -62,12 +68,16 @@ and sub total columns and the grand total. See `docs/printing.md`.
 Every copy after the first is stamped **DUPLICATE**, so two apparent originals cannot circulate.
 Opening the print preview does not count as issuing a copy; printing or saving one does.
 
-The status bar shows a count when invoice emails are waiting to be sent. A number that keeps growing
-means the background worker is not running, and those messages are queued rather than delivered.
+The status bar shows a count when invoice emails are waiting to be sent. Sales send their own email
+directly, so a growing number here means messages that failed and are waiting to be retried, or a
+shop with no SMTP configured yet.
 
-When the recipient has an email address, their PDF is queued automatically. If the owner email is
-configured, a separate owner copy is queued. Email failure never reverses a sale; inspect and retry
-it from Email History after fixing SMTP/worker connectivity.
+When the recipient has an email address, their PDF is sent automatically, and a separate copy goes
+to every address on the owner list. Sending happens as soon as the sale is committed — the invoice is
+saved and safe before a byte reaches the mail server — so completing a sale tells you how many
+messages went out. Email failure never reverses a sale: a refused login leaves the message recorded
+and retryable, and the confirmation says so. Inspect and retry from Email History after fixing SMTP.
+If SMTP is not configured at all, messages wait in the queue rather than being marked failed.
 
 ## Inventory, expiry, and corrections
 
@@ -96,9 +106,12 @@ Nothing is edited or erased; a correction is always a new, audited entry.
 lines, quantities, prices, discounts, or the recipient, then **Save changes**. Only the stock that
 actually changed moves, and the invoice keeps its number so the customer's reference still matches.
 Payments are not edited here: an invoice with money against it must have that reversed first, and an
-invoice with a return against it can no longer be edited.
+invoice with a return against it can no longer be edited. Changing the recipient moves the charge
+with it — the previous dealer's account is released in full and the new one takes the whole invoice,
+checked against their own credit limit.
 
-**Record a return** — **All Sales > Record a return**. Enter the quantity coming back on each line;
+**Record a return** — **All Sales > Record a return**, available to OWNER and MANAGER because a
+return hands money or credit back, the same as voiding. Enter the quantity coming back on each line;
 the dialog totals the credit as you go. Restocked goods return to the batch they came from — clear
 the tick for damaged or expired stock that cannot be resold. The credit settles whatever is still
 owed on the invoice, and anything beyond that is refunded by the chosen method. The original invoice
@@ -119,7 +132,9 @@ first, so the cash trail stays explicit.
 **Reverse a dealer payment** — **Dealers > Reverse a payment**. Choose the entry and give a reason;
 an opposite entry is recorded that puts the invoice balance and the dealer's account back where they
 were. The original stays visible on the statement, with the reversal beneath it. A payment can only
-be reversed once, and a reversal cannot itself be reversed.
+be reversed once, and a reversal cannot itself be reversed. The credit a return puts against an
+invoice is not a payment and cannot be reversed here — that would charge the dealer again for goods
+already back on the shelf; sell anything returned in error a second time instead.
 
 ## Dealer accounts and staged payments
 
@@ -159,7 +174,8 @@ gross profit, top sellers, and inventory status.
 revenue, gross profit, invoice count, average sale value, how many bought, how many are on the
 books, and what is still outstanding — customer balances from unpaid invoices, dealer balances from
 their running accounts. Beneath each is a ranking of buyers by revenue with their invoice and unit
-counts, outstanding amount, and last purchase. Retail and trade are never mixed.
+counts, outstanding amount, and last purchase; the ranking's revenue always agrees with the card
+above it. Retail and trade are never mixed.
 
 **Products** lists the whole catalogue: product, manufacturer, stock on hand with a reorder note,
 active batches, units sold, revenue, profit, last sale, and whether the product is active. Search
@@ -186,7 +202,8 @@ payments, dealer balances, and employee sales. Reports can be exported to Excel/
 
 - OWNER: full access, including users, profit, settings, audit, backups, and dealer credit.
 - MANAGER: daily operational access except owner-only user and restore operations.
-- SALESPERSON: sales, customer/dealer records, dashboard, and inventory viewing.
+- SALESPERSON: sales, customer/dealer records, dashboard, and inventory viewing. Voiding a sale and
+  recording a return are not included; both hand value back and need a manager.
 - INVENTORY_MANAGER: products, purchases, suppliers, inventory, adjustments, and reports.
 
 Money is shown and printed in whole rupees throughout — on screen, on the thermal receipt, on the
