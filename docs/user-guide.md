@@ -4,7 +4,7 @@
 
 Sign in with the owner account, change the temporary password, then open **Shop Settings**. Add the
 shop name, owner name, postal address, contact number, email, website, tax/registration text, and an
-optional PNG/JPEG logo. These values brand new invoices. Under **Settings**, configure the invoice
+optional PNG/JPEG logo. These values brand new invoices, and the shop name and logo replace the placeholder at the top of the sidebar as soon as they are saved. Under **Settings**, configure the invoice
 prefix, currency, timezone, SMTP account, owner notification email, printer/receipt format, backup,
 and session timeout. Use **Send Test Email** before relying on automatic delivery.
 
@@ -105,6 +105,11 @@ owed on the invoice, and anything beyond that is refunded by the chosen method. 
 is never rewritten; the return is a separate numbered credit document, and a line can never be
 returned for more than it was sold.
 
+Every credit note is listed under **Sales > Sale Returns** with its number, date, invoice, recipient,
+goods, credit, and whether the money was refunded or set against the balance. Search by return
+number, invoice, party, or product. **View details** shows the full note including which lines were
+not restocked and why; **Open the invoice** jumps to the sale it came from.
+
 **Void a sale** — the three-dot menu on any row of **All Sales**. Voiding returns the stock to the
 batches it came from, removes the charge from the dealer's account, and marks the invoice voided so
 it stops counting in reports, dealer statements, and payment allocation. A reason is required, and
@@ -120,7 +125,7 @@ be reversed once, and a reversal cannot itself be reversed.
 
 Dealers buy on account and settle in instalments, so a dealer's balance is tracked separately from
 any single invoice. The **Dealers** screen shows each dealer's outstanding amount and credit limit,
-and a dealer who has paid ahead shows their advance as `PKR 500.00 credit`.
+and a dealer who has paid ahead shows their advance as `PKR 500 credit`.
 
 **Record Payment** takes one instalment: amount, method, reference (cheque or transfer number), and
 notes. The payment is applied to that dealer's oldest unpaid invoices first, and each invoice's paid
@@ -144,7 +149,11 @@ compensating transaction rather than editing history.
 
 ## The dashboard
 
-The dashboard carries three fixed views followed by one tab per product.
+The dashboard carries four views: **General**, **Customers**, **Dealers**, and **Products**.
+
+**General** is the whole-shop summary: revenue, profit, units sold, stock on hand, low-stock
+products, units expiring within 90 days, and uncollected balances, with charts for daily sales,
+gross profit, top sellers, and inventory status.
 
 **Customers** and **Dealers** each show their own side of the trade for the selected period:
 revenue, gross profit, invoice count, average sale value, how many bought, how many are on the
@@ -152,21 +161,18 @@ books, and what is still outstanding — customer balances from unpaid invoices,
 their running accounts. Beneath each is a ranking of buyers by revenue with their invoice and unit
 counts, outstanding amount, and last purchase. Retail and trade are never mixed.
 
-**All Products** is the whole-shop summary: revenue, profit, units sold, stock
-on hand, low-stock products, units expiring within 90 days, and uncollected balances, with charts for
-daily sales, gross profit, top sellers, and inventory status.
+**Products** lists the whole catalogue: product, manufacturer, stock on hand with a reorder note,
+active batches, units sold, revenue, profit, last sale, and whether the product is active. Search
+narrows the list by product or manufacturer.
 
-Every product in the catalogue also gets its own tab. A product tab shows the same period figures
-narrowed to that product — units sold, revenue, profit, stock on hand, active batches, units expiring
-soon, and stock value at cost — plus its daily sales and profit charts, a reorder note comparing
-stock against the minimum level, and a table of its live batches with expiry, quantities, and prices.
+Click any product to open its own dashboard — the same period figures narrowed to that product:
+units sold, revenue, profit, stock on hand, active batches, units expiring soon, and stock value at
+cost, plus its daily sales and profit charts, a reorder note comparing stock against the minimum
+level, and a table of its live batches with expiry, quantities, and prices. **← All products**
+returns to the list, and **Go to product** at the top opens one straight by name.
 
-Tabs are labelled with the short product name, with the full name -- formulation and pack size --
-on hover and as the heading inside the tab. A large catalogue scrolls rather than shrinking its
-labels, and **Go to product** above the tabs jumps straight to one by name instead of scrolling.
-
-The reporting period at the top applies to every tab. Product tabs load when you open them, so a
-large catalogue stays quick; press **Refresh** to reload the current view and pick up newly added
+The reporting period at the top applies to every view. Each view loads when you open it, so a large
+catalogue stays quick; press **Refresh** to reload the current view and pick up newly added
 products.
 
 ## Previous sales and reports
@@ -182,6 +188,18 @@ payments, dealer balances, and employee sales. Reports can be exported to Excel/
 - MANAGER: daily operational access except owner-only user and restore operations.
 - SALESPERSON: sales, customer/dealer records, dashboard, and inventory viewing.
 - INVENTORY_MANAGER: products, purchases, suppliers, inventory, adjustments, and reports.
+
+Money is shown and printed in whole rupees throughout — on screen, on the thermal receipt, on the
+A4 challan, and in reports. Amounts are still stored and calculated exactly; only the display is
+rounded.
+
+Under **Settings > Backup**, **Back Up Now** writes a PostgreSQL dump — this is the file to restore
+from. **Back Up To Excel & CSV** writes the same data in a form anyone can open: one spreadsheet
+with a sheet per table, and one zip archive with a CSV per table. Both are named for the span of
+data they hold, for example `shop-data_from_2026-01-04_to_2026-09-11.xlsx`, so a folder of them
+reads at a glance. Password hashes and encrypted settings are never written to these files, and an
+existing export of the same span is kept rather than overwritten. Only roles that can manage
+settings may run it.
 
 Use the backup command and rehearse restore procedures before deployment. Financial documents,
 payments, email history, inventory movements, and audit events are retained; corrections use

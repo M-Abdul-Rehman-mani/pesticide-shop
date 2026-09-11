@@ -712,7 +712,7 @@ class ReceiptGenerator:
                     Paragraph(escape(line.product), cell),
                     Paragraph(f"{line.quantity:,}", cell_right),
                     Paragraph(f"{line.price:,.0f}", cell_right),
-                    Paragraph(f"{line.total:,.2f}", cell_right),
+                    Paragraph(f"{line.total:,.0f}", cell_right),
                 ]
             )
         items = Table(rows, colWidths=columns, repeatRows=1)
@@ -738,19 +738,19 @@ class ReceiptGenerator:
                 Paragraph("No of Items:", normal),
                 Paragraph(f"{len(receipt.lines)}", bold),
                 Paragraph("Total :", normal),
-                Paragraph(f"{receipt.subtotal:,.2f}", bold_right),
+                Paragraph(f"{receipt.subtotal:,.0f}", bold_right),
             ],
             [
                 Paragraph("Total Qty:", normal),
                 Paragraph(f"{quantity:,}", bold),
                 Paragraph("Discount :", normal),
-                Paragraph(f"{receipt.discount:,.2f}", cell_right),
+                Paragraph(f"{receipt.discount:,.0f}", cell_right),
             ],
             [
                 Paragraph("", normal),
                 Paragraph("", normal),
                 Paragraph("Grand Total :", bold),
-                Paragraph(f"{receipt.total:,.2f}", bold_right),
+                Paragraph(f"{receipt.total:,.0f}", bold_right),
             ],
         ]
         if receipt.remaining:
@@ -760,13 +760,13 @@ class ReceiptGenerator:
                         Paragraph("", normal),
                         Paragraph("", normal),
                         Paragraph("Paid :", normal),
-                        Paragraph(f"{receipt.paid:,.2f}", cell_right),
+                        Paragraph(f"{receipt.paid:,.0f}", cell_right),
                     ],
                     [
                         Paragraph("", normal),
                         Paragraph("", normal),
                         Paragraph("Balance :", bold),
-                        Paragraph(f"{receipt.remaining:,.2f}", bold_right),
+                        Paragraph(f"{receipt.remaining:,.0f}", bold_right),
                     ],
                 ]
             )
@@ -825,7 +825,7 @@ class ReceiptGenerator:
 
     @staticmethod
     def _amount(value: Decimal, currency: str) -> str:
-        return f"{currency} {value:,.2f}"
+        return f"{currency} {value:,.0f}"
 
     @staticmethod
     def _shop_details(shop: ShopProfile) -> str:

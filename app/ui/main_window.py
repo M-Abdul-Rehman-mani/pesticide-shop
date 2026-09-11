@@ -6,7 +6,7 @@ from collections.abc import Callable
 from typing import ClassVar, cast
 
 from PySide6.QtCore import QByteArray, QRect, QSettings, Qt, QTimer, Signal
-from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
+from PySide6.QtGui import QGuiApplication, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -30,6 +30,7 @@ from app import __version__
 from app.config.settings import Settings
 from app.models.email_history import EmailHistory
 from app.models.enums import EmailStatus
+from app.printing.shop_profile import load_shop_profile
 from app.security.authentication import AuthenticatedUser
 from app.security.permissions import Permission, has_permission
 from app.ui.customers.screen import CustomersScreen
@@ -51,6 +52,12 @@ from app.ui.workers import start_worker
 #: Bumped when column layouts change meaning, so installs upgrading from an
 #: earlier build pick up the new automatic sizing instead of stale widths.
 _TABLE_LAYOUT_KEY = "tables/v2"
+
+
+DEFAULT_BRAND_NAME = "CropCare"
+DEFAULT_BRAND_CAPTION = "PESTICIDE OPERATIONS"
+#: Side of the square logo/monogram beside the shop name, in pixels.
+BRAND_MARK_SIZE = 36
 
 
 class MainWindow(QMainWindow):
@@ -141,6 +148,7 @@ class MainWindow(QMainWindow):
         self._outbox_timer.timeout.connect(self._check_outbox)
         self._outbox_timer.start()
         self._check_outbox()
+        self.apply_shop_branding()
         self._session_monitor = SessionTimeoutMonitor(settings.app_session_timeout_minutes, self)
         self._session_monitor.timed_out.connect(self._timed_out)
         application = QApplication.instance()
@@ -209,14 +217,16 @@ class MainWindow(QMainWindow):
         mark = QLabel("C")
         mark.setObjectName("BrandMark")
         mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        mark.setFixedSize(36, 36)
+        mark.setFixedSize(BRAND_MARK_SIZE, BRAND_MARK_SIZE)
+        mark.setScaledContents(True)
         brand_copy = QVBoxLayout()
         brand_copy.setSpacing(0)
-        brand = QLabel("CropCare")
+        brand = QLabel(DEFAULT_BRAND_NAME)
         brand.setObjectName("Brand")
-        caption = QLabel("PESTICIDE OPERATIONS")
+        brand.setWordWrap(True)
+        caption = QLabel(DEFAULT_BRAND_CAPTION)
         caption.setObjectName("BrandCaption")
-        self._brand_name, self._brand_caption = brand, caption
+        self._brand_mark, self._brand_name, self._brand_caption = mark, brand, caption
         brand_copy.addWidget(brand)
         brand_copy.addWidget(caption)
         brand_row.addWidget(mark)
@@ -361,6 +371,50 @@ class MainWindow(QMainWindow):
                 purchases.purchase_completed.connect(lambda _reference: refresh_sales())
         if dashboard is not None:
             dashboard.setProperty("refreshesAfterTransactions", True)
+
+    def apply_shop_branding(self) -> None:
+        """Show the shop's own name and logo in the sidebar once it is configured."""
+
+        def operation() -> tuple[str, str, str]:
+            with self._session_factory() as session:
+                profile = load_shop_profile(session, self._settings)
+                return (
+                    profile.name.strip(),
+                    profile.owner_name.strip(),
+                    str(profile.logo_path) if profile.logo_path else "",
+                )
+
+        def show(result: object) -> None:
+            self.show_branding(*cast(tuple[str, str, str], result))
+
+        start_worker(operation, succeeded=show, failed=lambda _error: None)
+
+    def show_branding(self, name: str, owner_name: str, logo: str) -> None:
+        """Put one shop profile into the sidebar, logo or monogram."""
+
+        self._brand_name.setText(name or DEFAULT_BRAND_NAME)
+        self._brand_caption.setText(
+            (owner_name or DEFAULT_BRAND_CAPTION).upper() if name else DEFAULT_BRAND_CAPTION
+        )
+        pixmap = QPixmap(logo) if logo else QPixmap()
+        if pixmap.isNull():
+            # Fall back to the first letter of the shop name as a monogram.
+            self._brand_mark.setPixmap(QPixmap())
+            self._brand_mark.setScaledContents(True)
+            self._brand_mark.setText((name or DEFAULT_BRAND_NAME)[:1].upper())
+            return
+        self._brand_mark.setText("")
+        # The pixmap is already fitted to the label, so letting Qt stretch it again
+        # would squash a logo that is not square.
+        self._brand_mark.setScaledContents(False)
+        self._brand_mark.setPixmap(
+            pixmap.scaled(
+                BRAND_MARK_SIZE,
+                BRAND_MARK_SIZE,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
 
     def _check_outbox(self) -> None:
         """Surface invoice emails that are queued but not going anywhere.

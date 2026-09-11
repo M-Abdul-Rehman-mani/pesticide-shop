@@ -656,7 +656,7 @@ class ReportsScreen(QWidget):
     ) -> ReportPayload:
         display = tuple(
             tuple(
-                f"{self._settings.app_currency} {value:,.2f}"
+                f"{self._settings.app_currency} {value:,.0f}"
                 if index in currency_columns and isinstance(value, Decimal)
                 else value.strftime("%d-%b-%Y %H:%M")
                 if index in date_columns and isinstance(value, datetime)

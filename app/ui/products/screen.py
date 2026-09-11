@@ -99,8 +99,8 @@ class ProductDialog(QDialog):
         self.description = QTextEdit()
         self.description.setPlainText(data.description or "" if data else "")
         self.description.setMaximumHeight(60)
-        self.purchase = MoneyEdit(f"{data.purchase_price:.2f}" if data else "")
-        self.sale = MoneyEdit(f"{data.sale_price:.2f}" if data else "")
+        self.purchase = MoneyEdit(f"{data.purchase_price:.0f}" if data else "")
+        self.sale = MoneyEdit(f"{data.sale_price:.0f}" if data else "")
         self.minimum = QSpinBox()
         self.minimum.setRange(0, 1_000_000)
         self.minimum.setValue(data.minimum_stock if data else 0)
@@ -153,8 +153,8 @@ class PriceDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Change Default Prices")
         layout = QFormLayout(self)
-        self.purchase = MoneyEdit(f"{purchase_price:.2f}")
-        self.sale = MoneyEdit(f"{sale_price:.2f}")
+        self.purchase = MoneyEdit(f"{purchase_price:.0f}")
+        self.sale = MoneyEdit(f"{sale_price:.0f}")
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
@@ -282,8 +282,8 @@ class ProductsScreen(QWidget):
                             p.formulation or "—",
                             p.pack_size or "—",
                             p.category,
-                            f"{self._currency} {p.default_purchase_price:,.2f}",
-                            f"{self._currency} {p.default_sale_price:,.2f}",
+                            f"{self._currency} {p.default_purchase_price:,.0f}",
+                            f"{self._currency} {p.default_sale_price:,.0f}",
                             count,
                             p.minimum_stock,
                             "Yes" if p.is_active else "No",
@@ -418,8 +418,8 @@ class ProductsScreen(QWidget):
                 ("Category", data.category),
                 ("Registration", data.registration_number),
                 ("Unit", data.unit),
-                ("Purchase price", f"{self._currency} {data.purchase_price:,.2f}"),
-                ("Sale price", f"{self._currency} {data.sale_price:,.2f}"),
+                ("Purchase price", f"{self._currency} {data.purchase_price:,.0f}"),
+                ("Sale price", f"{self._currency} {data.sale_price:,.0f}"),
                 ("Low-stock threshold", data.minimum_stock),
                 ("Description", data.description),
             ),

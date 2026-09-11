@@ -191,3 +191,93 @@ def test_restore_is_owner_only_and_restricted_to_backup_directory(
     service.restore(backup, owner)
     assert commands[0][0] == "/pg_restore"
     assert "--single-transaction" in commands[0]
+
+
+def test_data_export_writes_every_table_and_names_the_file_for_the_period(
+    db_session: Session,
+    owner: AuthenticatedUser,
+    customer: object,
+    product: object,
+    tmp_path: Path,
+) -> None:
+    import csv
+    import io
+    import zipfile
+
+    from openpyxl import load_workbook
+
+    from app.services.data_export_service import REDACTED_TEXT, DataExportService
+
+    settings = get_settings()
+    SettingsService(db_session, settings.app_secret_key.get_secret_value()).set(
+        actor=owner,
+        category=SettingCategory.EMAIL,
+        key="smtp_password",
+        value="smtp-test-secret",
+        is_secret=True,
+    )
+    db_session.flush()
+
+    result = DataExportService(db_session, settings).export(tmp_path, owner)
+
+    assert result.workbook.is_file()
+    assert result.csv_archive.is_file()
+    assert result.period_start is not None
+    assert result.period_end is not None
+    expected = f"shop-data_from_{result.period_start:%Y-%m-%d}_to_{result.period_end:%Y-%m-%d}"
+    assert result.workbook.name == f"{expected}.xlsx"
+    assert result.csv_archive.name == f"{expected}.csv.zip"
+
+    exported = {dataset.table: dataset.rows for dataset in result.datasets}
+    assert exported["products"] >= 1
+    assert exported["customers"] >= 1
+    assert "alembic_version" not in exported
+
+    workbook = load_workbook(result.workbook)
+    assert "Products" in workbook.sheetnames
+    headers = [cell.value for cell in workbook["Products"][1]]
+    assert headers[0] == "Id", "the key column leads every sheet"
+    assert {"Name", "Manufacturer", "Default sale price"} <= set(headers)
+
+    with zipfile.ZipFile(result.csv_archive) as archive:
+        names = set(archive.namelist())
+        assert {"products.csv", "customers.csv", "sales.csv"} <= names
+        users = list(
+            csv.DictReader(io.StringIO(archive.read("users.csv").decode("utf-8-sig"), newline=""))
+        )
+        settings_rows = list(
+            csv.DictReader(
+                io.StringIO(archive.read("app_settings.csv").decode("utf-8-sig"), newline="")
+            )
+        )
+    assert users, "the owner account is exported"
+    assert {row["Password hash"] for row in users} == {REDACTED_TEXT}
+    secrets = [row for row in settings_rows if row["Key"] == "smtp_password"]
+    assert secrets and secrets[0]["Value"] == REDACTED_TEXT
+
+
+def test_data_export_is_refused_to_roles_without_settings_access(
+    db_session: Session, owner_model: object, tmp_path: Path
+) -> None:
+    from app.services.data_export_service import DataExportService
+
+    salesperson = replace(AuthenticatedUser.from_model(owner_model), role=UserRole.SALESPERSON)  # type: ignore[arg-type]
+    with pytest.raises(PermissionDeniedError):
+        DataExportService(db_session, get_settings()).export(tmp_path, salesperson)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_second_data_export_of_the_same_span_keeps_the_first(
+    db_session: Session, owner: AuthenticatedUser, product: object, tmp_path: Path
+) -> None:
+    from app.services.data_export_service import DataExportService
+
+    service = DataExportService(db_session, get_settings())
+    first = service.export(tmp_path, owner)
+    second = service.export(tmp_path, owner)
+
+    assert first.workbook.is_file() and first.csv_archive.is_file()
+    assert second.workbook != first.workbook
+    assert second.workbook.name.endswith("_2.xlsx")
+    # Both halves of one export share a name, so a folder stays readable.
+    assert second.csv_archive.name == second.workbook.name.replace(".xlsx", ".csv.zip")

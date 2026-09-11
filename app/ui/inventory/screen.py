@@ -95,8 +95,8 @@ class BatchDialog(QDialog):
         ):
             counter.setRange(0, 1_000_000)
             counter.setValue(value)
-        self.purchase_price = MoneyEdit(f"{data.purchase_price:.2f}")
-        self.selling_price = MoneyEdit(f"{data.selling_price:.2f}")
+        self.purchase_price = MoneyEdit(f"{data.purchase_price:.0f}")
+        self.selling_price = MoneyEdit(f"{data.selling_price:.0f}")
         self.location = QLineEdit(data.location)
         self.location.setPlaceholderText("Shelf or store location")
         self.notes = QTextEdit(data.notes)
@@ -336,9 +336,9 @@ class InventoryScreen(QWidget):
                             format_date(b.expiry_date),
                             self._expiry_status(b.expiry_date),
                             b.supplier.company_name or b.supplier.name,
-                            f"{self._currency} {b.purchase_price:,.2f}",
-                            f"{self._currency} {b.selling_price:,.2f}",
-                            f"{self._currency} {b.stock_value:,.2f}",
+                            f"{self._currency} {b.purchase_price:,.0f}",
+                            f"{self._currency} {b.selling_price:,.0f}",
+                            f"{self._currency} {b.stock_value:,.0f}",
                             "",
                         )
                         for b in batches

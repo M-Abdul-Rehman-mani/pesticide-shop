@@ -2,6 +2,9 @@
 
 from pathlib import Path
 
+from PySide6.QtGui import QColor, QPalette
+from PySide6.QtWidgets import QApplication
+
 _ASSETS = Path(__file__).parent / "assets"
 _COMBO_BOX_ARROW = (_ASSETS / "combo-down-arrow.svg").as_posix()
 _COMBO_BOX_ARROW_UP = (_ASSETS / "combo-up-arrow.svg").as_posix()
@@ -257,3 +260,45 @@ QCheckBox::indicator { width: 16px; height: 16px; }
 """.replace("__COMBO_BOX_ARROW_UP__", _COMBO_BOX_ARROW_UP).replace(
     "__COMBO_BOX_ARROW__", _COMBO_BOX_ARROW
 )
+
+
+#: The stylesheet sets text colours but leaves most container backgrounds to the
+#: platform. On a dark desktop theme those containers come out dark while the text
+#: stays near-black, which makes form labels invisible. Pinning the palette keeps
+#: the application's own colours whatever the desktop is set to.
+_PALETTE_COLOURS: dict[QPalette.ColorRole, str] = {
+    QPalette.ColorRole.Window: "#f4f7f5",
+    QPalette.ColorRole.WindowText: "#1c2b25",
+    QPalette.ColorRole.Base: "#ffffff",
+    QPalette.ColorRole.AlternateBase: "#f8faf9",
+    QPalette.ColorRole.Text: "#1c2b25",
+    QPalette.ColorRole.Button: "#f4f7f5",
+    QPalette.ColorRole.ButtonText: "#1c2b25",
+    QPalette.ColorRole.ToolTipBase: "#173d30",
+    QPalette.ColorRole.ToolTipText: "#ffffff",
+    QPalette.ColorRole.Highlight: "#2b9367",
+    QPalette.ColorRole.HighlightedText: "#ffffff",
+    QPalette.ColorRole.PlaceholderText: "#8b9892",
+    QPalette.ColorRole.Link: "#176d49",
+}
+
+
+def application_palette() -> QPalette:
+    """Return the light palette the stylesheet is designed against."""
+
+    palette = QPalette()
+    for role, colour in _PALETTE_COLOURS.items():
+        palette.setColor(role, QColor(colour))
+    disabled = QPalette.ColorGroup.Disabled
+    palette.setColor(disabled, QPalette.ColorRole.Text, QColor("#8b9892"))
+    palette.setColor(disabled, QPalette.ColorRole.ButtonText, QColor("#8b9892"))
+    palette.setColor(disabled, QPalette.ColorRole.WindowText, QColor("#8b9892"))
+    return palette
+
+
+def apply_application_theme(application: QApplication) -> None:
+    """Give the application its own look, independent of the desktop theme."""
+
+    application.setStyle("Fusion")
+    application.setPalette(application_palette())
+    application.setStyleSheet(APPLICATION_STYLESHEET)

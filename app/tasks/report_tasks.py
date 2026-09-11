@@ -43,22 +43,22 @@ def generate_daily_owner_report(report_date: str | None = None) -> str | None:
         top_models = reports.top_selling_models(period)
         low_stock = reports.low_stock_models(limit=10)
         rows = [
-            ("Total Sales", f"{currency} {metrics.sales:,.2f}"),
-            ("Total Profit", f"{currency} {metrics.profit:,.2f}"),
+            ("Total Sales", f"{currency} {metrics.sales:,.0f}"),
+            ("Total Profit", f"{currency} {metrics.profit:,.0f}"),
             ("Units Sold", metrics.units_sold),
             ("Current Inventory", metrics.current_inventory),
             ("Low Stock Products", metrics.low_stock_products),
             ("Expiring in 90 Days", metrics.expiring_units),
-            ("Outstanding Payments", f"{currency} {metrics.outstanding_payments:,.2f}"),
+            ("Outstanding Payments", f"{currency} {metrics.outstanding_payments:,.0f}"),
         ]
         rows.extend(
-            (f"{method.title()} Sales", f"{currency} {amount:,.2f}")
+            (f"{method.title()} Sales", f"{currency} {amount:,.0f}")
             for method, amount in payments.items()
         )
         rows.extend(
             (
                 f"Top Model — {model.product}",
-                f"{model.units} unit(s), {currency} {model.revenue:,.2f}",
+                f"{model.units} unit(s), {currency} {model.revenue:,.0f}",
             )
             for model in top_models
         )

@@ -341,9 +341,9 @@ def test_dealers_screen_shows_advance_credit_as_credit(
     factory = sessionmaker[Session](bind=database_engine, expire_on_commit=False, autoflush=False)
     screen = DealersScreen(factory, owner, get_settings())
     qtbot.addWidget(screen)
-    assert screen._balance_text(Decimal("1250.00")) == "PKR 1,250.00"
-    assert screen._balance_text(Decimal("0.00")) == "PKR 0.00"
-    assert screen._balance_text(Decimal("-500.00")) == "PKR 500.00 credit"
+    assert screen._balance_text(Decimal("1250.00")) == "PKR 1,250"
+    assert screen._balance_text(Decimal("0.00")) == "PKR 0"
+    assert screen._balance_text(Decimal("-500.00")) == "PKR 500 credit"
     QThreadPool.globalInstance().waitForDone(5000)
 
 

@@ -50,6 +50,7 @@ from app.printing.shop_profile import load_shop_profile
 from app.security.authentication import AuthenticatedUser
 from app.security.permissions import Permission, has_permission
 from app.services.backup_service import BackupService
+from app.services.data_export_service import DataExportResult, DataExportService
 from app.services.settings_service import SettingsService
 from app.tasks.email_tasks import send_email
 from app.ui.widgets import RowsTableModel, show_error
@@ -306,13 +307,25 @@ class SettingsScreen(QWidget):
         self.retention.setValue(self._settings.backup_retention_days)
         backup_now = QPushButton("Back Up Now")
         backup_now.clicked.connect(self._backup_now)
+        self.export_data_button = QPushButton("Back Up To Excel && CSV")
+        self.export_data_button.clicked.connect(self._export_data)
+        self.export_data_button.setEnabled(
+            has_permission(self._actor.role, Permission.MANAGE_SETTINGS)
+        )
+        export_note = QLabel(
+            "Writes every table to one spreadsheet and one archive of CSV files, named for the "
+            "dates the data covers. Readable anywhere; use a database backup to restore."
+        )
+        export_note.setWordWrap(True)
         restore = QPushButton("Restore Backup…")
         restore.setProperty("danger", True)
         restore.setEnabled(has_permission(self._actor.role, Permission.RESTORE_DATABASE))
         restore.clicked.connect(self._restore)
         form.addRow("Backup directory", self.backup_directory)
         form.addRow("Retention days", self.retention)
-        form.addRow("", backup_now)
+        form.addRow("Database backup", backup_now)
+        form.addRow("Data backup", self.export_data_button)
+        form.addRow(export_note)
         form.addRow("Owner only", restore)
         self.tabs.addTab(tab, "Backup")
 
@@ -546,6 +559,42 @@ class SettingsScreen(QWidget):
             ),
             failed=lambda error: show_error(self, error),
         )
+
+    def _export_data(self) -> None:
+        directory = Path(self.backup_directory.text()).expanduser()
+        runtime_settings = self._backup_runtime_settings()
+        actor = self._actor
+        self.export_data_button.setEnabled(False)
+
+        def operation() -> DataExportResult:
+            with self._session_factory() as session:
+                result = DataExportService(session, runtime_settings).export(directory, actor)
+                session.commit()
+                return result
+
+        self._worker = start_worker(
+            operation,
+            succeeded=self._data_exported,
+            failed=self._data_export_failed,
+        )
+
+    def _data_exported(self, result: DataExportResult) -> None:
+        self.export_data_button.setEnabled(True)
+        period = (
+            f"{format_date(result.period_start)} to {format_date(result.period_end)}"
+            if result.period_start
+            else "no dated records"
+        )
+        QMessageBox.information(
+            self,
+            "Data backup complete",
+            f"{result.total_rows:,} rows covering {period} were written to:\n\n"
+            f"{result.workbook}\n{result.csv_archive}",
+        )
+
+    def _data_export_failed(self, error: Exception) -> None:
+        self.export_data_button.setEnabled(True)
+        show_error(self, error)
 
     def _restore(self) -> None:
         runtime_settings = self._backup_runtime_settings()

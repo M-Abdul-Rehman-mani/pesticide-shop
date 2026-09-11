@@ -189,7 +189,7 @@ class SuppliersScreen(QWidget):
                             supplier.company_name or "—",
                             supplier.phone,
                             supplier.email or "—",
-                            f"{self._currency} {supplier.balance:,.2f}",
+                            f"{self._currency} {supplier.balance:,.0f}",
                             "Yes" if supplier.is_active else "No",
                             "",
                         )
@@ -390,8 +390,8 @@ class SuppliersScreen(QWidget):
                     (
                         purchase.purchase_number,
                         format_date(purchase.purchase_date),
-                        f"{self._currency} {purchase.total:,.2f}",
-                        f"{self._currency} {purchase.remaining_amount:,.2f}",
+                        f"{self._currency} {purchase.total:,.0f}",
+                        f"{self._currency} {purchase.remaining_amount:,.0f}",
                         purchase.payment_status.value,
                     )
                     for purchase in purchases

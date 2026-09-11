@@ -723,7 +723,7 @@ def test_receipt_carries_the_counter_columns_and_totals(qapp: QApplication) -> N
     roll_text = roll.getAllText(0).text()
     for wanted in ("Item Name", "Qty.", "Price", "Sub Total", "No of Items", "Grand Total"):
         assert wanted in roll_text, f"the receipt should show {wanted!r}"
-    assert f"{receipt.total:,.2f}" in roll_text
+    assert f"{receipt.total:,.0f}" in roll_text, "money prints as whole units"
 
     # The delivery challan is a quantity document and carries no money.
     challan = service.load(

@@ -24,7 +24,7 @@ from app.models.supplier import Supplier
 from app.reports.report_service import (
     DateRange,
     ProductMetrics,
-    ProductSummary,
+    ProductRow,
     ReportService,
 )
 from app.security.authentication import AuthenticatedUser
@@ -222,107 +222,124 @@ def test_back_to_back_workers_both_deliver_their_results(qapp: QApplication) -> 
     assert active_worker_count() == 0
 
 
+def _rows(*names: str, manufacturer: str = "Test Crop Sciences") -> list[ProductRow]:
+    return [
+        ProductRow(
+            id=uuid.uuid4(),
+            name=name,
+            full_name=f"{name} 1-L",
+            manufacturer=manufacturer,
+            is_active=True,
+            in_stock=12,
+            minimum_stock=5,
+            active_batches=2,
+            units_sold=3,
+            sales=Decimal("450.00"),
+            profit=Decimal("150.00"),
+            last_sold=None,
+        )
+        for name in names
+    ]
+
+
 @pytest.mark.ui
-def test_dashboard_builds_a_tab_for_every_product(
-    qtbot: QtBot,
-    database_engine: Engine,
-    db_session: Session,
-    owner: AuthenticatedUser,
-    supplier: Supplier,
-    product: Product,
+def test_the_dashboard_has_four_views_and_lists_every_product(
+    qtbot: QtBot, database_engine: Engine
 ) -> None:
-    """The overview stays first and each catalogue product gets its own tab."""
+    """General, Customers, Dealers, Products -- and the catalogue inside the last."""
 
     factory = sessionmaker[Session](bind=database_engine, expire_on_commit=False, autoflush=False)
     screen = DashboardScreen(factory, TIMEZONE, "PKR")
     qtbot.addWidget(screen)
-    fixed = ["All Products", "Customers", "Dealers"]
-    assert [screen.tabs.tabText(i) for i in range(screen.tabs.count())] == fixed
-
-    names = ["Alpha Product", "Beta Product"]
-    screen._rebuild_product_tabs([ProductSummary(uuid.uuid4(), name, True) for name in names])
-    assert [screen.tabs.tabText(i) for i in range(screen.tabs.count())] == [*fixed, *names]
-    first = screen._FIXED_TABS
-    assert all(isinstance(screen.tabs.widget(i), ProductTab) for i in (first, first + 1))
-
-    # A product removed from the catalogue loses its tab; the rest are reused.
-    kept = screen.tabs.widget(first)
-    assert isinstance(kept, ProductTab)
-    screen._rebuild_product_tabs([kept.product])
     assert [screen.tabs.tabText(i) for i in range(screen.tabs.count())] == [
-        *fixed,
-        "Alpha Product",
+        "General",
+        "Customers",
+        "Dealers",
+        "Products",
     ]
-    assert screen.tabs.widget(first) is kept
+
+    rows = _rows("Alpha Product", "Beta Product")
+    screen._products_loaded(rows)
+    products = screen.products
+    assert products.model.rowCount() == 2
+    assert products.model.data(products.model.index(0, 0)) == "Alpha Product 1-L"
+    assert products.model.data(products.model.index(0, 2)) == "12"
+    assert products.model.data(products.model.index(0, 5)) == "PKR 450"
+    assert "2 products" in products.count.text()
+    assert products.showing_product is False
+
+    # The search narrows the list without touching the loaded data.
+    products.search.setText("beta")
+    assert products.model.rowCount() == 1
+    assert products.model.data(products.model.index(0, 0)) == "Beta Product 1-L"
+    products.search.clear()
+    assert products.model.rowCount() == 2
 
 
 @pytest.mark.ui
-def test_changing_the_period_marks_product_tabs_stale(
+def test_clicking_a_product_opens_its_own_dashboard(qtbot: QtBot, database_engine: Engine) -> None:
+    factory = sessionmaker[Session](bind=database_engine, expire_on_commit=False, autoflush=False)
+    screen = DashboardScreen(factory, TIMEZONE, "PKR")
+    qtbot.addWidget(screen)
+    rows = _rows("Alpha Product", "Beta Product")
+    screen._products_loaded(rows)
+    products = screen.products
+
+    products._row_chosen(products.model.index(1, 0))
+    assert products.showing_product is True
+    assert products.detail is not None
+    assert products.detail.product.id == rows[1].id
+    assert products.detail.heading.text() == "Beta Product 1-L"
+
+    # Opening another product must not leave the previous one's figures on screen.
+    products.detail.cards.set_value("Units Sold", "99")
+    products.detail.loaded = True
+    products._row_chosen(products.model.index(0, 0))
+    assert products.detail.product.id == rows[0].id
+    assert products.detail.cards.cards["Units Sold"].value_label.text() == "—"
+    assert products.detail.loaded is False
+
+    products.show_list()
+    assert products.showing_product is False
+
+
+@pytest.mark.ui
+def test_changing_the_period_marks_the_product_views_stale(
     qtbot: QtBot, database_engine: Engine
 ) -> None:
     factory = sessionmaker[Session](bind=database_engine, expire_on_commit=False, autoflush=False)
     screen = DashboardScreen(factory, TIMEZONE, "PKR")
     qtbot.addWidget(screen)
-    screen._rebuild_product_tabs([ProductSummary(uuid.uuid4(), "Gamma Product", True)])
-    tab = screen.tabs.widget(screen._FIXED_TABS)
-    assert isinstance(tab, ProductTab)
-    tab.loaded = True
+    rows = _rows("Gamma Product")
+    screen._products_loaded(rows)
+    screen.products.open_product(rows[0].summary)
+    detail = screen.products.detail
+    assert detail is not None
+    detail.loaded = True
+    screen.products.loaded = True
+
     screen.from_date.setDate(screen.from_date.date().addDays(-3))
-    assert tab.loaded is False
+    assert (screen.products.loaded, detail.loaded) == (False, False)
 
 
 @pytest.mark.ui
-def test_product_tabs_stay_readable_for_a_large_catalogue(
+def test_the_product_search_opens_that_products_dashboard(
     qtbot: QtBot, database_engine: Engine
 ) -> None:
-    """A long catalogue must not elide every tab down to "A...", "SE...".
-
-    Reported from a shop with 23 products: the tab bar named nothing.
-    """
-
-    from PySide6.QtCore import Qt
-
     factory = sessionmaker[Session](bind=database_engine, expire_on_commit=False, autoflush=False)
     screen = DashboardScreen(factory, TIMEZONE, "PKR")
     qtbot.addWidget(screen)
-    products = [
-        ProductSummary(uuid.uuid4(), f"PRODUCT {index:02d} EC", True, f"PRODUCT {index:02d} EC 1-L")
-        for index in range(23)
-    ]
-    screen._rebuild_product_tabs(products)
+    rows = _rows(*(f"PRODUCT {index}" for index in range(6)))
+    screen._products_loaded(rows)
+    assert screen.product_jump.count() == len(rows) + 1  # a blank entry leads
 
-    assert screen.tabs.elideMode() == Qt.TextElideMode.ElideNone
-    assert screen.tabs.usesScrollButtons() is True
-    assert screen.tabs.count() == len(products) + screen._FIXED_TABS
-    # Tabs carry the short name; the full one is available on hover.
-    first = screen._FIXED_TABS
-    assert screen.tabs.tabText(first) == "PRODUCT 00 EC"
-    assert screen.tabs.tabToolTip(first) == "PRODUCT 00 EC 1-L"
-    assert all(
-        "…" not in screen.tabs.tabText(index) and "..." not in screen.tabs.tabText(index)
-        for index in range(screen.tabs.count())
-    )
-
-
-@pytest.mark.ui
-def test_the_product_search_opens_that_products_tab(qtbot: QtBot, database_engine: Engine) -> None:
-    factory = sessionmaker[Session](bind=database_engine, expire_on_commit=False, autoflush=False)
-    screen = DashboardScreen(factory, TIMEZONE, "PKR")
-    qtbot.addWidget(screen)
-    products = [
-        ProductSummary(uuid.uuid4(), f"PRODUCT {index}", True, f"PRODUCT {index} 1-L")
-        for index in range(6)
-    ]
-    screen._rebuild_product_tabs(products)
-    assert screen.product_jump.count() == len(products) + 1  # a blank entry leads
-
-    wanted = products[4]
+    wanted = rows[4]
     screen.product_jump.setCurrentIndex(screen.product_jump.findData(wanted.id))
-    current = screen.tabs.currentWidget()
-    assert isinstance(current, ProductTab)
-    assert current.product.id == wanted.id
-    assert current.heading.text() == wanted.full_name
-    assert screen.tabs.tabText(screen.tabs.currentIndex()) == wanted.name
+    assert screen.tabs.currentIndex() == DashboardScreen.PRODUCTS_TAB
+    assert screen.products.showing_product is True
+    assert screen.products.detail is not None
+    assert screen.products.detail.product.id == wanted.id
+    assert screen.products.detail.heading.text() == wanted.full_name
 
 
 def test_stock_note_does_not_invent_a_reorder_level() -> None:

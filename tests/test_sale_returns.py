@@ -436,13 +436,13 @@ def test_return_dialog_totals_the_credit_and_collects_lines(qtbot: QtBot) -> Non
     dialog = SaleReturnDialog("INV-2026-000001", lines, "PKR")
     qtbot.addWidget(dialog)
     assert dialog.values() == ()
-    assert "0.00" in dialog.credit_label.text()
+    assert dialog.credit_label.text().endswith("0")
 
     # A line already partly returned can only give back what is left.
     assert dialog._quantities[0].maximum() == 8
     dialog._quantities[0].setValue(3)
     dialog._quantities[1].setValue(2)
-    assert "630.00" in dialog.credit_label.text()
+    assert "630" in dialog.credit_label.text()
 
     dialog._restock[1].setChecked(False)
     selected = dialog.values()
@@ -477,3 +477,46 @@ def test_edit_mode_switches_the_sales_screen_and_back(
     assert screen._editing is None
     assert screen.complete.text() == "Complete Sale && Queue Emails"
     assert screen.payments.isEnabled() is True
+
+
+@pytest.mark.ui
+def test_sale_returns_tab_lists_recorded_credit_notes(
+    qtbot: QtBot,
+    db_session: Session,
+    database_engine: Engine,
+    owner: AuthenticatedUser,
+    supplier: Supplier,
+    product: Product,
+) -> None:
+    """A recorded return has to be visible somewhere; this is where."""
+
+    from app.config.settings import get_settings
+    from app.ui.sales.screen import RETURNS_TAB, SalesScreen
+
+    dealer = _dealer(db_session, owner)
+    batch = _batch(db_session, owner, supplier, product, batch_number="RET-TAB")
+    sale = _sale(db_session, owner, batch, quantity=10, dealer=dealer)
+    item = db_session.scalars(select(SaleItem).where(SaleItem.sale_id == sale.id)).one()
+    document = SaleReturnService(db_session).record(
+        sale.id, (ReturnLineInput(item.id, 4, restock=False),), owner, reason="Leaking pack"
+    )
+    db_session.flush()
+
+    factory = sessionmaker[Session](bind=database_engine, expire_on_commit=False, autoflush=False)
+    screen = SalesScreen(factory, owner, get_settings())
+    qtbot.addWidget(screen)
+    assert screen.tabs.tabText(RETURNS_TAB) == "Sale Returns"
+
+    screen._display_returns([document])
+    row = [screen.returns_model.data(screen.returns_model.index(0, column)) for column in range(8)]
+    assert row[0] == document.return_number
+    assert row[2] == sale.invoice_number
+    assert row[3] == dealer.display_name
+    assert "not restocked" in str(row[4])
+    assert row[5].endswith("600"), "credit prints as whole units"
+    assert row[6] == "Against balance"
+    assert "1 return" in screen.returns_count.text()
+
+    # Opening the invoice from a credit note has to land on the sales list.
+    screen._open_returned_invoice(0)
+    assert screen.sales_search.text() == sale.invoice_number

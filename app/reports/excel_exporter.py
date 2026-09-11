@@ -34,6 +34,72 @@ class ExcelExporter:
             return value
         return str(value)
 
+    def export_workbook(
+        self,
+        path: Path,
+        datasets: Iterable[tuple[str, Sequence[str], Iterable[Sequence[object]]]],
+    ) -> Path:
+        """Write several datasets to one workbook, a sheet each.
+
+        Used by the whole-database export, where the point is that one file holds
+        every table rather than one report.
+        """
+
+        workbook = Workbook()
+        default = workbook.active
+        used: set[str] = set()
+        for title, headers, rows in datasets:
+            sheet = workbook.create_sheet(self._sheet_title(title, used))
+            self._write_sheet(sheet, headers, rows)
+        if default is not None and not workbook.sheetnames[1:]:
+            # An empty workbook is still a valid file; keep the default sheet so
+            # the export opens rather than erroring.
+            assert isinstance(default, Worksheet)
+            default.title = "Empty"
+        elif default is not None:
+            workbook.remove(default)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        workbook.save(path)
+        return path
+
+    @staticmethod
+    def _sheet_title(title: str, used: set[str]) -> str:
+        # Excel limits sheet names to 31 characters and rejects duplicates.
+        candidate = title[:31] or "Sheet"
+        suffix = 2
+        while candidate.lower() in used:
+            candidate = f"{title[:28]}_{suffix}"
+            suffix += 1
+        used.add(candidate.lower())
+        return candidate
+
+    def _write_sheet(
+        self,
+        sheet: Worksheet,
+        headers: Sequence[str],
+        rows: Iterable[Sequence[object]],
+    ) -> None:
+        sheet.freeze_panes = "A2"
+        for column, header in enumerate(headers, start=1):
+            cell = sheet.cell(1, column, header)
+            cell.fill = self.HEADER_FILL
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.alignment = Alignment(horizontal="center")
+        widths = [len(header) for header in headers]
+        row_number = 1
+        for row_number, values in enumerate(rows, start=2):
+            for column, value in enumerate(values, start=1):
+                cell = sheet.cell(row_number, column, self._cell_value(value))
+                if isinstance(value, (date, datetime)):
+                    cell.number_format = "dd-mmm-yyyy hh:mm"
+                # Sampling keeps a large table from being measured row by row.
+                if column <= len(widths) and row_number <= 200:
+                    widths[column - 1] = max(widths[column - 1], len(str(cell.value or "")))
+        if headers:
+            sheet.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{max(1, row_number)}"
+        for column, width in enumerate(widths, start=1):
+            sheet.column_dimensions[get_column_letter(column)].width = min(50, width + 2)
+
     def export(
         self,
         path: Path,

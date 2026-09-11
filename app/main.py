@@ -14,7 +14,7 @@ from PySide6.QtCore import QObject, QTimer
 from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
 
 from app.config.settings import Settings
-from app.ui.theme import APPLICATION_STYLESHEET
+from app.ui.theme import apply_application_theme
 from app.utils.paths import resource_path
 
 logger = logging.getLogger(__name__)
@@ -198,8 +198,7 @@ def main() -> int:
     application = QApplication(sys.argv)
     application.setApplicationName("Pesticide Shop Manager")
     application.setOrganizationName("Crop Care Retail")
-    application.setStyle("Fusion")
-    application.setStyleSheet(APPLICATION_STYLESHEET)
+    apply_application_theme(application)
     try:
         settings = get_settings()
     except ConfigurationValidationError as exc:

@@ -40,6 +40,7 @@ from app.models.enums import PaymentMethod, SaleStatus, SettingCategory
 from app.models.inventory import StockBatch
 from app.models.product import Product
 from app.models.sale import Sale, SaleItem
+from app.models.sale_return import SaleReturn, SaleReturnItem
 from app.security.authentication import AuthenticatedUser
 from app.security.permissions import Permission, has_permission
 from app.services.catalog_service import CustomerService, DealerService
@@ -69,6 +70,11 @@ from app.ui.widgets import (
 from app.ui.workers import FunctionWorker, start_worker
 from app.utils.exceptions import ConflictError, NotFoundError
 from app.utils.formatting import format_date
+
+#: Tab positions on this screen, in the order they are built.
+NEW_SALE_TAB = 0
+HISTORY_TAB = 1
+RETURNS_TAB = 2
 
 
 @dataclass(slots=True)
@@ -199,7 +205,7 @@ class SaleReturnDialog(QDialog):
             ),
             Decimal("0.00"),
         )
-        self.credit_label.setText(f"Credit: {self._currency} {credit:,.2f}")
+        self.credit_label.setText(f"Credit: {self._currency} {credit:,.0f}")
 
     def _accept_if_valid(self) -> None:
         if not self.reason.text().strip():
@@ -405,6 +411,7 @@ class SalesScreen(QWidget):
         self.add_recipient.clicked.connect(self._add_recipient)
         self._update_add_recipient_button()
         self._build_sales_history_tab()
+        self._build_returns_tab()
         self._load_choices()
         self._update_cart_state()
 
@@ -639,7 +646,7 @@ class SalesScreen(QWidget):
         if data := self.batch.currentData():
             _batch_id, _product, _number, available, price = data
             self.quantity.setMaximum(available)
-            self.unit_price.setText(f"{price:.2f}")
+            self.unit_price.setText(f"{price:.0f}")
 
     def _scan_barcode(self) -> None:
         """Select the scanned product's batch and add it to the invoice.
@@ -697,7 +704,7 @@ class SalesScreen(QWidget):
         quantity.setValue(entry.quantity)
         quantity.valueChanged.connect(self._calculate)
         self.cart_table.setCellWidget(row, 2, quantity)
-        unit_price = MoneyEdit(f"{entry.unit_price:.2f}")
+        unit_price = MoneyEdit(f"{entry.unit_price:.0f}")
         unit_price.textChanged.connect(self._calculate)
         self.cart_table.setCellWidget(row, 3, unit_price)
         line_discount = MoneyEdit()
@@ -749,14 +756,14 @@ class SalesScreen(QWidget):
                 subtotal += gross
                 line_discounts += line.discount
                 if item := self.cart_table.item(row, 5):
-                    item.setText(f"{gross - line.discount:,.2f}")
+                    item.setText(f"{gross - line.discount:,.0f}")
             total = (
                 subtotal - line_discounts - self.discount.decimal_value() + self.tax.decimal_value()
             )
         except Exception:
             return
-        self.subtotal_label.setText(f"{self._settings.app_currency} {subtotal:,.2f}")
-        self.total_label.setText(f"{self._settings.app_currency} {total:,.2f}")
+        self.subtotal_label.setText(f"{self._settings.app_currency} {subtotal:,.0f}")
+        self.total_label.setText(f"{self._settings.app_currency} {total:,.0f}")
 
     def save(self) -> None:
         if self.recipient.currentIndex() < 0:
@@ -882,9 +889,202 @@ class SalesScreen(QWidget):
         self.sales_search.textChanged.connect(lambda _text: self._sales_search_timer.start())
         self.sales_search.returnPressed.connect(self._refresh_sales_history)
         refresh.clicked.connect(self._refresh_sales_history)
-        self.tabs.currentChanged.connect(
-            lambda index: self._refresh_sales_history() if index == 1 else None
+        self.tabs.currentChanged.connect(self._tab_changed)
+
+    def _tab_changed(self, index: int) -> None:
+        """Reload whichever list has just been opened."""
+
+        if index == HISTORY_TAB:
+            self._refresh_sales_history()
+        elif index == RETURNS_TAB:
+            self._refresh_returns()
+
+    def _build_returns_tab(self) -> None:
+        """List the credit notes, so a return is visible after it is recorded."""
+
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(12, 12, 12, 12)
+        search_row = QHBoxLayout()
+        self.returns_search = QLineEdit()
+        self.returns_search.setPlaceholderText(
+            "Search return number, invoice, customer, dealer, or product"
         )
+        self.returns_search.setClearButtonEnabled(True)
+        refresh = QPushButton("Refresh")
+        refresh.setProperty("secondary", True)
+        search_row.addWidget(QLabel("Search"))
+        search_row.addWidget(self.returns_search, 1)
+        search_row.addWidget(refresh)
+        self.returns_model = RowsTableModel(
+            (
+                "Return",
+                "Date",
+                "Invoice",
+                "Recipient",
+                "Products",
+                "Credit",
+                "Settled",
+                "Recorded by",
+                "Actions",
+            ),
+            page,
+        )
+        self.returns_table = QTableView()
+        self.returns_table.setModel(self.returns_model)
+        configure_table(self.returns_table, stretch_column=4, minimum_section_size=76)
+        self.returns_count = QLabel("Loading returns…")
+        self.returns_count.setObjectName("RecordCount")
+        hint = QLabel(
+            "Record a return from All Sales > Record a return. A credit note is never edited; "
+            "correct one by recording the opposite movement."
+        )
+        hint.setObjectName("FieldHint")
+        hint.setWordWrap(True)
+        layout.addLayout(search_row)
+        layout.addWidget(self.returns_table, 1)
+        layout.addWidget(self.returns_count)
+        layout.addWidget(hint)
+        self.tabs.addTab(page, "Sale Returns")
+        self._returns: list[SaleReturn] = []
+        self._returns_search_timer = QTimer(self)
+        self._returns_search_timer.setSingleShot(True)
+        self._returns_search_timer.setInterval(300)
+        self._returns_search_timer.timeout.connect(self._refresh_returns)
+        self.returns_search.textChanged.connect(lambda _text: self._returns_search_timer.start())
+        self.returns_search.returnPressed.connect(self._refresh_returns)
+        refresh.clicked.connect(self._refresh_returns)
+
+    def _refresh_returns(self) -> None:
+        query = self.returns_search.text().strip()
+
+        def operation() -> list[SaleReturn]:
+            with self._session_factory() as session:
+                statement = select(SaleReturn).options(
+                    selectinload(SaleReturn.items), selectinload(SaleReturn.sale)
+                )
+                if query:
+                    pattern = f"%{query}%"
+                    statement = statement.where(
+                        or_(
+                            SaleReturn.return_number.ilike(pattern),
+                            SaleReturn.reason.ilike(pattern),
+                            SaleReturn.sale.has(
+                                or_(
+                                    Sale.invoice_number.ilike(pattern),
+                                    Sale.customer.has(Customer.name.ilike(pattern)),
+                                    Sale.dealer.has(
+                                        or_(
+                                            Dealer.name.ilike(pattern),
+                                            Dealer.business_name.ilike(pattern),
+                                        )
+                                    ),
+                                )
+                            ),
+                            SaleReturn.items.any(
+                                SaleReturnItem.product.has(Product.name.ilike(pattern))
+                            ),
+                        )
+                    )
+                documents = list(
+                    session.scalars(statement.order_by(SaleReturn.returned_at.desc()).limit(500))
+                )
+                for document in documents:
+                    # Touch the joined rows while the session is open; the list is
+                    # rendered after it closes.
+                    _ = document.creator.full_name
+                    _ = self._recipient_name(document.sale)
+                    _ = [(item.product.display_name, item.quantity) for item in document.items]
+                session.expunge_all()
+                return documents
+
+        self._worker = start_worker(
+            operation,
+            succeeded=self._display_returns,
+            failed=lambda error: show_error(self, error),
+        )
+
+    @staticmethod
+    def _recipient_name(sale: Sale) -> str:
+        if sale.dealer:
+            return sale.dealer.display_name
+        return sale.customer.name if sale.customer else "Walk-in"
+
+    def _display_returns(self, result: object) -> None:
+        self._returns = cast(list[SaleReturn], result)
+        currency = self._settings.app_currency
+        rows: list[tuple[object, ...]] = []
+        for document in self._returns:
+            products = ", ".join(
+                f"{item.product.display_name} x {item.quantity}"
+                + ("" if item.restocked else " (not restocked)")
+                for item in document.items
+            )
+            rows.append(
+                (
+                    document.return_number,
+                    format_date(document.returned_at),
+                    document.sale.invoice_number,
+                    self._recipient_name(document.sale),
+                    products,
+                    f"{currency} {document.total:,.0f}",
+                    "Refunded" if document.refunded else "Against balance",
+                    document.creator.full_name,
+                    "",
+                )
+            )
+        self.returns_model.set_rows(rows)
+        populate_row_actions(
+            self.returns_table,
+            8,
+            len(rows),
+            (
+                ("View details", self._view_return),
+                ("Open the invoice", self._open_returned_invoice),
+            ),
+        )
+        self.returns_count.setText(record_count_text(len(rows), "return"))
+
+    def _view_return(self, row: int) -> None:
+        if row >= len(self._returns):
+            return
+        document = self._returns[row]
+        currency = self._settings.app_currency
+        products = "\n".join(
+            f"{item.product.display_name} — {item.quantity} x {item.unit_price:,.0f}"
+            f" = {item.total:,.0f}" + ("" if item.restocked else "  (written off, not restocked)")
+            for item in document.items
+        )
+        show_record_details(
+            self,
+            f"Return {document.return_number}",
+            (
+                ("Return", document.return_number),
+                ("Date", format_date(document.returned_at)),
+                ("Invoice", document.sale.invoice_number),
+                ("Recipient", self._recipient_name(document.sale)),
+                ("Returned", products),
+                ("Credit", f"{currency} {document.total:,.0f}"),
+                (
+                    "Settlement",
+                    "Refunded to the buyer"
+                    if document.refunded
+                    else "Credited against the invoice balance",
+                ),
+                ("Reason", document.reason),
+                ("Recorded by", document.creator.full_name),
+            ),
+        )
+
+    def _open_returned_invoice(self, row: int) -> None:
+        """Show the invoice a credit note was raised against."""
+
+        if row >= len(self._returns):
+            return
+        document = self._returns[row]
+        self.sales_search.setText(document.sale.invoice_number)
+        self.tabs.setCurrentIndex(HISTORY_TAB)
+        self._refresh_sales_history()
 
     def _refresh_sales_history(self) -> None:
         query = self.sales_search.text().strip()
@@ -950,9 +1150,9 @@ class SalesScreen(QWidget):
                     format_date(sale.sale_date),
                     recipient,
                     products,
-                    f"{self._settings.app_currency} {sale.total:,.2f}",
-                    f"{self._settings.app_currency} {sale.paid_amount:,.2f}",
-                    f"{self._settings.app_currency} {sale.remaining_amount:,.2f}",
+                    f"{self._settings.app_currency} {sale.total:,.0f}",
+                    f"{self._settings.app_currency} {sale.paid_amount:,.0f}",
+                    f"{self._settings.app_currency} {sale.remaining_amount:,.0f}",
                     sale.status.value,
                     "",
                 )
@@ -985,7 +1185,7 @@ class SalesScreen(QWidget):
             else "Walk-in"
         )
         products = "\n".join(
-            f"{item.product.display_name} — {item.quantity} x {item.unit_price:,.2f}"
+            f"{item.product.display_name} — {item.quantity} x {item.unit_price:,.0f}"
             for item in sale.items
         )
         show_record_details(
@@ -996,9 +1196,9 @@ class SalesScreen(QWidget):
                 ("Date", format_date(sale.sale_date)),
                 ("Recipient", recipient),
                 ("Products", products),
-                ("Total", f"{self._settings.app_currency} {sale.total:,.2f}"),
-                ("Paid", f"{self._settings.app_currency} {sale.paid_amount:,.2f}"),
-                ("Balance", f"{self._settings.app_currency} {sale.remaining_amount:,.2f}"),
+                ("Total", f"{self._settings.app_currency} {sale.total:,.0f}"),
+                ("Paid", f"{self._settings.app_currency} {sale.paid_amount:,.0f}"),
+                ("Balance", f"{self._settings.app_currency} {sale.remaining_amount:,.0f}"),
                 ("Payment", sale.payment_status.value),
                 ("Status", sale.status.value),
                 ("Address", sale.delivery_address),
@@ -1026,7 +1226,7 @@ class SalesScreen(QWidget):
         self.payments.setToolTip(
             "Payments are not edited here. Reverse a payment first if one was taken."
         )
-        self.tabs.setCurrentIndex(0)
+        self.tabs.setCurrentIndex(NEW_SALE_TAB)
 
     def _leave_edit_mode(self) -> None:
         self._editing = None
@@ -1040,7 +1240,7 @@ class SalesScreen(QWidget):
     def _cancel_edit(self) -> None:
         self._leave_edit_mode()
         self._clear_cart()
-        self.tabs.setCurrentIndex(1)
+        self.tabs.setCurrentIndex(HISTORY_TAB)
 
     def _clear_cart(self) -> None:
         self._cart.clear()
@@ -1104,8 +1304,8 @@ class SalesScreen(QWidget):
             self.store.setText(str(header["store"]))
             self.delivery_address.setText(str(header["delivery_address"]))
             self.notes.setText(str(header["notes"]))
-            self.discount.setText(f"{header['discount']:.2f}")
-            self.tax.setText(f"{header['tax']:.2f}")
+            self.discount.setText(f"{header['discount']:.0f}")
+            self.tax.setText(f"{header['tax']:.0f}")
             missing = [
                 batch_id
                 for batch_id, _quantity, _price, _line_discount in lines
@@ -1138,12 +1338,12 @@ class SalesScreen(QWidget):
                 # original quantity even when the free stock is now lower.
                 self.quantity.setMaximum(max(self.quantity.maximum(), quantity))
                 self.quantity.setValue(quantity)
-                self.unit_price.setText(f"{unit_price:.2f}")
+                self.unit_price.setText(f"{unit_price:.0f}")
                 self._add_batch()
                 row = len(self._cart) - 1
                 discount_widget = self.cart_table.cellWidget(row, 4)
                 if isinstance(discount_widget, MoneyEdit):
-                    discount_widget.setText(f"{line_discount:.2f}")
+                    discount_widget.setText(f"{line_discount:.0f}")
                 self._calculate()
                 return True
         return False
@@ -1199,7 +1399,7 @@ class SalesScreen(QWidget):
                     )
                     return (
                         f"{document.return_number} credited "
-                        f"{self._settings.app_currency} {document.total:,.2f}"
+                        f"{self._settings.app_currency} {document.total:,.0f}"
                         + (" and the balance was refunded." if document.refunded else ".")
                     )
 
@@ -1217,6 +1417,7 @@ class SalesScreen(QWidget):
         QMessageBox.information(self, "Return recorded", message)
         self._load_choices()
         self._refresh_sales_history()
+        self._refresh_returns()
         self.sale_completed.emit(invoice_number)
 
     def _void_sale(self, row: int) -> None:

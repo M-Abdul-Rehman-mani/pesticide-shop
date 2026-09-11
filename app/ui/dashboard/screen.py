@@ -1,15 +1,14 @@
-"""Date-filtered dashboard: an overall summary plus one tab per product."""
+"""Date-filtered dashboard: the whole shop, its customers, its dealers, its products."""
 
 from __future__ import annotations
 
-import uuid
 from datetime import date
 from typing import cast
 
 from matplotlib.axes import Axes
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
-from PySide6.QtCore import QDate, Qt
+from PySide6.QtCore import QDate, QModelIndex, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDateEdit,
@@ -17,8 +16,10 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QSizePolicy,
+    QStackedWidget,
     QTableView,
     QTabWidget,
     QVBoxLayout,
@@ -34,6 +35,7 @@ from app.reports.report_service import (
     PartyRow,
     ProductBatchRow,
     ProductMetrics,
+    ProductRow,
     ProductSummary,
     ReportService,
     TopSellingModel,
@@ -392,10 +394,24 @@ class ProductTab(QWidget):
         )
 
     def set_product(self, product: ProductSummary) -> None:
-        """Track a renamed or reactivated product without rebuilding the tab."""
+        """Point the view at another product, clearing the previous one's figures."""
 
+        changed = product.id != self.product.id
         self.product = product
         self.heading.setText(product.display_name)
+        if changed:
+            self.reset()
+
+    def reset(self) -> None:
+        """Blank the view so one product's figures never stand under another's name."""
+
+        self.loaded = False
+        for name, *_rest in self.SPECIFICATIONS:
+            self.cards.set_value(name, "—")
+        self.summary.setText("Loading…")
+        self.batch_model.set_rows([])
+        self.chart.figure.clear()
+        self.chart.canvas.draw_idle()
 
     def display(
         self,
@@ -444,11 +460,161 @@ class ProductTab(QWidget):
         )
 
 
-class DashboardScreen(QWidget):
-    """The business overview, the customer and dealer views, and a tab per product."""
+class ProductsTab(QWidget):
+    """The catalogue as a list, with one product's dashboard behind it."""
 
-    #: Overview, Customers, Dealers; product tabs follow them.
-    _FIXED_TABS = 3
+    product_opened = Signal(object)
+
+    COLUMNS = (
+        "Product",
+        "Manufacturer",
+        "In Stock",
+        "Batches",
+        "Units Sold",
+        "Sales",
+        "Profit",
+        "Last Sold",
+        "Status",
+    )
+
+    def __init__(self, currency: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._currency = currency
+        self._rows: list[ProductRow] = []
+        self._visible: list[ProductRow] = []
+        self.loaded = False
+        self.detail: ProductTab | None = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(8)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self._build_list())
+        layout.addWidget(self.stack, 1)
+
+    def _build_list(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        search_row = QHBoxLayout()
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search product or manufacturer")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self._filter)
+        search_row.addWidget(QLabel("Search"))
+        search_row.addWidget(self.search, 1)
+        self.model = RowsTableModel(self.COLUMNS, page)
+        self.table = QTableView()
+        self.table.setModel(self.model)
+        configure_table(self.table, stretch_column=0, minimum_section_size=76)
+        self.table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
+        self.table.clicked.connect(self._row_chosen)
+        self.count = QLabel("Loading products…")
+        self.count.setObjectName("RecordCount")
+        hint = QLabel("Click a product to open its own dashboard.")
+        hint.setObjectName("FieldHint")
+        layout.addLayout(search_row)
+        layout.addWidget(self.table, 1)
+        layout.addWidget(self.count)
+        layout.addWidget(hint)
+        return page
+
+    # -- list ------------------------------------------------------------
+
+    def display(self, rows: list[ProductRow]) -> None:
+        self.loaded = True
+        self._rows = rows
+        self._filter()
+        current = self.current_product
+        if current is not None:
+            # Keep the open product's name in step with a rename or a deactivation.
+            for row in rows:
+                if row.id == current.id:
+                    self.set_product(row.summary)
+                    break
+
+    def _filter(self) -> None:
+        query = self.search.text().strip().lower()
+        self._visible = [
+            row
+            for row in self._rows
+            if not query or query in row.name.lower() or query in row.manufacturer.lower()
+        ]
+        self.model.set_rows(
+            [
+                (
+                    row.full_name,
+                    row.manufacturer,
+                    f"{row.in_stock:,}" + (" — reorder" if row.needs_reorder else ""),
+                    f"{row.active_batches:,}",
+                    f"{row.units_sold:,}",
+                    format_money(row.sales, self._currency),
+                    format_money(row.profit, self._currency),
+                    format_date(row.last_sold),
+                    "Active" if row.is_active else "Inactive",
+                )
+                for row in self._visible
+            ]
+        )
+        self.count.setText(record_count_text(len(self._visible), "product"))
+
+    def _row_chosen(self, index: QModelIndex) -> None:
+        row = index.row()
+        if 0 <= row < len(self._visible):
+            self.open_product(self._visible[row].summary)
+
+    # -- one product -----------------------------------------------------
+
+    def open_product(self, product: ProductSummary) -> None:
+        """Show one product's dashboard, building the view on first use."""
+
+        if self.detail is None:
+            self.detail = ProductTab(product, self._currency)
+            page = QWidget()
+            layout = QVBoxLayout(page)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(6)
+            back = QPushButton("← All products")
+            back.setProperty("secondary", True)
+            back.clicked.connect(self.show_list)
+            row = QHBoxLayout()
+            row.addWidget(back)
+            row.addStretch()
+            layout.addLayout(row)
+            layout.addWidget(self.detail, 1)
+            self.stack.addWidget(page)
+        else:
+            self.detail.set_product(product)
+        self.stack.setCurrentIndex(1)
+        self.product_opened.emit(product)
+
+    def set_product(self, product: ProductSummary) -> None:
+        if self.detail is not None:
+            self.detail.set_product(product)
+
+    def show_list(self) -> None:
+        self.stack.setCurrentIndex(0)
+
+    @property
+    def rows(self) -> list[ProductRow]:
+        return self._rows
+
+    @property
+    def showing_product(self) -> bool:
+        return self.stack.currentIndex() == 1
+
+    @property
+    def current_product(self) -> ProductSummary | None:
+        return self.detail.product if self.detail is not None and self.showing_product else None
+
+
+class DashboardScreen(QWidget):
+    """Four views of the shop: everything, its customers, its dealers, its products."""
+
+    GENERAL_TAB = 0
+    CUSTOMERS_TAB = 1
+    DEALERS_TAB = 2
+    PRODUCTS_TAB = 3
 
     def __init__(
         self,
@@ -462,7 +628,6 @@ class DashboardScreen(QWidget):
         self._timezone = timezone
         self._currency = currency
         self._worker: FunctionWorker | None = None
-        self._product_tabs: dict[uuid.UUID, ProductTab] = {}
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 12, 16, 10)
         layout.setSpacing(10)
@@ -486,8 +651,8 @@ class DashboardScreen(QWidget):
         period_label = QLabel("Reporting period")
         period_label.setObjectName("SectionTitle")
         self.product_jump = QComboBox()
-        configure_searchable_combo(self.product_jump, "Type a product name to open its tab")
-        self.product_jump.setToolTip("Jump straight to a product instead of scrolling the tabs")
+        configure_searchable_combo(self.product_jump, "Type a product name to open its dashboard")
+        self.product_jump.setToolTip("Open one product's dashboard by name")
         # Wide enough for a full product name without crowding the dates beside it.
         self.product_jump.setMinimumWidth(240)
         self.product_jump.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -504,19 +669,20 @@ class DashboardScreen(QWidget):
         layout.addWidget(filter_bar)
         self.tabs = QTabWidget()
         self.tabs.setUsesScrollButtons(True)
-        # Eliding squeezes a long catalogue's tabs down to "A...", "SE...", which
-        # names nothing. Full labels plus scroll buttons stay readable instead.
         self.tabs.setElideMode(Qt.TextElideMode.ElideNone)
         self.tabs.tabBar().setExpanding(False)
         self.tabs.setDocumentMode(True)
         self.overview = OverviewTab(currency)
-        self.tabs.addTab(self.overview, "All Products")
         self.customers = PartyTab(
             "Customers by revenue", CUSTOMER_SPECIFICATIONS, "Customer", currency
         )
         self.dealers = PartyTab("Dealers by revenue", DEALER_SPECIFICATIONS, "Dealer", currency)
+        self.products = ProductsTab(currency)
+        self.tabs.addTab(self.overview, "General")
         self.tabs.addTab(self.customers, "Customers")
         self.tabs.addTab(self.dealers, "Dealers")
+        self.tabs.addTab(self.products, "Products")
+        self.products.product_opened.connect(self._product_opened)
         layout.addWidget(self.tabs, 1)
         self.tabs.currentChanged.connect(self._tab_changed)
         self.product_jump.currentIndexChanged.connect(self._jump_to_product)
@@ -531,9 +697,9 @@ class DashboardScreen(QWidget):
             self.refresh()
 
     def refresh(self) -> None:
-        """Reload the product tab list, the overview, and the visible product tab."""
+        """Reload the overview, the product list, and whichever view is open."""
 
-        self._invalidate_product_tabs()
+        self._invalidate()
         self._load_overview()
         self._load_products()
         visible = self.tabs.currentWidget()
@@ -541,24 +707,38 @@ class DashboardScreen(QWidget):
             self._load_party(dealers=False)
         elif visible is self.dealers:
             self._load_party(dealers=True)
+        elif visible is self.products and (product := self.products.current_product):
+            self._load_product(product)
 
     def _period_changed(self) -> None:
-        self._invalidate_product_tabs()
+        self._invalidate()
 
-    def _invalidate_product_tabs(self) -> None:
-        for tab in self._product_tabs.values():
-            tab.loaded = False
+    def _invalidate(self) -> None:
+        """Mark every lazily loaded view stale after the period or data changes."""
+
         self.customers.loaded = False
         self.dealers.loaded = False
+        self.products.loaded = False
+        if self.products.detail is not None:
+            self.products.detail.loaded = False
 
     def _tab_changed(self, index: int) -> None:
         widget = self.tabs.widget(index)
-        if isinstance(widget, ProductTab) and not widget.loaded:
-            self._load_product(widget)
-        elif widget is self.customers and not self.customers.loaded:
+        if widget is self.customers and not self.customers.loaded:
             self._load_party(dealers=False)
         elif widget is self.dealers and not self.dealers.loaded:
             self._load_party(dealers=True)
+        elif widget is self.products:
+            if not self.products.loaded:
+                self._load_products()
+            detail = self.products.detail
+            if self.products.showing_product and detail is not None and not detail.loaded:
+                self._load_product(detail.product)
+
+    def _product_opened(self, product: object) -> None:
+        """Load the figures for the product the list just opened."""
+
+        self._load_product(cast(ProductSummary, product))
 
     def _period(self) -> DateRange:
         start = cast(date, self.from_date.date().toPython())
@@ -627,50 +807,24 @@ class DashboardScreen(QWidget):
         )
 
     def _load_products(self) -> None:
-        def operation() -> list[ProductSummary]:
+        def operation() -> list[ProductRow]:
+            period = self._period()
             with self._session_factory() as session:
-                return ReportService(session).products()
+                return ReportService(session).product_catalogue(period)
 
         self._worker = start_worker(
             operation,
-            succeeded=self._rebuild_product_tabs,
+            succeeded=self._products_loaded,
             failed=lambda error: show_error(self, error),
         )
 
-    def _rebuild_product_tabs(self, result: object) -> None:
-        """Add, remove, and rename product tabs to match the current catalogue."""
-
-        products = cast(list[ProductSummary], result)
-        current = self.tabs.currentWidget()
-        wanted = {product.id: product for product in products}
-        for product_id in list(self._product_tabs):
-            if product_id not in wanted:
-                tab = self._product_tabs.pop(product_id)
-                index = self.tabs.indexOf(tab)
-                if index >= 0:
-                    self.tabs.removeTab(index)
-                tab.deleteLater()
-        for position, product in enumerate(products, start=self._FIXED_TABS):
-            existing = self._product_tabs.get(product.id)
-            if existing is None:
-                tab = ProductTab(product, self._currency)
-                self._product_tabs[product.id] = tab
-                self.tabs.insertTab(position, tab, product.name)
-            else:
-                existing.set_product(product)
-                self.tabs.setTabText(self.tabs.indexOf(existing), product.name)
-        for product in products:
-            tab = self._product_tabs[product.id]
-            self.tabs.setTabToolTip(self.tabs.indexOf(tab), product.display_name)
-        self._refill_product_jump(products)
-        if current is not None and self.tabs.indexOf(current) >= 0:
-            self.tabs.setCurrentWidget(current)
-        visible = self.tabs.currentWidget()
-        if isinstance(visible, ProductTab) and not visible.loaded:
-            self._load_product(visible)
+    def _products_loaded(self, result: object) -> None:
+        rows = cast(list[ProductRow], result)
+        self.products.display(rows)
+        self._refill_product_jump([row.summary for row in rows])
 
     def _refill_product_jump(self, products: list[ProductSummary]) -> None:
-        """Rebuild the jump list without letting it fire a tab change."""
+        """Rebuild the jump list without letting it open a product on its own."""
 
         blocked = self.product_jump.blockSignals(True)
         try:
@@ -684,12 +838,16 @@ class DashboardScreen(QWidget):
 
     def _jump_to_product(self) -> None:
         product_id = self.product_jump.currentData()
-        tab = self._product_tabs.get(product_id) if product_id else None
-        if tab is not None:
-            self.tabs.setCurrentWidget(tab)
+        if not product_id:
+            return
+        for row in self.products.rows:
+            if row.id == product_id:
+                self.tabs.setCurrentIndex(self.PRODUCTS_TAB)
+                self.products.open_product(row.summary)
+                return
 
-    def _load_product(self, tab: ProductTab) -> None:
-        product_id = tab.product.id
+    def _load_product(self, product: ProductSummary) -> None:
+        product_id = product.id
 
         def operation() -> tuple[ProductMetrics, list[DailyFinancialPoint], list[ProductBatchRow]]:
             period = self._period()
@@ -702,8 +860,9 @@ class DashboardScreen(QWidget):
                 )
 
         def display(result: object) -> None:
-            # The tab can be replaced by a refresh while this query is running.
-            if self.tabs.indexOf(tab) < 0:
+            # The list can move to another product while this query is running.
+            tab = self.products.detail
+            if tab is None or tab.product.id != product_id:
                 return
             tab.display(
                 *cast(

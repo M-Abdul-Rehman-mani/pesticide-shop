@@ -251,11 +251,20 @@ class ShopSettingsScreen(QWidget):
 
         self._worker = start_worker(
             operation,
-            succeeded=lambda _result: QMessageBox.information(
-                self,
-                "Shop settings saved",
-                "Shop details were saved and will appear on newly generated receipts.",
-            ),
+            succeeded=lambda _result: self._saved(),
             failed=lambda error: show_error(self, error),
             finished=lambda: self.save_button.setEnabled(True),
+        )
+
+    def _saved(self) -> None:
+        """Confirm the save and refresh the sidebar, which shows the shop name."""
+
+        window = self.window()
+        rebrand = getattr(window, "apply_shop_branding", None)
+        if callable(rebrand):
+            rebrand()
+        QMessageBox.information(
+            self,
+            "Shop settings saved",
+            "Shop details were saved and will appear on newly generated receipts.",
         )

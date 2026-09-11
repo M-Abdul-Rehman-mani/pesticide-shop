@@ -98,6 +98,32 @@ class ProductSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class ProductRow:
+    """One product on the dashboard's product list, with its period figures."""
+
+    id: uuid.UUID
+    name: str
+    full_name: str
+    manufacturer: str
+    is_active: bool
+    in_stock: int
+    minimum_stock: int
+    active_batches: int
+    units_sold: int
+    sales: Decimal
+    profit: Decimal
+    last_sold: datetime | None
+
+    @property
+    def summary(self) -> ProductSummary:
+        return ProductSummary(self.id, self.name, self.is_active, self.full_name)
+
+    @property
+    def needs_reorder(self) -> bool:
+        return bool(self.minimum_stock) and self.in_stock <= self.minimum_stock
+
+
+@dataclass(frozen=True, slots=True)
 class ProductMetrics:
     """Everything the dashboard shows for a single product in one period."""
 
@@ -399,6 +425,76 @@ class ReportService:
             )
             for product in self._session.scalars(statement)
         ]
+
+    def product_catalogue(
+        self, period: DateRange, *, include_inactive: bool = False
+    ) -> list[ProductRow]:
+        """List every product with its stock and its trading for the period.
+
+        Aggregated per product in two grouped queries rather than one query per
+        product, so a large catalogue stays as quick as a small one.
+        """
+
+        sold = {
+            product_id: row
+            for product_id, *row in self._session.execute(
+                select(
+                    SaleItem.product_id,
+                    func.coalesce(func.sum(SaleItem.quantity), 0),
+                    func.coalesce(func.sum(SaleItem.total), Decimal("0.00")),
+                    func.coalesce(
+                        func.sum(SaleItem.total - SaleItem.purchase_cost - SaleItem.other_cost),
+                        Decimal("0.00"),
+                    ),
+                    func.max(Sale.sale_date),
+                )
+                .join(Sale, Sale.id == SaleItem.sale_id)
+                .where(
+                    Sale.status == SaleStatus.COMPLETED,
+                    Sale.sale_date >= period.start,
+                    Sale.sale_date < period.end,
+                )
+                .group_by(SaleItem.product_id)
+            )
+        }
+        stock = {
+            product_id: row
+            for product_id, *row in self._session.execute(
+                select(
+                    StockBatch.product_id,
+                    func.coalesce(func.sum(StockBatch.quantity_available), 0),
+                    func.count(StockBatch.id),
+                )
+                .where(StockBatch.is_active.is_(True))
+                .group_by(StockBatch.product_id)
+            )
+        }
+        statement = select(Product).order_by(Product.manufacturer, Product.name)
+        if not include_inactive:
+            statement = statement.where(Product.is_active.is_(True))
+        rows: list[ProductRow] = []
+        for product in self._session.scalars(statement):
+            units, sales, profit, last_sold = sold.get(
+                product.id, (0, Decimal("0.00"), Decimal("0.00"), None)
+            )
+            available, batches = stock.get(product.id, (0, 0))
+            rows.append(
+                ProductRow(
+                    id=product.id,
+                    name=product.name,
+                    full_name=product.display_name,
+                    manufacturer=product.manufacturer,
+                    is_active=product.is_active,
+                    in_stock=int(available or 0),
+                    minimum_stock=int(product.minimum_stock or 0),
+                    active_batches=int(batches or 0),
+                    units_sold=int(units or 0),
+                    sales=Decimal(sales or 0),
+                    profit=Decimal(profit or 0),
+                    last_sold=last_sold,
+                )
+            )
+        return rows
 
     def product_dashboard(self, product_id: uuid.UUID, period: DateRange) -> ProductMetrics:
         """Return the same figures as the main dashboard, scoped to one product."""

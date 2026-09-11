@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QModelIndex, Qt, QThreadPool
@@ -95,7 +96,10 @@ def test_owner_window_contains_complete_pesticide_workflow(
     sales = window._pages["Sales"]
     assert sales.complete.isEnabled() is False  # type: ignore[attr-defined]
     assert sales.cart_count.text() == "0 items in invoice"  # type: ignore[attr-defined]
-    assert sales.tabs.count() == 2  # type: ignore[attr-defined]
+    assert [
+        sales.tabs.tabText(index)  # type: ignore[attr-defined]
+        for index in range(sales.tabs.count())  # type: ignore[attr-defined]
+    ] == ["New Sale", "All Sales", "Sale Returns"]
     assert sales.recipient.isEditable()  # type: ignore[attr-defined]
     assert sales.batch.isEditable()  # type: ignore[attr-defined]
     assert window._pages["Products"].search is not None  # type: ignore[attr-defined]
@@ -143,3 +147,42 @@ def test_record_counts_read_correctly_for_one_row_and_many() -> None:
     assert record_count_text(2, "dealer") == "2 dealers shown"
     assert record_count_text(1, "batch", "batches") == "1 batch shown"
     assert record_count_text(4200, "record") == "4,200 records shown"
+
+
+@pytest.mark.ui
+def test_the_sidebar_shows_the_shops_own_name_and_logo(
+    qtbot: QtBot,
+    database_engine: Engine,
+    owner: AuthenticatedUser,
+    tmp_path: Path,
+) -> None:
+    """Once a shop is configured, its identity replaces the built-in placeholder."""
+
+    from PySide6.QtGui import QPixmap
+
+    from app.ui.main_window import BRAND_MARK_SIZE, DEFAULT_BRAND_CAPTION, DEFAULT_BRAND_NAME
+
+    factory = sessionmaker[Session](bind=database_engine, expire_on_commit=False, autoflush=False)
+    window = MainWindow(factory, owner, get_settings())
+    qtbot.addWidget(window)
+    assert window._brand_name.text() == DEFAULT_BRAND_NAME
+    assert window._brand_caption.text() == DEFAULT_BRAND_CAPTION
+
+    window.show_branding("Mudasir & Brothers", "Mudasir Ahmed", "")
+    assert window._brand_name.text() == "Mudasir & Brothers"
+    assert window._brand_caption.text() == "MUDASIR AHMED"
+    # With no logo the mark falls back to a monogram rather than an empty square.
+    assert window._brand_mark.text() == "M"
+
+    logo = tmp_path / "logo.png"
+    source = QPixmap(120, 60)
+    source.fill()
+    assert source.save(str(logo)) is True
+    window.show_branding("Mudasir & Brothers", "Mudasir Ahmed", str(logo))
+    assert window._brand_mark.text() == ""
+    mark = window._brand_mark.pixmap()
+    assert mark.isNull() is False
+    assert mark.width() == BRAND_MARK_SIZE
+    # A wide logo keeps its shape instead of being stretched into the square.
+    assert mark.height() == BRAND_MARK_SIZE // 2
+    assert window._brand_mark.hasScaledContents() is False

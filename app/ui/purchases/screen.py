@@ -258,8 +258,8 @@ class PurchasesScreen(QWidget):
     def _product_changed(self) -> None:
         if data := self.product.currentData():
             _product_id, purchase, sale = data
-            self.purchase_price.setText(f"{purchase:.2f}")
-            self.selling_price.setText(f"{sale:.2f}")
+            self.purchase_price.setText(f"{purchase:.0f}")
+            self.selling_price.setText(f"{sale:.0f}")
 
     def _add(self) -> None:
         data = self.product.currentData()
@@ -289,8 +289,8 @@ class PurchasesScreen(QWidget):
             entry.cartons,
             entry.packs_per_carton,
             entry.expiry_date.strftime("%d-%b-%Y"),
-            f"{entry.purchase_price:,.2f}",
-            f"{entry.purchase_price * entry.quantity:,.2f}",
+            f"{entry.purchase_price:,.0f}",
+            f"{entry.purchase_price * entry.quantity:,.0f}",
         )
         for column, value in enumerate(values):
             self.table.setItem(row, column, QTableWidgetItem(str(value)))
@@ -313,8 +313,8 @@ class PurchasesScreen(QWidget):
             total = subtotal - self.discount.decimal_value() + self.tax.decimal_value()
         except Exception:
             return
-        self.subtotal.setText(f"{self._settings.app_currency} {subtotal:,.2f}")
-        self.total.setText(f"{self._settings.app_currency} {total:,.2f}")
+        self.subtotal.setText(f"{self._settings.app_currency} {subtotal:,.0f}")
+        self.total.setText(f"{self._settings.app_currency} {total:,.0f}")
 
     def save(self) -> None:
         command = CreateStockPurchaseCommand(
@@ -512,9 +512,9 @@ class PurchasesScreen(QWidget):
                 entry.date_text,
                 entry.supplier,
                 ", ".join(f"{batch.product} [{batch.batch_number}]" for batch in entry.batches),
-                f"{self._settings.app_currency} {entry.total:,.2f}",
-                f"{self._settings.app_currency} {entry.paid:,.2f}",
-                f"{self._settings.app_currency} {entry.remaining:,.2f}",
+                f"{self._settings.app_currency} {entry.total:,.0f}",
+                f"{self._settings.app_currency} {entry.paid:,.0f}",
+                f"{self._settings.app_currency} {entry.remaining:,.0f}",
                 entry.payment_status,
                 entry.status,
                 "",
@@ -551,9 +551,9 @@ class PurchasesScreen(QWidget):
                 ("Date", entry.date_text),
                 ("Supplier", entry.supplier),
                 ("Batches", batches),
-                ("Total", f"{self._settings.app_currency} {entry.total:,.2f}"),
-                ("Paid", f"{self._settings.app_currency} {entry.paid:,.2f}"),
-                ("Remaining", f"{self._settings.app_currency} {entry.remaining:,.2f}"),
+                ("Total", f"{self._settings.app_currency} {entry.total:,.0f}"),
+                ("Paid", f"{self._settings.app_currency} {entry.paid:,.0f}"),
+                ("Remaining", f"{self._settings.app_currency} {entry.remaining:,.0f}"),
                 ("Payment", entry.payment_status),
                 ("Status", entry.status),
                 ("Notes", entry.notes),
@@ -572,14 +572,14 @@ class PurchasesScreen(QWidget):
         form = QFormLayout(dialog)
         method = QComboBox()
         populate_enum_combo(method, PaymentMethod)
-        amount = MoneyEdit(f"{entry.remaining:.2f}")
+        amount = MoneyEdit(f"{entry.remaining:.0f}")
         reference = QLineEdit()
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
-        form.addRow("Outstanding", QLabel(f"{self._settings.app_currency} {entry.remaining:,.2f}"))
+        form.addRow("Outstanding", QLabel(f"{self._settings.app_currency} {entry.remaining:,.0f}"))
         form.addRow("Method", method)
         form.addRow("Amount", amount)
         form.addRow("Reference", reference)

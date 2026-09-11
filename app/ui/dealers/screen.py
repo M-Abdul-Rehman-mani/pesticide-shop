@@ -91,7 +91,7 @@ class DealerDialog(QDialog):
         self.cnic = QLineEdit(data.cnic or "" if data else "")
         self.tax = QLineEdit(data.tax_number or "" if data else "")
         self.territory = QLineEdit(data.territory or "" if data else "")
-        self.credit = MoneyEdit(f"{data.credit_limit:.2f}" if data else "0.00")
+        self.credit = MoneyEdit(f"{data.credit_limit:.0f}" if data else "0.00")
         self.notes = QTextEdit(data.notes or "" if data else "")
         self.address.setMaximumHeight(60)
         self.notes.setMaximumHeight(60)
@@ -318,7 +318,7 @@ class DealersScreen(QWidget):
                             dealer.email or "—",
                             dealer.territory or "—",
                             self._balance_text(dealer.balance),
-                            f"{self._currency} {dealer.credit_limit:,.2f}",
+                            f"{self._currency} {dealer.credit_limit:,.0f}",
                             "Yes" if dealer.is_active else "No",
                             "",
                         )
@@ -417,7 +417,7 @@ class DealersScreen(QWidget):
                 ("CNIC", data.cnic),
                 ("Tax number", data.tax_number),
                 ("Territory", data.territory),
-                ("Credit limit", f"{self._currency} {data.credit_limit:,.2f}"),
+                ("Credit limit", f"{self._currency} {data.credit_limit:,.0f}"),
                 ("Notes", data.notes),
             ),
         )
