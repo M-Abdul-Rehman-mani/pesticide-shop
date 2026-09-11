@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from enum import StrEnum
 from typing import TypeVar
 
@@ -140,8 +140,14 @@ def configure_table(
     minimum_section_size: int = 86,
     editable: bool = False,
     fit_columns: bool = False,
+    widget_columns: Mapping[int, int] | None = None,
 ) -> None:
-    """Apply readable, keyboard-friendly defaults to a data table."""
+    """Apply readable, keyboard-friendly defaults to a data table.
+
+    ``widget_columns`` maps a column to the width it needs. A cell holding a widget
+    has no item text, so content-based sizing collapses it and clips the spin box or
+    button inside; those columns are given an explicit width instead.
+    """
 
     table.setAlternatingRowColors(True)
     table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -171,6 +177,10 @@ def configure_table(
                 header.setSectionResizeMode(column, QHeaderView.ResizeMode.ResizeToContents)
     if stretch_column is not None and stretch_column < header.count():
         header.setSectionResizeMode(stretch_column, QHeaderView.ResizeMode.Stretch)
+    for column, width in (widget_columns or {}).items():
+        if column < header.count():
+            header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
+            table.setColumnWidth(column, width)
     model = table.model()
     if model is not None:
         model.modelReset.connect(lambda: _fit_columns(table, stretch_column))

@@ -92,6 +92,19 @@ invoices and the movement ledger refer to it. A reason is required.
 
 Nothing is edited or erased; a correction is always a new, audited entry.
 
+**Edit a sale** — **All Sales > Edit sale** loads the invoice back into the New Sale form. Change
+lines, quantities, prices, discounts, or the recipient, then **Save changes**. Only the stock that
+actually changed moves, and the invoice keeps its number so the customer's reference still matches.
+Payments are not edited here: an invoice with money against it must have that reversed first, and an
+invoice with a return against it can no longer be edited.
+
+**Record a return** — **All Sales > Record a return**. Enter the quantity coming back on each line;
+the dialog totals the credit as you go. Restocked goods return to the batch they came from — clear
+the tick for damaged or expired stock that cannot be resold. The credit settles whatever is still
+owed on the invoice, and anything beyond that is refunded by the chosen method. The original invoice
+is never rewritten; the return is a separate numbered credit document, and a line can never be
+returned for more than it was sold.
+
 **Void a sale** — the three-dot menu on any row of **All Sales**. Voiding returns the stock to the
 batches it came from, removes the charge from the dealer's account, and marks the invoice voided so
 it stops counting in reports, dealer statements, and payment allocation. A reason is required, and
@@ -131,7 +144,15 @@ compensating transaction rather than editing history.
 
 ## The dashboard
 
-**Dashboard** opens on **All Products**, the whole-shop summary: revenue, profit, units sold, stock
+The dashboard carries three fixed views followed by one tab per product.
+
+**Customers** and **Dealers** each show their own side of the trade for the selected period:
+revenue, gross profit, invoice count, average sale value, how many bought, how many are on the
+books, and what is still outstanding — customer balances from unpaid invoices, dealer balances from
+their running accounts. Beneath each is a ranking of buyers by revenue with their invoice and unit
+counts, outstanding amount, and last purchase. Retail and trade are never mixed.
+
+**All Products** is the whole-shop summary: revenue, profit, units sold, stock
 on hand, low-stock products, units expiring within 90 days, and uncollected balances, with charts for
 daily sales, gross profit, top sellers, and inventory status.
 

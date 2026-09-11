@@ -30,6 +30,8 @@ from app.reports.report_service import (
     DailyFinancialPoint,
     DashboardMetrics,
     DateRange,
+    PartyMetrics,
+    PartyRow,
     ProductBatchRow,
     ProductMetrics,
     ProductSummary,
@@ -43,6 +45,7 @@ from app.ui.widgets import (
     configure_date_edit,
     configure_searchable_combo,
     configure_table,
+    record_count_text,
     show_error,
 )
 from app.ui.workers import FunctionWorker, start_worker
@@ -224,6 +227,91 @@ class OverviewTab(QWidget):
         self.chart.canvas.draw_idle()
 
 
+class PartyTab(QWidget):
+    """Customer- or dealer-side figures, with a ranking table beneath them."""
+
+    def __init__(
+        self,
+        title: str,
+        specifications: tuple[tuple[str, str, str], ...],
+        party_label: str,
+        currency: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._currency = currency
+        self.loaded = False
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(10)
+        self.cards = MetricCardGrid(specifications)
+        table_card = QFrame()
+        table_card.setObjectName("MetricCard")
+        table_layout = QVBoxLayout(table_card)
+        table_layout.setContentsMargins(12, 12, 12, 12)
+        heading = QLabel(title)
+        heading.setObjectName("SectionTitle")
+        self.model = RowsTableModel(
+            (party_label, "Contact", "Invoices", "Units", "Sales", "Outstanding", "Last Sale")
+        )
+        self.table = QTableView()
+        self.table.setModel(self.model)
+        configure_table(self.table, stretch_column=0, minimum_section_size=74)
+        self.count_label = QLabel()
+        self.count_label.setObjectName("RecordCount")
+        table_layout.addWidget(heading)
+        table_layout.addWidget(self.table, 1)
+        table_layout.addWidget(self.count_label)
+        layout.addWidget(self.cards)
+        layout.addWidget(table_card, 1)
+
+    def display(self, metrics: PartyMetrics, rows: list[PartyRow]) -> None:
+        self.loaded = True
+        self.cards.set_value("Sales", format_money(metrics.sales, self._currency))
+        self.cards.set_value("Profit", format_money(metrics.profit, self._currency))
+        self.cards.set_value("Invoices", f"{metrics.invoices:,}")
+        self.cards.set_value("Average Sale", format_money(metrics.average_sale, self._currency))
+        self.cards.set_value("Bought in Period", f"{metrics.buyers_in_period:,}")
+        self.cards.set_value("On the Books", f"{metrics.active_parties:,}")
+        self.cards.set_value("Outstanding", format_money(metrics.outstanding, self._currency))
+        self.model.set_rows(
+            [
+                (
+                    row.name,
+                    row.contact or "—",
+                    f"{row.invoices:,}",
+                    f"{row.units:,}",
+                    format_money(row.sales, self._currency),
+                    format_money(row.outstanding, self._currency),
+                    format_date(row.last_sold),
+                )
+                for row in rows
+            ]
+        )
+        self.count_label.setText(record_count_text(len(rows), "buyer"))
+
+
+CUSTOMER_SPECIFICATIONS = (
+    ("Sales", "Revenue from customers", "green"),
+    ("Profit", "Gross profit after costs", "blue"),
+    ("Invoices", "Counter sales in the period", "purple"),
+    ("Average Sale", "Revenue per invoice", "blue"),
+    ("Bought in Period", "Customers who bought", "green"),
+    ("On the Books", "Customers on record", "green"),
+    ("Outstanding", "Uncollected customer balance", "amber"),
+)
+
+DEALER_SPECIFICATIONS = (
+    ("Sales", "Revenue from dealers", "green"),
+    ("Profit", "Gross profit after costs", "blue"),
+    ("Invoices", "Trade sales in the period", "purple"),
+    ("Average Sale", "Revenue per invoice", "blue"),
+    ("Bought in Period", "Dealers who bought", "green"),
+    ("On the Books", "Active dealer accounts", "green"),
+    ("Outstanding", "Owed across dealer accounts", "amber"),
+)
+
+
 class ProductTab(QWidget):
     """One product's sales, profit, stock, and live batches."""
 
@@ -357,7 +445,10 @@ class ProductTab(QWidget):
 
 
 class DashboardScreen(QWidget):
-    """The business overview plus a tab for every product in the catalogue."""
+    """The business overview, the customer and dealer views, and a tab per product."""
+
+    #: Overview, Customers, Dealers; product tabs follow them.
+    _FIXED_TABS = 3
 
     def __init__(
         self,
@@ -420,6 +511,12 @@ class DashboardScreen(QWidget):
         self.tabs.setDocumentMode(True)
         self.overview = OverviewTab(currency)
         self.tabs.addTab(self.overview, "All Products")
+        self.customers = PartyTab(
+            "Customers by revenue", CUSTOMER_SPECIFICATIONS, "Customer", currency
+        )
+        self.dealers = PartyTab("Dealers by revenue", DEALER_SPECIFICATIONS, "Dealer", currency)
+        self.tabs.addTab(self.customers, "Customers")
+        self.tabs.addTab(self.dealers, "Dealers")
         layout.addWidget(self.tabs, 1)
         self.tabs.currentChanged.connect(self._tab_changed)
         self.product_jump.currentIndexChanged.connect(self._jump_to_product)
@@ -439,6 +536,11 @@ class DashboardScreen(QWidget):
         self._invalidate_product_tabs()
         self._load_overview()
         self._load_products()
+        visible = self.tabs.currentWidget()
+        if visible is self.customers:
+            self._load_party(dealers=False)
+        elif visible is self.dealers:
+            self._load_party(dealers=True)
 
     def _period_changed(self) -> None:
         self._invalidate_product_tabs()
@@ -446,11 +548,17 @@ class DashboardScreen(QWidget):
     def _invalidate_product_tabs(self) -> None:
         for tab in self._product_tabs.values():
             tab.loaded = False
+        self.customers.loaded = False
+        self.dealers.loaded = False
 
     def _tab_changed(self, index: int) -> None:
         widget = self.tabs.widget(index)
         if isinstance(widget, ProductTab) and not widget.loaded:
             self._load_product(widget)
+        elif widget is self.customers and not self.customers.loaded:
+            self._load_party(dealers=False)
+        elif widget is self.dealers and not self.dealers.loaded:
+            self._load_party(dealers=True)
 
     def _period(self) -> DateRange:
         start = cast(date, self.from_date.date().toPython())
@@ -494,6 +602,30 @@ class DashboardScreen(QWidget):
 
     # -- product tabs ----------------------------------------------------
 
+    def _load_party(self, *, dealers: bool) -> None:
+        """Load one side of the trade: customers or dealer accounts."""
+
+        tab = self.dealers if dealers else self.customers
+
+        def operation() -> tuple[PartyMetrics, list[PartyRow]]:
+            period = self._period()
+            with self._session_factory() as session:
+                service = ReportService(session)
+                return (
+                    service.dealer_dashboard(period)
+                    if dealers
+                    else service.customer_dashboard(period),
+                    service.top_dealers(period) if dealers else service.top_customers(period),
+                )
+
+        def display(result: object) -> None:
+            metrics, rows = cast(tuple[PartyMetrics, list[PartyRow]], result)
+            tab.display(metrics, rows)
+
+        self._worker = start_worker(
+            operation, succeeded=display, failed=lambda error: show_error(self, error)
+        )
+
     def _load_products(self) -> None:
         def operation() -> list[ProductSummary]:
             with self._session_factory() as session:
@@ -518,7 +650,7 @@ class DashboardScreen(QWidget):
                 if index >= 0:
                     self.tabs.removeTab(index)
                 tab.deleteLater()
-        for position, product in enumerate(products, start=1):
+        for position, product in enumerate(products, start=self._FIXED_TABS):
             existing = self._product_tabs.get(product.id)
             if existing is None:
                 tab = ProductTab(product, self._currency)

@@ -15,6 +15,7 @@ from app.models.enums import InventoryTransactionType, PaymentDirection, SaleSta
 from app.models.inventory import StockBatch, StockMovement
 from app.models.payment import Payment
 from app.models.sale import Sale, SaleItem
+from app.models.sale_return import SaleReturn
 from app.security.authentication import AuthenticatedUser
 from app.security.permissions import Permission, require_permission
 from app.services.audit_service import AuditService
@@ -299,6 +300,12 @@ class PesticideSaleService:
             raise NotFoundError("Sale was not found.")
         if sale.status is not SaleStatus.COMPLETED:
             raise ConflictError("Only a completed sale can be voided.")
+        if self._session.scalar(
+            select(SaleReturn.id).where(SaleReturn.sale_id == sale.id).limit(1)
+        ):
+            raise ConflictError(
+                "Goods have been returned against this invoice, so it can no longer be voided."
+            )
         if sale.paid_amount > 0:
             raise ConflictError(
                 "This invoice has payments against it. Reverse them first, then void it."
@@ -349,6 +356,246 @@ class PesticideSaleService:
             entity_id=sale.id,
             old_value={"status": SaleStatus.COMPLETED.value, "total": str(sale.total)},
             new_value={"status": SaleStatus.VOIDED.value, "reason": reason.strip()},
+        )
+        self._session.flush()
+        return sale
+
+    def amend(
+        self,
+        sale_id: uuid.UUID,
+        command: CreatePesticideSaleCommand,
+        actor: AuthenticatedUser,
+    ) -> Sale:
+        """Correct an unpaid invoice in place, moving only the stock that changed.
+
+        Re-keying a sale as a void plus a new invoice burns an invoice number and
+        breaks the delivery reference the customer already has, so the document is
+        amended instead. Payments stay out of it: an invoice with money against it
+        must have that reversed first, which keeps the cash trail explicit.
+        """
+
+        require_permission(actor.role, Permission.CREATE_SALE)
+        if not command.lines:
+            raise ValidationError("A sale must contain at least one product.")
+        if command.customer_id and command.dealer_id:
+            raise ValidationError("Select either a customer or a dealer, not both.")
+        batch_ids = [line.stock_batch_id for line in command.lines]
+        if len(set(batch_ids)) != len(batch_ids):
+            raise ConflictError("Add each batch only once; edit its quantity in the cart.")
+        if any(line.quantity <= 0 for line in command.lines):
+            raise ValidationError("Sale quantity must be greater than zero.")
+
+        sale = self._session.execute(
+            select(Sale).where(Sale.id == sale_id).with_for_update(of=Sale)
+        ).scalar_one_or_none()
+        if sale is None:
+            raise NotFoundError("Sale was not found.")
+        if sale.status is not SaleStatus.COMPLETED:
+            raise ConflictError("Only a completed sale can be edited.")
+        # A return credits the invoice like a payment, so check for it first or the
+        # operator is told to reverse payments they never took.
+        if self._session.scalar(
+            select(SaleReturn.id).where(SaleReturn.sale_id == sale.id).limit(1)
+        ):
+            raise ConflictError(
+                "Goods have been returned against this invoice, so it can no longer be edited."
+            )
+        if sale.paid_amount > 0:
+            raise ConflictError(
+                "This invoice has payments against it. Reverse them first, then edit it."
+            )
+
+        existing = list(self._session.scalars(select(SaleItem).where(SaleItem.sale_id == sale.id)))
+        wanted = {line.stock_batch_id: line for line in command.lines}
+        touched = set(wanted) | {item.stock_batch_id for item in existing}
+        batches = {
+            batch.id: batch
+            for batch in self._session.scalars(
+                select(StockBatch)
+                .where(StockBatch.id.in_(touched))
+                .order_by(StockBatch.id)
+                .with_for_update(of=StockBatch)
+            )
+        }
+        if len(batches) != len(touched):
+            raise NotFoundError("One or more selected stock batches were not found.")
+
+        customer = self._session.get(Customer, command.customer_id) if command.customer_id else None
+        dealer = (
+            self._session.execute(
+                select(Dealer).where(Dealer.id == command.dealer_id).with_for_update(of=Dealer)
+            ).scalar_one_or_none()
+            if command.dealer_id
+            else None
+        )
+        if command.customer_id and customer is None:
+            raise NotFoundError("The selected customer was not found.")
+        if command.dealer_id and (dealer is None or not dealer.is_active):
+            raise NotFoundError("The selected active dealer was not found.")
+
+        sold_at = sale.sale_date
+        previous = {item.stock_batch_id: item.quantity for item in existing}
+        for batch_id, line in wanted.items():
+            batch = batches[batch_id]
+            delta = line.quantity - previous.get(batch_id, 0)
+            if delta > 0:
+                if batch.expiry_date and batch.expiry_date < sold_at.date():
+                    raise ConflictError(
+                        f"Batch {batch.batch_number} expired on {batch.expiry_date}."
+                    )
+                if not batch.is_active or batch.quantity_available < delta:
+                    raise ConflictError(
+                        f"Batch {batch.batch_number} has only "
+                        f"{batch.quantity_available} unit(s) available."
+                    )
+
+        unit_prices: list[Decimal] = []
+        discounts: list[Decimal] = []
+        other_costs: list[Decimal] = []
+        gross_lines: list[Decimal] = []
+        ordered_batches = [batches[line.stock_batch_id] for line in command.lines]
+        for line, batch in zip(command.lines, ordered_batches, strict=True):
+            unit_price = nonnegative_money(
+                line.unit_price if line.unit_price is not None else batch.selling_price,
+                field="Unit price",
+            )
+            gross = unit_price * line.quantity
+            discount = nonnegative_money(line.discount, field="Line discount")
+            if discount > gross:
+                raise ValidationError("A line discount cannot exceed its line amount.")
+            unit_prices.append(unit_price)
+            gross_lines.append(gross)
+            discounts.append(discount)
+            other_costs.append(nonnegative_money(line.other_cost, field="Other cost"))
+        subtotal = sum(gross_lines, Decimal("0.00"))
+        total_discount = sum(discounts, Decimal("0.00")) + nonnegative_money(
+            command.order_discount, field="Order discount"
+        )
+        subtotal, total_discount, tax, total = document_totals(
+            subtotal, total_discount, command.tax
+        )
+        if total <= 0:
+            raise ValidationError("A completed sale total must be greater than zero.")
+        if dealer and dealer.credit_limit > 0:
+            projected = dealer.balance - sale.remaining_amount + total
+            if projected > dealer.credit_limit:
+                raise ConflictError("This sale would exceed the dealer's credit limit.")
+
+        amended_at = datetime.now(UTC)
+        old_value = {
+            "total": str(sale.total),
+            "lines": [{"batch": item.batch_number, "quantity": item.quantity} for item in existing],
+        }
+        # Put every original quantity back, then take the new ones, so a batch that
+        # merely changed quantity records one net movement.
+        for item in existing:
+            previous_batch = batches[item.stock_batch_id]
+            wanted_line = wanted.get(item.stock_batch_id)
+            new_quantity = wanted_line.quantity if wanted_line else 0
+            delta = new_quantity - item.quantity
+            if delta:
+                previous_batch.quantity_available -= delta
+                self._session.add(
+                    StockMovement(
+                        batch_id=previous_batch.id,
+                        transaction_type=InventoryTransactionType.ADJUSTMENT,
+                        quantity_change=-delta,
+                        balance_after=previous_batch.quantity_available,
+                        reference_id=sale.id,
+                        reference_type="Sale Edit",
+                        performed_by=actor.id,
+                        created_at=amended_at,
+                        notes=f"Edited {sale.invoice_number}",
+                    )
+                )
+            if wanted_line is None:
+                self._session.delete(item)
+        for line, batch, unit_price, gross, discount, other_cost in zip(
+            command.lines,
+            ordered_batches,
+            unit_prices,
+            gross_lines,
+            discounts,
+            other_costs,
+            strict=True,
+        ):
+            current = next((i for i in existing if i.stock_batch_id == batch.id), None)
+            if current is None:
+                batch.quantity_available -= line.quantity
+                self._session.add(
+                    StockMovement(
+                        batch_id=batch.id,
+                        transaction_type=InventoryTransactionType.SALE,
+                        quantity_change=-line.quantity,
+                        balance_after=batch.quantity_available,
+                        reference_id=sale.id,
+                        reference_type="Sale Edit",
+                        performed_by=actor.id,
+                        created_at=amended_at,
+                        notes=f"Added to {sale.invoice_number}",
+                    )
+                )
+                self._session.add(
+                    SaleItem(
+                        sale_id=sale.id,
+                        stock_batch_id=batch.id,
+                        product_id=batch.product_id,
+                        batch_number=batch.batch_number,
+                        quantity=line.quantity,
+                        unit_price=unit_price,
+                        price=gross,
+                        discount=discount,
+                        total=gross - discount,
+                        purchase_cost=batch.purchase_price * line.quantity,
+                        other_cost=other_cost,
+                    )
+                )
+                continue
+            current.quantity = line.quantity
+            current.unit_price = unit_price
+            current.price = gross
+            current.discount = discount
+            current.total = gross - discount
+            current.purchase_cost = batch.purchase_price * line.quantity
+            current.other_cost = other_cost
+
+        if dealer is not None:
+            dealer.balance += total - sale.remaining_amount
+        elif sale.dealer_id:
+            previous_dealer = self._session.execute(
+                select(Dealer).where(Dealer.id == sale.dealer_id).with_for_update(of=Dealer)
+            ).scalar_one()
+            previous_dealer.balance -= sale.remaining_amount
+        sale.customer_id = customer.id if customer else None
+        sale.dealer_id = dealer.id if dealer else None
+        sale.recipient_type = "DEALER" if dealer else "CUSTOMER"
+        sale.order_number = command.order_number.strip() if command.order_number else None
+        sale.territory = command.territory or (dealer.territory if dealer else None)
+        sale.delivery_address = command.delivery_address or (
+            dealer.address if dealer else customer.address if customer else None
+        )
+        sale.policy = command.policy.strip() if command.policy else None
+        sale.store = command.store.strip() if command.store else None
+        sale.subtotal = subtotal
+        sale.discount = total_discount
+        sale.tax = tax
+        sale.total = total
+        sale.remaining_amount = total
+        sale.payment_status = payment_status(total, Decimal("0.00"))
+        sale.notes = command.notes.strip() if command.notes else None
+        self._audit.record(
+            actor_id=actor.id,
+            action="SALE_AMENDED",
+            entity_type="Sale",
+            entity_id=sale.id,
+            old_value=old_value,
+            new_value={
+                "total": str(total),
+                "lines": [
+                    {"batch": batch.batch_number, "quantity": line.quantity}
+                    for line, batch in zip(command.lines, ordered_batches, strict=True)
+                ],
+            },
         )
         self._session.flush()
         return sale

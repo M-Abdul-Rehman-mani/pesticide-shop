@@ -34,4 +34,7 @@ def load_shop_profile(session: Session, settings: Settings) -> ShopProfile:
         )
         or "Thank you for your business.",
         logo_path=Path(logo_value).expanduser() if logo_value else None,
+        billing_address=stored.get(SettingCategory.SHOP, "billing_address", "") or "",
+        billing_phone=stored.get(SettingCategory.SHOP, "billing_phone", "") or "",
+        billing_email=stored.get(SettingCategory.SHOP, "billing_email", "") or "",
     )

@@ -45,11 +45,9 @@ class PaymentEditor(QWidget):
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(("Method", "Amount", "Reference"))
         self.table.setMinimumHeight(96)
-        configure_table(self.table, stretch_column=2, editable=True)
-        # The method and amount cells hold widgets, whose size hints a header
-        # cannot measure, so give those two columns room for their full contents.
-        self.table.setColumnWidth(0, 150)
-        self.table.setColumnWidth(1, 120)
+        configure_table(
+            self.table, stretch_column=2, editable=True, widget_columns={0: 150, 1: 120}
+        )
         controls = QHBoxLayout()
         add = QPushButton("Add payment")
         add.setProperty("secondary", True)

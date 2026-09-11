@@ -108,11 +108,12 @@ class SettingsService:
             return prefix
         if category in {SettingCategory.SHOP, SettingCategory.EMAIL} and key in {
             "email",
+            "billing_email",
             "owner_email",
             "smtp_from_email",
         }:
             return normalize_email(cleaned) or ""
-        if (category, key) == (SettingCategory.SHOP, "phone"):
+        if category is SettingCategory.SHOP and key in {"phone", "billing_phone"}:
             return normalize_phone(cleaned, required=False)
         if (category, key) == (SettingCategory.EMAIL, "smtp_port"):
             try:

@@ -9,6 +9,9 @@ Core relationships:
 - `products` → `purchase_items` → `stock_batches` → `stock_movements`
 - `suppliers` → `purchases` and batch intake
 - `customers` or `dealers` → `sales` → `sale_items`
+- `sales` → `sale_returns` → `sale_return_items`: a return is a separate numbered credit
+  document that restocks goods and settles the invoice the way a payment does, so the
+  invoice itself is never rewritten
 - `sales` and `purchases` → immutable `payments`
 - `dealers` → `payments.dealer_id`, which carries a dealer's whole account history: the
   allocations that settle their individual invoices, and any surplus held as account credit with no

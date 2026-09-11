@@ -41,6 +41,9 @@ class ShopSettingsScreen(QWidget):
         "website",
         "tax_information",
         "logo_path",
+        "billing_address",
+        "billing_phone",
+        "billing_email",
     )
 
     def __init__(
@@ -88,6 +91,13 @@ class ShopSettingsScreen(QWidget):
         self.email = QLineEdit()
         self.website = QLineEdit()
         self.tax_information = QLineEdit()
+        self.billing_address = QTextEdit()
+        self.billing_address.setMaximumHeight(70)
+        self.billing_address.setPlaceholderText("Leave blank to reuse the counter address")
+        self.billing_phone = QLineEdit()
+        self.billing_phone.setPlaceholderText("Leave blank to reuse the counter number")
+        self.billing_email = QLineEdit()
+        self.billing_email.setPlaceholderText("Leave blank to reuse the counter email")
         self.logo_path = QLineEdit()
         self.logo_path.setPlaceholderText("Optional PNG or JPEG image")
 
@@ -109,6 +119,17 @@ class ShopSettingsScreen(QWidget):
         form.addRow("Email", self.email)
         form.addRow("Website", self.website)
         form.addRow("Tax / registration", self.tax_information)
+        billing_note = QLabel(
+            "Billing details appear on the A4 delivery challan and the emailed copy. "
+            "The details above are printed on the counter receipt. Leave a billing "
+            "field blank to reuse the counter one."
+        )
+        billing_note.setWordWrap(True)
+        billing_note.setObjectName("PageSubtitle")
+        form.addRow("", billing_note)
+        form.addRow("Billing address", self.billing_address)
+        form.addRow("Billing contact number", self.billing_phone)
+        form.addRow("Billing email", self.billing_email)
         form.addRow("Logo", logo_row)
         form.addRow("", self.logo_status)
         body_layout.addWidget(group)
@@ -193,6 +214,9 @@ class ShopSettingsScreen(QWidget):
         self.website.setText(data["website"])
         self.tax_information.setText(data["tax_information"])
         self.logo_path.setText(data["logo_path"])
+        self.billing_address.setPlainText(data["billing_address"])
+        self.billing_phone.setText(data["billing_phone"])
+        self.billing_email.setText(data["billing_email"])
         self._update_logo_status()
 
     def save(self) -> None:
@@ -205,6 +229,9 @@ class ShopSettingsScreen(QWidget):
             "website": self.website.text(),
             "tax_information": self.tax_information.text(),
             "logo_path": self.logo_path.text(),
+            "billing_address": self.billing_address.toPlainText(),
+            "billing_phone": self.billing_phone.text(),
+            "billing_email": self.billing_email.text(),
         }
         self.save_button.setEnabled(False)
 

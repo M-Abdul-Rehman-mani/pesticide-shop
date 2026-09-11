@@ -32,6 +32,13 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class ShopProfile:
+    """Shop branding, with a separate billing identity for the A4 document.
+
+    A shop often trades from a counter but bills from a registered office, so the
+    counter receipt and the delivery challan carry different addresses and contact
+    details. The billing fields fall back to the counter ones when left blank.
+    """
+
     name: str = ""
     owner_name: str = ""
     address: str = ""
@@ -42,6 +49,23 @@ class ShopProfile:
     currency: str = "PKR"
     footer: str = "Thank you for your business."
     logo_path: Path | None = None
+    billing_address: str = ""
+    billing_phone: str = ""
+    billing_email: str = ""
+
+    @property
+    def document_address(self) -> str:
+        """Address printed on the A4 challan."""
+
+        return self.billing_address or self.address
+
+    @property
+    def document_phone(self) -> str:
+        return self.billing_phone or self.phone
+
+    @property
+    def document_email(self) -> str:
+        return self.billing_email or self.email
 
 
 @dataclass(frozen=True, slots=True)
@@ -529,9 +553,11 @@ class ReceiptGenerator:
     @staticmethod
     def _challan_contact(shop: ShopProfile) -> str:
         parts: list[str] = []
-        parts.extend(line.strip() for line in shop.address.splitlines() if line.strip())
-        if shop.phone:
-            parts.append(shop.phone)
+        parts.extend(line.strip() for line in shop.document_address.splitlines() if line.strip())
+        if shop.document_phone:
+            parts.append(shop.document_phone)
+        if shop.document_email:
+            parts.append(shop.document_email)
         if shop.tax_information:
             parts.append(shop.tax_information)
         return escape(" ".join(parts))

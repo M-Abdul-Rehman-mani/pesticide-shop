@@ -236,26 +236,24 @@ def test_dashboard_builds_a_tab_for_every_product(
     factory = sessionmaker[Session](bind=database_engine, expire_on_commit=False, autoflush=False)
     screen = DashboardScreen(factory, TIMEZONE, "PKR")
     qtbot.addWidget(screen)
-    assert screen.tabs.count() == 1
-    assert screen.tabs.tabText(0) == "All Products"
+    fixed = ["All Products", "Customers", "Dealers"]
+    assert [screen.tabs.tabText(i) for i in range(screen.tabs.count())] == fixed
 
     names = ["Alpha Product", "Beta Product"]
     screen._rebuild_product_tabs([ProductSummary(uuid.uuid4(), name, True) for name in names])
-    assert [screen.tabs.tabText(i) for i in range(screen.tabs.count())] == [
-        "All Products",
-        *names,
-    ]
-    assert all(isinstance(screen.tabs.widget(i), ProductTab) for i in (1, 2))
+    assert [screen.tabs.tabText(i) for i in range(screen.tabs.count())] == [*fixed, *names]
+    first = screen._FIXED_TABS
+    assert all(isinstance(screen.tabs.widget(i), ProductTab) for i in (first, first + 1))
 
     # A product removed from the catalogue loses its tab; the rest are reused.
-    kept = screen.tabs.widget(1)
+    kept = screen.tabs.widget(first)
     assert isinstance(kept, ProductTab)
     screen._rebuild_product_tabs([kept.product])
     assert [screen.tabs.tabText(i) for i in range(screen.tabs.count())] == [
-        "All Products",
+        *fixed,
         "Alpha Product",
     ]
-    assert screen.tabs.widget(1) is kept
+    assert screen.tabs.widget(first) is kept
 
 
 @pytest.mark.ui
@@ -266,7 +264,7 @@ def test_changing_the_period_marks_product_tabs_stale(
     screen = DashboardScreen(factory, TIMEZONE, "PKR")
     qtbot.addWidget(screen)
     screen._rebuild_product_tabs([ProductSummary(uuid.uuid4(), "Gamma Product", True)])
-    tab = screen.tabs.widget(1)
+    tab = screen.tabs.widget(screen._FIXED_TABS)
     assert isinstance(tab, ProductTab)
     tab.loaded = True
     screen.from_date.setDate(screen.from_date.date().addDays(-3))
@@ -295,10 +293,11 @@ def test_product_tabs_stay_readable_for_a_large_catalogue(
 
     assert screen.tabs.elideMode() == Qt.TextElideMode.ElideNone
     assert screen.tabs.usesScrollButtons() is True
-    assert screen.tabs.count() == len(products) + 1
+    assert screen.tabs.count() == len(products) + screen._FIXED_TABS
     # Tabs carry the short name; the full one is available on hover.
-    assert screen.tabs.tabText(1) == "PRODUCT 00 EC"
-    assert screen.tabs.tabToolTip(1) == "PRODUCT 00 EC 1-L"
+    first = screen._FIXED_TABS
+    assert screen.tabs.tabText(first) == "PRODUCT 00 EC"
+    assert screen.tabs.tabToolTip(first) == "PRODUCT 00 EC 1-L"
     assert all(
         "…" not in screen.tabs.tabText(index) and "..." not in screen.tabs.tabText(index)
         for index in range(screen.tabs.count())
@@ -348,3 +347,113 @@ def test_stock_note_does_not_invent_a_reorder_level() -> None:
     assert note(40, 0) == "Stock 40; no reorder level set."
     assert "reorder soon" in note(5, 20)
     assert "above the reorder level" in note(90, 20)
+
+
+def test_customer_and_dealer_dashboards_split_the_two_sides(
+    db_session: Session,
+    owner: AuthenticatedUser,
+    supplier: Supplier,
+    product: Product,
+    customer: Customer,
+) -> None:
+    """Retail and trade are separate books and must not be mixed."""
+
+    from app.services.catalog_service import DealerService
+
+    dealer = DealerService(db_session).create(
+        actor=owner,
+        name="Trade Dealer",
+        phone="03001234567",
+        credit_limit=Decimal("100000.00"),
+    )
+    db_session.flush()
+    batch = _stock(db_session, owner, supplier, product, batch_number="SPLIT", quantity=100)
+    PesticideSaleService(db_session).create(
+        CreatePesticideSaleCommand(
+            lines=(PesticideSaleLineInput(batch.id, 4),),
+            payments=(PaymentInput(PaymentMethod.CASH, Decimal("600.00")),),
+            customer_id=customer.id,
+        ),
+        owner,
+    )
+    PesticideSaleService(db_session).create(
+        CreatePesticideSaleCommand(
+            lines=(PesticideSaleLineInput(batch.id, 10),),
+            payments=(),
+            dealer_id=dealer.id,
+        ),
+        owner,
+    )
+    db_session.flush()
+
+    reports = ReportService(db_session)
+    period = DateRange.today(TIMEZONE)
+    retail = reports.customer_dashboard(period)
+    trade = reports.dealer_dashboard(period)
+
+    assert retail.invoices == 1
+    assert retail.sales == Decimal("600.00")
+    assert retail.outstanding == Decimal("0.00"), "the counter sale was paid"
+    assert retail.buyers_in_period == 1
+
+    assert trade.invoices == 1
+    assert trade.sales == Decimal("1500.00")
+    assert trade.outstanding == Decimal("1500.00")
+    assert trade.active_parties == 1
+    assert trade.average_sale == Decimal("1500.00")
+
+    # The whole-shop dashboard still counts both.
+    assert reports.dashboard(period).units_sold == 14
+
+
+def test_party_rankings_report_each_buyer(
+    db_session: Session,
+    owner: AuthenticatedUser,
+    supplier: Supplier,
+    product: Product,
+    customer: Customer,
+) -> None:
+    batch = _stock(db_session, owner, supplier, product, batch_number="RANK", quantity=100)
+    PesticideSaleService(db_session).create(
+        CreatePesticideSaleCommand(
+            lines=(PesticideSaleLineInput(batch.id, 6),),
+            payments=(),
+            customer_id=customer.id,
+        ),
+        owner,
+    )
+    db_session.flush()
+
+    reports = ReportService(db_session)
+    period = DateRange.today(TIMEZONE)
+    rows = reports.top_customers(period)
+    assert len(rows) == 1
+    assert rows[0].name == customer.name
+    assert rows[0].invoices == 1
+    assert rows[0].units == 6
+    assert rows[0].sales == Decimal("900.00")
+    assert rows[0].outstanding == Decimal("900.00")
+    assert rows[0].last_sold is not None
+    assert reports.top_dealers(period) == []
+
+
+@pytest.mark.ui
+def test_the_dashboard_loads_a_party_tab_when_it_is_opened(
+    qtbot: QtBot, database_engine: Engine
+) -> None:
+    factory = sessionmaker[Session](bind=database_engine, expire_on_commit=False, autoflush=False)
+    screen = DashboardScreen(factory, TIMEZONE, "PKR")
+    qtbot.addWidget(screen)
+    assert screen.tabs.tabText(1) == "Customers"
+    assert screen.tabs.tabText(2) == "Dealers"
+    # Compared as a pair so the checker cannot narrow either flag to a constant.
+    assert (screen.customers.loaded, screen.dealers.loaded) == (False, False)
+
+    # Opening a tab is what triggers its query.
+    screen.tabs.setCurrentIndex(2)
+    QThreadPool.globalInstance().waitForDone(5000)
+    for _ in range(40):
+        qtbot.wait(1)
+    assert (screen.customers.loaded, screen.dealers.loaded) == (False, True), (
+        "only the side that was opened should be queried"
+    )

@@ -17,7 +17,9 @@ pairing `No of Items` and `Total Qty` on the left with `Total`, `Discount` and `
 right. When a balance is outstanding it also prints `Paid` and `Balance`.
 
 Set the shop name, owner, address, phone, email, registration/tax details, logo, currency, and
-footer under **Shop Settings**; they brand both documents.
+footer under **Shop Settings**. The counter details brand the receipt; the separate **billing**
+address, contact number, and email brand the A4 challan and the emailed copy, each falling back to
+the counter detail when left blank.
 
 ## The shop logo
 

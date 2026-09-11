@@ -12,6 +12,8 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
+from app.models.customer import Customer
+from app.models.dealer import Dealer
 from app.models.enums import PaymentDirection, SaleStatus
 from app.models.inventory import StockBatch
 from app.models.payment import Payment
@@ -118,6 +120,33 @@ class ProductBatchRow:
     available: int
     purchase_price: Decimal
     selling_price: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class PartyMetrics:
+    """Headline figures for the customer or dealer side of the business."""
+
+    parties: int
+    active_parties: int
+    buyers_in_period: int
+    invoices: int
+    sales: Decimal
+    profit: Decimal
+    outstanding: Decimal
+    average_sale: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class PartyRow:
+    """One customer or dealer, as shown in the dashboard's ranking table."""
+
+    name: str
+    contact: str
+    invoices: int
+    units: int
+    sales: Decimal
+    outstanding: Decimal
+    last_sold: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -474,3 +503,168 @@ class ReportService:
             )
             for batch in rows
         ]
+
+    def _party_totals(
+        self, period: DateRange, *, dealers: bool
+    ) -> tuple[int, Decimal, Decimal, int]:
+        """Invoice count, revenue, profit, and distinct buyers for one side."""
+
+        recipient = Sale.dealer_id.is_not(None) if dealers else Sale.customer_id.is_not(None)
+        identity = Sale.dealer_id if dealers else Sale.customer_id
+        costs = (
+            select(
+                SaleItem.sale_id,
+                func.sum(SaleItem.purchase_cost + SaleItem.other_cost).label("cost"),
+            )
+            .group_by(SaleItem.sale_id)
+            .subquery()
+        )
+        row = self._session.execute(
+            select(
+                func.count(Sale.id),
+                func.coalesce(func.sum(Sale.total), Decimal("0.00")),
+                func.coalesce(
+                    func.sum(Sale.total - Sale.tax - func.coalesce(costs.c.cost, 0)),
+                    Decimal("0.00"),
+                ),
+                func.count(func.distinct(identity)),
+            )
+            .outerjoin(costs, costs.c.sale_id == Sale.id)
+            .where(
+                recipient,
+                Sale.status == SaleStatus.COMPLETED,
+                Sale.sale_date >= period.start,
+                Sale.sale_date < period.end,
+            )
+        ).one()
+        return int(row[0] or 0), Decimal(row[1] or 0), Decimal(row[2] or 0), int(row[3] or 0)
+
+    def customer_dashboard(self, period: DateRange) -> PartyMetrics:
+        """Headline figures for retail customers."""
+
+        invoices, sales, profit, buyers = self._party_totals(period, dealers=False)
+        total = self._session.scalar(select(func.count()).select_from(Customer)) or 0
+        outstanding = self._session.scalar(
+            select(func.coalesce(func.sum(Sale.remaining_amount), Decimal("0.00"))).where(
+                Sale.customer_id.is_not(None),
+                Sale.status == SaleStatus.COMPLETED,
+                Sale.remaining_amount > 0,
+            )
+        )
+        return PartyMetrics(
+            parties=int(total),
+            active_parties=int(total),
+            buyers_in_period=buyers,
+            invoices=invoices,
+            sales=sales,
+            profit=profit,
+            outstanding=Decimal(outstanding or 0),
+            average_sale=(sales / invoices) if invoices else Decimal("0.00"),
+        )
+
+    def dealer_dashboard(self, period: DateRange) -> PartyMetrics:
+        """Headline figures for trade dealers, whose balances sit on account."""
+
+        invoices, sales, profit, buyers = self._party_totals(period, dealers=True)
+        total = self._session.scalar(select(func.count()).select_from(Dealer)) or 0
+        active = (
+            self._session.scalar(
+                select(func.count()).select_from(Dealer).where(Dealer.is_active.is_(True))
+            )
+            or 0
+        )
+        outstanding = self._session.scalar(
+            select(func.coalesce(func.sum(Dealer.balance), Decimal("0.00"))).where(
+                Dealer.balance > 0
+            )
+        )
+        return PartyMetrics(
+            parties=int(total),
+            active_parties=int(active),
+            buyers_in_period=buyers,
+            invoices=invoices,
+            sales=sales,
+            profit=profit,
+            outstanding=Decimal(outstanding or 0),
+            average_sale=(sales / invoices) if invoices else Decimal("0.00"),
+        )
+
+    def top_customers(self, period: DateRange, *, limit: int = 25) -> list[PartyRow]:
+        """Rank customers by what they bought in the period."""
+
+        rows = self._session.execute(
+            select(
+                Customer,
+                func.count(func.distinct(Sale.id)),
+                func.coalesce(func.sum(SaleItem.quantity), 0),
+                func.coalesce(func.sum(Sale.total), Decimal("0.00")),
+                func.max(Sale.sale_date),
+            )
+            .join(Sale, Sale.customer_id == Customer.id)
+            .outerjoin(SaleItem, SaleItem.sale_id == Sale.id)
+            .where(
+                Sale.status == SaleStatus.COMPLETED,
+                Sale.sale_date >= period.start,
+                Sale.sale_date < period.end,
+            )
+            .group_by(Customer.id)
+            .order_by(func.coalesce(func.sum(Sale.total), Decimal("0.00")).desc())
+            .limit(limit)
+        )
+        return [
+            PartyRow(
+                name=customer.name,
+                contact=customer.phone or "",
+                invoices=int(invoices or 0),
+                units=int(units or 0),
+                sales=Decimal(sales or 0),
+                outstanding=self._customer_outstanding(customer.id),
+                last_sold=last_sold,
+            )
+            for customer, invoices, units, sales, last_sold in rows
+        ]
+
+    def top_dealers(self, period: DateRange, *, limit: int = 25) -> list[PartyRow]:
+        """Rank dealers by what they bought, alongside what they still owe."""
+
+        rows = self._session.execute(
+            select(
+                Dealer,
+                func.count(func.distinct(Sale.id)),
+                func.coalesce(func.sum(SaleItem.quantity), 0),
+                func.coalesce(func.sum(Sale.total), Decimal("0.00")),
+                func.max(Sale.sale_date),
+            )
+            .join(Sale, Sale.dealer_id == Dealer.id)
+            .outerjoin(SaleItem, SaleItem.sale_id == Sale.id)
+            .where(
+                Sale.status == SaleStatus.COMPLETED,
+                Sale.sale_date >= period.start,
+                Sale.sale_date < period.end,
+            )
+            .group_by(Dealer.id)
+            .order_by(func.coalesce(func.sum(Sale.total), Decimal("0.00")).desc())
+            .limit(limit)
+        )
+        return [
+            PartyRow(
+                name=dealer.display_name,
+                contact=dealer.phone or "",
+                invoices=int(invoices or 0),
+                units=int(units or 0),
+                sales=Decimal(sales or 0),
+                outstanding=dealer.balance,
+                last_sold=last_sold,
+            )
+            for dealer, invoices, units, sales, last_sold in rows
+        ]
+
+    def _customer_outstanding(self, customer_id: uuid.UUID) -> Decimal:
+        value = self._session.scalar(
+            select(func.coalesce(func.sum(Sale.remaining_amount), Decimal("0.00"))).where(
+                Sale.customer_id == customer_id,
+                Sale.status == SaleStatus.COMPLETED,
+                Sale.remaining_amount > 0,
+            )
+        )
+        return Decimal(value or 0)

@@ -9,6 +9,7 @@ from app.models.payment import Payment
 from app.models.product import Product
 from app.models.purchase import Purchase, PurchaseItem
 from app.models.sale import Sale, SaleItem
+from app.models.sale_return import SaleReturn, SaleReturnItem
 from app.models.settings import AppSetting, DocumentSequence
 from app.models.supplier import Supplier
 from app.models.user import User
@@ -26,6 +27,8 @@ __all__ = [
     "PurchaseItem",
     "Sale",
     "SaleItem",
+    "SaleReturn",
+    "SaleReturnItem",
     "StockBatch",
     "StockMovement",
     "Supplier",

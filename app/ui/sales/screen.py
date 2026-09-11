@@ -11,6 +11,7 @@ from typing import cast
 from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import (
     QBoxLayout,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -35,7 +36,7 @@ from sqlalchemy.orm import Session, selectinload, sessionmaker
 from app.config.settings import Settings
 from app.models.customer import Customer
 from app.models.dealer import Dealer
-from app.models.enums import SaleStatus, SettingCategory
+from app.models.enums import PaymentMethod, SaleStatus, SettingCategory
 from app.models.inventory import StockBatch
 from app.models.product import Product
 from app.models.sale import Sale, SaleItem
@@ -44,6 +45,11 @@ from app.security.permissions import Permission, has_permission
 from app.services.catalog_service import CustomerService, DealerService
 from app.services.dto import CreatePesticideSaleCommand, PesticideSaleLineInput
 from app.services.pesticide_sale_service import PesticideSaleService
+from app.services.sale_return_service import (
+    ReturnableLine,
+    ReturnLineInput,
+    SaleReturnService,
+)
 from app.services.settings_service import SettingsService
 from app.ui.documents import InvoiceDocumentActions
 from app.ui.forms import MoneyEdit, PaymentEditor
@@ -52,8 +58,10 @@ from app.ui.widgets import (
     RowsTableModel,
     configure_searchable_combo,
     configure_table,
+    populate_enum_combo,
     populate_row_actions,
     record_count_text,
+    selected_enum,
     show_error,
     show_record_details,
     wrap_scroll,
@@ -111,6 +119,111 @@ class WalkInCustomerDialog(QDialog):
         self.accept()
 
 
+class SaleReturnDialog(QDialog):
+    """Choose how much of each invoice line is coming back."""
+
+    def __init__(
+        self,
+        invoice_number: str,
+        lines: list[ReturnableLine],
+        currency: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._lines = lines
+        self.setWindowTitle(f"Record a return against {invoice_number}")
+        self.resize(760, 420)
+        layout = QVBoxLayout(self)
+        note = QLabel(
+            "Enter the quantity coming back on each line. Restocked goods go back to the "
+            "batch they came from; clear the tick for damaged or expired stock. The credit "
+            "settles what is still owed, and anything beyond that is refunded."
+        )
+        note.setWordWrap(True)
+        self.table = QTableWidget(len(lines), 6)
+        self.table.setHorizontalHeaderLabels(
+            ("Product", "Batch", "Sold", "Returnable", "Return", "Restock")
+        )
+        configure_table(
+            self.table,
+            stretch_column=0,
+            minimum_section_size=72,
+            editable=True,
+            widget_columns={4: 96, 5: 80},
+        )
+        self._quantities: list[QSpinBox] = []
+        self._restock: list[QCheckBox] = []
+        for row, line in enumerate(lines):
+            self.table.setItem(row, 0, QTableWidgetItem(line.product))
+            self.table.setItem(row, 1, QTableWidgetItem(line.batch_number))
+            self.table.setItem(row, 2, QTableWidgetItem(f"{line.sold:,}"))
+            self.table.setItem(row, 3, QTableWidgetItem(f"{line.returnable:,}"))
+            quantity = QSpinBox()
+            quantity.setRange(0, line.returnable)
+            quantity.valueChanged.connect(self._update_credit)
+            self.table.setCellWidget(row, 4, quantity)
+            self._quantities.append(quantity)
+            restock = QCheckBox()
+            restock.setChecked(True)
+            restock.setToolTip("Clear this for damaged or expired goods that cannot be resold")
+            self.table.setCellWidget(row, 5, restock)
+            self._restock.append(restock)
+        self._currency = currency
+        self.credit_label = QLabel()
+        self.credit_label.setObjectName("SectionTitle")
+        self.reason = QLineEdit()
+        self.reason.setPlaceholderText("Damaged, wrong product, customer changed their mind…")
+        self.method = QComboBox()
+        populate_enum_combo(self.method, PaymentMethod)
+        form = QFormLayout()
+        form.addRow("Reason *", self.reason)
+        form.addRow("Refund method", self.method)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Record return")
+        buttons.accepted.connect(self._accept_if_valid)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(note)
+        layout.addWidget(self.table, 1)
+        layout.addWidget(self.credit_label)
+        layout.addLayout(form)
+        layout.addWidget(buttons)
+        self._update_credit()
+
+    def _update_credit(self) -> None:
+        credit = sum(
+            (
+                line.unit_price * box.value()
+                for line, box in zip(self._lines, self._quantities, strict=True)
+            ),
+            Decimal("0.00"),
+        )
+        self.credit_label.setText(f"Credit: {self._currency} {credit:,.2f}")
+
+    def _accept_if_valid(self) -> None:
+        if not self.reason.text().strip():
+            QMessageBox.information(self, "Reason required", "Say why the goods came back.")
+            self.reason.setFocus()
+            return
+        if not self.values():
+            QMessageBox.information(
+                self, "Nothing selected", "Enter a quantity against at least one line."
+            )
+            return
+        self.accept()
+
+    def payment_method(self) -> PaymentMethod:
+        return selected_enum(self.method, PaymentMethod)
+
+    def values(self) -> tuple[ReturnLineInput, ...]:
+        return tuple(
+            ReturnLineInput(line.sale_item_id, box.value(), restock.isChecked())
+            for line, box, restock in zip(self._lines, self._quantities, self._restock, strict=True)
+            if box.value() > 0
+        )
+
+
 class SalesScreen(QWidget):
     sale_completed = Signal(str)
 
@@ -129,6 +242,9 @@ class SalesScreen(QWidget):
         self._dealers: list[tuple[uuid.UUID, str, str | None, str | None]] = []
         self._last_sale_id: uuid.UUID | None = None
         self._barcodes: dict[str, uuid.UUID] = {}
+        #: Set while an existing invoice is being amended rather than created.
+        self._editing: uuid.UUID | None = None
+        self._editing_number = ""
         self._last_invoice_number = "invoice"
         self._documents = InvoiceDocumentActions(self, session_factory, settings)
         root_layout = QVBoxLayout(self)
@@ -216,7 +332,12 @@ class SalesScreen(QWidget):
         self.cart_table.setHorizontalHeaderLabels(
             ("Product", "Batch", "Qty", "Unit", "Line Discount", "Total", "Action")
         )
-        configure_table(self.cart_table, stretch_column=0, minimum_section_size=80)
+        configure_table(
+            self.cart_table,
+            stretch_column=0,
+            minimum_section_size=80,
+            widget_columns={2: 92, 3: 104, 4: 118, 6: 96},
+        )
         layout.addWidget(self.cart_table, 1)
         self.cart_count = QLabel("0 items in invoice")
         self.cart_count.setObjectName("RecordCount")
@@ -249,6 +370,9 @@ class SalesScreen(QWidget):
         self.save_pdf, self.preview = QPushButton("Save PDF"), QPushButton("Print Preview")
         self.print_invoice = QPushButton("Print Invoice")
         self.complete = QPushButton("Complete Sale && Queue Emails")
+        self.cancel_edit = QPushButton("Cancel edit")
+        self.cancel_edit.setProperty("secondary", True)
+        self.cancel_edit.setVisible(False)
         for secondary in (self.save_pdf, self.preview, self.print_invoice):
             secondary.setProperty("secondary", True)
             secondary.setEnabled(False)
@@ -261,6 +385,7 @@ class SalesScreen(QWidget):
         actions.addWidget(self.preview)
         actions.addWidget(self.print_invoice)
         actions.addStretch()
+        actions.addWidget(self.cancel_edit)
         actions.addWidget(self.complete)
         layout.addLayout(actions)
 
@@ -273,6 +398,7 @@ class SalesScreen(QWidget):
         self.discount.textChanged.connect(self._calculate)
         self.tax.textChanged.connect(self._calculate)
         self.complete.clicked.connect(self.save)
+        self.cancel_edit.clicked.connect(self._cancel_edit)
         self.save_pdf.clicked.connect(self._save_last_pdf)
         self.preview.clicked.connect(self._preview_last)
         self.print_invoice.clicked.connect(self._print_last_receipt)
@@ -658,9 +784,13 @@ class SalesScreen(QWidget):
             notes=self.notes.text().strip() or None,
         )
         self.complete.setEnabled(False)
+        editing = self._editing
 
         def operation() -> tuple[uuid.UUID, str]:
             with self._session_factory.begin() as session:
+                if editing is not None:
+                    amended = PesticideSaleService(session).amend(editing, command, self._actor)
+                    return amended.id, amended.invoice_number
                 stored = SettingsService(session, self._settings.app_secret_key.get_secret_value())
                 sale = PesticideSaleService(session).create(
                     command,
@@ -684,11 +814,15 @@ class SalesScreen(QWidget):
 
     def _sale_saved(self, result: object) -> None:
         sale_id, invoice = cast(tuple[uuid.UUID, str], result)
+        was_editing = self._editing is not None
+        self._leave_edit_mode()
         self._select_invoice(sale_id, invoice)
         QMessageBox.information(
             self,
-            "Sale completed",
-            f"Invoice {invoice} was saved and recipient/owner emails were queued.",
+            "Invoice updated" if was_editing else "Sale completed",
+            f"Invoice {invoice} was updated; its stock and balance were adjusted."
+            if was_editing
+            else f"Invoice {invoice} was saved and recipient/owner emails were queued.",
         )
         self.sale_completed.emit(invoice)
         self._cart.clear()
@@ -832,6 +966,8 @@ class SalesScreen(QWidget):
                 ("View details", self._view_sale),
                 ("Print preview", self._preview_sale),
                 ("Print invoice", self._print_sale),
+                ("Edit sale", self._edit_sale),
+                ("Record a return", self._return_sale),
                 ("Void sale", self._void_sale),
             ),
         )
@@ -877,6 +1013,211 @@ class SalesScreen(QWidget):
     def _print_sale(self, row: int) -> None:
         if self._select_history_row(row):
             self._print_last_receipt()
+
+    def _enter_edit_mode(self, sale_id: uuid.UUID, invoice_number: str) -> None:
+        """Switch the New Sale tab into amending an existing invoice."""
+
+        self._editing = sale_id
+        self._editing_number = invoice_number
+        self.complete.setText(f"Save changes to {invoice_number}")
+        self.complete.setToolTip("Update this invoice, adjusting stock and the balance")
+        self.cancel_edit.setVisible(True)
+        self.payments.setEnabled(False)
+        self.payments.setToolTip(
+            "Payments are not edited here. Reverse a payment first if one was taken."
+        )
+        self.tabs.setCurrentIndex(0)
+
+    def _leave_edit_mode(self) -> None:
+        self._editing = None
+        self._editing_number = ""
+        self.complete.setText("Complete Sale && Queue Emails")
+        self.complete.setToolTip("Save the sale, reduce stock, and queue invoice emails")
+        self.cancel_edit.setVisible(False)
+        self.payments.setEnabled(True)
+        self.payments.setToolTip("")
+
+    def _cancel_edit(self) -> None:
+        self._leave_edit_mode()
+        self._clear_cart()
+        self.tabs.setCurrentIndex(1)
+
+    def _clear_cart(self) -> None:
+        self._cart.clear()
+        self.cart_table.setRowCount(0)
+        self.discount.setText("0.00")
+        self.tax.setText("0.00")
+        self.payments.clear()
+        self.notes.clear()
+        self._calculate()
+        self._update_cart_state()
+
+    def _edit_sale(self, row: int) -> None:
+        """Load a completed invoice back into the sale form for correction."""
+
+        if row >= len(self._history_sales):
+            return
+        sale = self._history_sales[row]
+        if sale.status is not SaleStatus.COMPLETED:
+            QMessageBox.information(self, "Not editable", "A voided sale cannot be edited.")
+            return
+        sale_id = sale.id
+
+        def operation() -> tuple[
+            str, dict[str, object], list[tuple[uuid.UUID, int, Decimal, Decimal]]
+        ]:
+            with self._session_factory() as session:
+                loaded = session.execute(
+                    select(Sale).options(selectinload(Sale.items)).where(Sale.id == sale_id)
+                ).scalar_one()
+                header: dict[str, object] = {
+                    "dealer": loaded.dealer_id is not None,
+                    "recipient_id": loaded.dealer_id or loaded.customer_id,
+                    "order_number": loaded.order_number or "",
+                    "territory": loaded.territory or "",
+                    "policy": loaded.policy or "",
+                    "store": loaded.store or "",
+                    "delivery_address": loaded.delivery_address or "",
+                    "notes": loaded.notes or "",
+                    "discount": loaded.discount,
+                    "tax": loaded.tax,
+                }
+                lines = [
+                    (item.stock_batch_id, item.quantity, item.unit_price, item.discount)
+                    for item in loaded.items
+                ]
+                return loaded.invoice_number, header, lines
+
+        def loaded(result: object) -> None:
+            invoice_number, header, lines = cast(
+                tuple[str, dict[str, object], list[tuple[uuid.UUID, int, Decimal, Decimal]]],
+                result,
+            )
+            self._clear_cart()
+            self.recipient_type.setCurrentText("Dealer" if header["dealer"] else "Customer")
+            recipient_id = header["recipient_id"]
+            if isinstance(recipient_id, uuid.UUID):
+                self._select_recipient(recipient_id)
+            self.order_number.setText(str(header["order_number"]))
+            self.territory.setText(str(header["territory"]))
+            self.policy.setText(str(header["policy"]))
+            self.store.setText(str(header["store"]))
+            self.delivery_address.setText(str(header["delivery_address"]))
+            self.notes.setText(str(header["notes"]))
+            self.discount.setText(f"{header['discount']:.2f}")
+            self.tax.setText(f"{header['tax']:.2f}")
+            missing = [
+                batch_id
+                for batch_id, _quantity, _price, _line_discount in lines
+                if not self._add_existing_line(batch_id, _quantity, _price, _line_discount)
+            ]
+            if missing:
+                show_error(
+                    self,
+                    ConflictError(
+                        "Some batches on this invoice are no longer sellable, so they were "
+                        "left out. Check the lines before saving."
+                    ),
+                )
+            self._enter_edit_mode(sale_id, invoice_number)
+
+        self._worker = start_worker(
+            operation, succeeded=loaded, failed=lambda error: show_error(self, error)
+        )
+
+    def _add_existing_line(
+        self, batch_id: uuid.UUID, quantity: int, unit_price: Decimal, line_discount: Decimal
+    ) -> bool:
+        """Put one saved invoice line back in the cart. False when its batch is gone."""
+
+        for index in range(self.batch.count()):
+            data = self.batch.itemData(index)
+            if data and data[0] == batch_id:
+                self.batch.setCurrentIndex(index)
+                # The batch still holds what this invoice took, so allow the
+                # original quantity even when the free stock is now lower.
+                self.quantity.setMaximum(max(self.quantity.maximum(), quantity))
+                self.quantity.setValue(quantity)
+                self.unit_price.setText(f"{unit_price:.2f}")
+                self._add_batch()
+                row = len(self._cart) - 1
+                discount_widget = self.cart_table.cellWidget(row, 4)
+                if isinstance(discount_widget, MoneyEdit):
+                    discount_widget.setText(f"{line_discount:.2f}")
+                self._calculate()
+                return True
+        return False
+
+    def _return_sale(self, row: int) -> None:
+        """Record goods coming back against a completed invoice."""
+
+        if row >= len(self._history_sales):
+            return
+        sale = self._history_sales[row]
+        if sale.status is not SaleStatus.COMPLETED:
+            QMessageBox.information(self, "Not available", "A voided sale cannot accept a return.")
+            return
+        sale_id, invoice_number = sale.id, sale.invoice_number
+
+        def operation() -> list[ReturnableLine]:
+            with self._session_factory() as session:
+                return SaleReturnService(session).returnable_lines(sale_id)
+
+        def choose(result: object) -> None:
+            lines = [line for line in cast(list[ReturnableLine], result) if line.returnable > 0]
+            if not lines:
+                QMessageBox.information(
+                    self,
+                    "Nothing to return",
+                    f"Every line on {invoice_number} has already been returned.",
+                )
+                return
+            dialog = SaleReturnDialog(invoice_number, lines, self._settings.app_currency, self)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+            selected = dialog.values()
+            if not selected:
+                QMessageBox.information(
+                    self, "Nothing selected", "Enter a quantity against at least one line."
+                )
+                return
+            reason, method = dialog.reason.text(), dialog.payment_method()
+
+            def record() -> str:
+                with self._session_factory.begin() as session:
+                    stored = SettingsService(
+                        session, self._settings.app_secret_key.get_secret_value()
+                    )
+                    document = SaleReturnService(session).record(
+                        sale_id,
+                        selected,
+                        self._actor,
+                        reason=reason,
+                        refund_method=method,
+                        return_prefix=stored.get(SettingCategory.GENERAL, "return_prefix", "RET")
+                        or "RET",
+                    )
+                    return (
+                        f"{document.return_number} credited "
+                        f"{self._settings.app_currency} {document.total:,.2f}"
+                        + (" and the balance was refunded." if document.refunded else ".")
+                    )
+
+            self._worker = start_worker(
+                record,
+                succeeded=lambda message: self._return_recorded(str(message), invoice_number),
+                failed=lambda error: show_error(self, error),
+            )
+
+        self._worker = start_worker(
+            operation, succeeded=choose, failed=lambda error: show_error(self, error)
+        )
+
+    def _return_recorded(self, message: str, invoice_number: str) -> None:
+        QMessageBox.information(self, "Return recorded", message)
+        self._load_choices()
+        self._refresh_sales_history()
+        self.sale_completed.emit(invoice_number)
 
     def _void_sale(self, row: int) -> None:
         """Cancel a sale, returning its stock and clearing the dealer's debt."""
