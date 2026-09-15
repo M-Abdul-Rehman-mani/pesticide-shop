@@ -72,15 +72,19 @@ class StockPurchaseService:
         )
         if active_products != product_ids:
             raise NotFoundError("One or more selected products are missing or inactive.")
-        for product_id, batch_number in keys:
-            existing = self._session.scalar(
-                select(StockBatch.id).where(
-                    StockBatch.product_id == product_id,
-                    StockBatch.batch_number == batch_number,
+        key_set = set(keys)
+        existing_batches = {
+            (batch.product_id, batch.batch_number): batch
+            for batch in self._session.scalars(
+                select(StockBatch)
+                .where(
+                    StockBatch.product_id.in_(product_ids),
+                    StockBatch.batch_number.in_({batch_number for _, batch_number in keys}),
                 )
+                .with_for_update(of=StockBatch)
             )
-            if existing:
-                raise ConflictError(f"Batch {batch_number} already exists for that product.")
+            if (batch.product_id, batch.batch_number) in key_set
+        }
 
         prices = [
             nonnegative_money(item.purchase_price, field="Purchase price")
@@ -130,32 +134,42 @@ class StockPurchaseService:
             )
             self._session.add(purchase_item)
             self._session.flush()
-            batch = StockBatch(
-                product_id=item.product_id,
-                supplier_id=supplier.id,
-                purchase_id=purchase.id,
-                purchase_item_id=purchase_item.id,
-                batch_number=item.batch_number.strip().upper(),
-                manufacture_date=item.manufacture_date,
-                expiry_date=item.expiry_date,
-                quantity_received=item.quantity,
-                quantity_available=item.quantity,
-                cartons=item.cartons,
-                packs_per_carton=item.packs_per_carton,
-                purchase_price=purchase_price,
-                selling_price=selling_price,
-                location=item.location.strip() if item.location else None,
-                notes=item.notes.strip() if item.notes else None,
-                is_active=True,
-            )
-            self._session.add(batch)
+            batch_number = item.batch_number.strip().upper()
+            existing = existing_batches.get((item.product_id, batch_number))
+            if existing is not None:
+                # Restock: the batch already exists, so its record stays intact and
+                # only its available quantity grows, with the ledger carrying the
+                # rest of this purchase's history for it.
+                existing.quantity_received += item.quantity
+                existing.quantity_available += item.quantity
+                batch = existing
+            else:
+                batch = StockBatch(
+                    product_id=item.product_id,
+                    supplier_id=supplier.id,
+                    purchase_id=purchase.id,
+                    purchase_item_id=purchase_item.id,
+                    batch_number=batch_number,
+                    manufacture_date=item.manufacture_date,
+                    expiry_date=item.expiry_date,
+                    quantity_received=item.quantity,
+                    quantity_available=item.quantity,
+                    cartons=item.cartons,
+                    packs_per_carton=item.packs_per_carton,
+                    purchase_price=purchase_price,
+                    selling_price=selling_price,
+                    location=item.location.strip() if item.location else None,
+                    notes=item.notes.strip() if item.notes else None,
+                    is_active=True,
+                )
+                self._session.add(batch)
             self._session.flush()
             self._session.add(
                 StockMovement(
                     batch_id=batch.id,
                     transaction_type=InventoryTransactionType.PURCHASE,
                     quantity_change=item.quantity,
-                    balance_after=item.quantity,
+                    balance_after=batch.quantity_available,
                     reference_id=purchase.id,
                     reference_type="Purchase",
                     performed_by=actor.id,
@@ -207,33 +221,64 @@ class StockPurchaseService:
             raise ConflictError(
                 "This purchase has supplier payments. Record a correcting transaction instead."
             )
-        batches = list(
+        movements = list(
             self._session.scalars(
+                select(StockMovement).where(
+                    StockMovement.reference_type == "Purchase",
+                    StockMovement.reference_id == purchase.id,
+                )
+            )
+        )
+        batch_ids = {movement.batch_id for movement in movements}
+        batches = {
+            batch.id: batch
+            for batch in self._session.scalars(
                 select(StockBatch)
-                .where(StockBatch.purchase_id == purchase.id)
+                .where(StockBatch.id.in_(batch_ids))
                 .order_by(StockBatch.id)
                 .with_for_update(of=StockBatch)
             )
-        )
-        if not batches or any(
-            batch.quantity_available != batch.quantity_received for batch in batches
-        ):
+        }
+        if not movements or set(batches) != batch_ids:
             raise ConflictError(
                 "Stock from this purchase has already changed. Use a stock correction instead."
             )
+        for movement in movements:
+            batch = batches[movement.batch_id]
+            if batch.purchase_id == purchase.id:
+                # This purchase created the batch outright; nothing may have moved since.
+                if batch.quantity_available != batch.quantity_received:
+                    raise ConflictError(
+                        "Stock from this purchase has already changed. "
+                        "Use a stock correction instead."
+                    )
+            elif batch.quantity_available < movement.quantity_change:
+                # This purchase only restocked an existing batch; some of what it added
+                # has already been sold or adjusted away, so undoing it would go negative.
+                raise ConflictError(
+                    "Stock from this purchase has already changed. Use a stock correction instead."
+                )
         supplier = self._session.execute(
             select(Supplier).where(Supplier.id == purchase.supplier_id).with_for_update(of=Supplier)
         ).scalar_one()
-        for batch in batches:
-            quantity = batch.quantity_available
-            batch.quantity_available = 0
-            batch.is_active = False
+        for movement in movements:
+            batch = batches[movement.batch_id]
+            if batch.purchase_id == purchase.id:
+                quantity = batch.quantity_available
+                batch.quantity_available = 0
+                batch.is_active = False
+                balance_after = 0
+            else:
+                quantity = movement.quantity_change
+                batch.quantity_received -= quantity
+                batch.quantity_available -= quantity
+                balance_after = batch.quantity_available
             self._session.add(
                 StockMovement(
                     batch_id=batch.id,
                     transaction_type=InventoryTransactionType.ADJUSTMENT,
                     quantity_change=-quantity,
-                    balance_after=0,
+                    balance_after=balance_after,
                     reference_id=purchase.id,
                     reference_type="Purchase Cancellation",
                     performed_by=actor.id,

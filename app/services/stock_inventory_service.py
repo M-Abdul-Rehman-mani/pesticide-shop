@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -12,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.models.enums import InventoryTransactionType
 from app.models.inventory import StockBatch, StockMovement
+from app.models.purchase import Purchase
 from app.models.sale import SaleItem
 from app.security.authentication import AuthenticatedUser
 from app.security.permissions import Permission, require_permission
@@ -19,10 +21,55 @@ from app.services.audit_service import AuditService
 from app.utils.exceptions import ConflictError, NotFoundError, ValidationError
 
 
+@dataclass(frozen=True, slots=True)
+class ProductPurchaseHistoryEntry:
+    """One purchase's contribution to one batch of a product's stock."""
+
+    batch_number: str
+    purchase_number: str
+    supplier: str
+    purchased_at: datetime
+    quantity_added: int
+    balance_after: int
+    purchase_price: Decimal
+
+
 class StockInventoryService:
     def __init__(self, session: Session) -> None:
         self._session = session
         self._audit = AuditService(session)
+
+    def purchase_history(self, product_id: uuid.UUID) -> list[ProductPurchaseHistoryEntry]:
+        """Every purchase that added stock to this product, newest first.
+
+        Sourced from the movement ledger rather than the batches themselves, so a
+        batch that was restocked under a later purchase still shows every purchase
+        that contributed to it -- not just the one that first created it.
+        """
+
+        rows = self._session.execute(
+            select(StockMovement, StockBatch, Purchase)
+            .join(StockBatch, StockBatch.id == StockMovement.batch_id)
+            .join(Purchase, Purchase.id == StockMovement.reference_id)
+            .where(
+                StockBatch.product_id == product_id,
+                StockMovement.transaction_type == InventoryTransactionType.PURCHASE,
+                StockMovement.reference_type == "Purchase",
+            )
+            .order_by(StockMovement.created_at.desc())
+        ).all()
+        return [
+            ProductPurchaseHistoryEntry(
+                batch_number=batch.batch_number,
+                purchase_number=purchase.purchase_number,
+                supplier=purchase.supplier.company_name or purchase.supplier.name,
+                purchased_at=movement.created_at,
+                quantity_added=movement.quantity_change,
+                balance_after=movement.balance_after,
+                purchase_price=batch.purchase_price,
+            )
+            for movement, batch, purchase in rows
+        ]
 
     def adjust(
         self, batch_id: uuid.UUID, *, quantity: int, reason: str, actor: AuthenticatedUser

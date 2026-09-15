@@ -20,6 +20,7 @@ from app.models.inventory import StockBatch
 from app.models.payment import Payment
 from app.models.product import Product
 from app.models.sale import Sale, SaleItem
+from app.models.sale_return import SaleReturn, SaleReturnItem
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +52,9 @@ class DashboardMetrics:
     low_stock_products: int
     expiring_units: int
     outstanding_payments: Decimal
+    #: Credited back for goods returned in the period, and the units that came back.
+    returns: Decimal = Decimal("0.00")
+    returned_units: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +118,8 @@ class ProductRow:
     sales: Decimal
     profit: Decimal
     last_sold: datetime | None
+    units_returned: int = 0
+    returns: Decimal = Decimal("0.00")
 
     @property
     def summary(self) -> ProductSummary:
@@ -137,6 +143,8 @@ class ProductMetrics:
     minimum_stock: int
     stock_value: Decimal
     last_sold: datetime | None
+    units_returned: int = 0
+    returns: Decimal = Decimal("0.00")
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +169,8 @@ class PartyMetrics:
     profit: Decimal
     outstanding: Decimal
     average_sale: Decimal
+    #: Credited back to this side of the trade for goods returned in the period.
+    returns: Decimal = Decimal("0.00")
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +184,7 @@ class PartyRow:
     sales: Decimal
     outstanding: Decimal
     last_sold: datetime | None
+    returned: Decimal = Decimal("0.00")
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +230,7 @@ class ReportService:
                 StockBatch.expiry_date <= date.today() + timedelta(days=90),
             )
         )
+        returned_units, returned_value = self.returns(period)
         return DashboardMetrics(
             sales=Decimal(sales_total or 0),
             profit=self.profit(period),
@@ -227,7 +239,46 @@ class ReportService:
             low_stock_products=len(self.low_stock_models()),
             expiring_units=int(expiring or 0),
             outstanding_payments=Decimal(outstanding or 0),
+            returns=returned_value,
+            returned_units=returned_units,
         )
+
+    def returns(self, period: DateRange) -> tuple[int, Decimal]:
+        """Units and value credited back for goods returned in the period."""
+
+        row = self._session.execute(
+            select(
+                func.coalesce(func.sum(SaleReturnItem.quantity), 0),
+                func.coalesce(func.sum(SaleReturnItem.total), Decimal("0.00")),
+            )
+            .join(SaleReturn, SaleReturn.id == SaleReturnItem.sale_return_id)
+            .where(
+                SaleReturn.returned_at >= period.start,
+                SaleReturn.returned_at < period.end,
+            )
+        ).one()
+        return int(row[0] or 0), Decimal(row[1] or 0)
+
+    def _returns_by_party(self, period: DateRange, *, dealers: bool) -> dict[uuid.UUID, Decimal]:
+        """Value returned in the period, per customer or per dealer.
+
+        Aggregated in one query rather than one per party, and grouped on the return
+        lines so a multi-line credit note is not counted once per line.
+        """
+
+        identity = Sale.dealer_id if dealers else Sale.customer_id
+        rows = self._session.execute(
+            select(identity, func.coalesce(func.sum(SaleReturnItem.total), Decimal("0.00")))
+            .join(SaleReturn, SaleReturn.id == SaleReturnItem.sale_return_id)
+            .join(Sale, Sale.id == SaleReturn.sale_id)
+            .where(
+                identity.is_not(None),
+                SaleReturn.returned_at >= period.start,
+                SaleReturn.returned_at < period.end,
+            )
+            .group_by(identity)
+        )
+        return {party_id: Decimal(total or 0) for party_id, total in rows}
 
     def profit(self, period: DateRange) -> Decimal:
         costs = (
@@ -458,6 +509,22 @@ class ReportService:
                 .group_by(SaleItem.product_id)
             )
         }
+        returned = {
+            product_id: row
+            for product_id, *row in self._session.execute(
+                select(
+                    SaleReturnItem.product_id,
+                    func.coalesce(func.sum(SaleReturnItem.quantity), 0),
+                    func.coalesce(func.sum(SaleReturnItem.total), Decimal("0.00")),
+                )
+                .join(SaleReturn, SaleReturn.id == SaleReturnItem.sale_return_id)
+                .where(
+                    SaleReturn.returned_at >= period.start,
+                    SaleReturn.returned_at < period.end,
+                )
+                .group_by(SaleReturnItem.product_id)
+            )
+        }
         stock = {
             product_id: row
             for product_id, *row in self._session.execute(
@@ -479,6 +546,7 @@ class ReportService:
                 product.id, (0, Decimal("0.00"), Decimal("0.00"), None)
             )
             available, batches = stock.get(product.id, (0, 0))
+            back, credited = returned.get(product.id, (0, Decimal("0.00")))
             rows.append(
                 ProductRow(
                     id=product.id,
@@ -493,6 +561,8 @@ class ReportService:
                     sales=Decimal(sales or 0),
                     profit=Decimal(profit or 0),
                     last_sold=last_sold,
+                    units_returned=int(back or 0),
+                    returns=Decimal(credited or 0),
                 )
             )
         return rows
@@ -539,6 +609,18 @@ class ReportService:
         minimum_stock = self._session.scalar(
             select(Product.minimum_stock).where(Product.id == product_id)
         )
+        returned = self._session.execute(
+            select(
+                func.coalesce(func.sum(SaleReturnItem.quantity), 0),
+                func.coalesce(func.sum(SaleReturnItem.total), Decimal("0.00")),
+            )
+            .join(SaleReturn, SaleReturn.id == SaleReturnItem.sale_return_id)
+            .where(
+                SaleReturnItem.product_id == product_id,
+                SaleReturn.returned_at >= period.start,
+                SaleReturn.returned_at < period.end,
+            )
+        ).one()
         return ProductMetrics(
             units_sold=int(sold[0] or 0),
             sales=Decimal(sold[1] or 0),
@@ -549,6 +631,8 @@ class ReportService:
             minimum_stock=int(minimum_stock or 0),
             stock_value=Decimal(stock[2] or 0),
             last_sold=sold[3],
+            units_returned=int(returned[0] or 0),
+            returns=Decimal(returned[1] or 0),
         )
 
     def product_financial_by_day(
@@ -640,6 +724,7 @@ class ReportService:
         """Headline figures for retail customers."""
 
         invoices, sales, profit, buyers = self._party_totals(period, dealers=False)
+        returned = sum(self._returns_by_party(period, dealers=False).values(), Decimal("0.00"))
         total = self._session.scalar(select(func.count()).select_from(Customer)) or 0
         outstanding = self._session.scalar(
             select(func.coalesce(func.sum(Sale.remaining_amount), Decimal("0.00"))).where(
@@ -657,12 +742,14 @@ class ReportService:
             profit=profit,
             outstanding=Decimal(outstanding or 0),
             average_sale=(sales / invoices) if invoices else Decimal("0.00"),
+            returns=returned,
         )
 
     def dealer_dashboard(self, period: DateRange) -> PartyMetrics:
         """Headline figures for trade dealers, whose balances sit on account."""
 
         invoices, sales, profit, buyers = self._party_totals(period, dealers=True)
+        returned = sum(self._returns_by_party(period, dealers=True).values(), Decimal("0.00"))
         total = self._session.scalar(select(func.count()).select_from(Dealer)) or 0
         active = (
             self._session.scalar(
@@ -684,6 +771,7 @@ class ReportService:
             profit=profit,
             outstanding=Decimal(outstanding or 0),
             average_sale=(sales / invoices) if invoices else Decimal("0.00"),
+            returns=returned,
         )
 
     @staticmethod
@@ -725,6 +813,7 @@ class ReportService:
             .limit(limit)
         ).all()
         outstanding = self._customer_outstanding([customer.id for customer, *_rest in rows])
+        returned = self._returns_by_party(period, dealers=False)
         return [
             PartyRow(
                 name=customer.name,
@@ -734,6 +823,7 @@ class ReportService:
                 sales=Decimal(sales or 0),
                 outstanding=outstanding.get(customer.id, Decimal("0.00")),
                 last_sold=last_sold,
+                returned=returned.get(customer.id, Decimal("0.00")),
             )
             for customer, invoices, units_sold, sales, last_sold in rows
         ]
@@ -761,6 +851,7 @@ class ReportService:
             .order_by(func.coalesce(func.sum(Sale.total), Decimal("0.00")).desc())
             .limit(limit)
         )
+        returned = self._returns_by_party(period, dealers=True)
         return [
             PartyRow(
                 name=dealer.display_name,
@@ -770,6 +861,7 @@ class ReportService:
                 sales=Decimal(sales or 0),
                 outstanding=dealer.balance,
                 last_sold=last_sold,
+                returned=returned.get(dealer.id, Decimal("0.00")),
             )
             for dealer, invoices, units_sold, sales, last_sold in rows
         ]

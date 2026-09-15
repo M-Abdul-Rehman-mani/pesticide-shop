@@ -130,7 +130,7 @@ class ExcelExporter:
             for column, value in enumerate(values, start=1):
                 cell = sheet.cell(row_number, column, self._cell_value(value))
                 if column in currency_columns and isinstance(value, (Decimal, int)):
-                    cell.number_format = "#,##0.00;[Red]-#,##0.00"
+                    cell.number_format = "#,##0;[Red]-#,##0"
                 elif column in date_columns and isinstance(value, (date, datetime)):
                     cell.number_format = "dd-mmm-yyyy hh:mm"
             row_number += 1
@@ -140,7 +140,7 @@ class ExcelExporter:
                 cell.fill = self.SUMMARY_FILL
                 cell.font = Font(bold=True)
                 if column in currency_columns:
-                    cell.number_format = "#,##0.00;[Red]-#,##0.00"
+                    cell.number_format = "#,##0;[Red]-#,##0"
         last_row = row_number if summary else max(2, row_number - 1)
         sheet.auto_filter.ref = f"A2:{get_column_letter(len(headers))}{last_row}"
         for column, header in enumerate(headers, start=1):

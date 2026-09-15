@@ -185,8 +185,8 @@ class PurchasesScreen(QWidget):
         totals_group, totals_form = QGroupBox("Totals"), QFormLayout()
         totals_group.setLayout(totals_form)
         self.subtotal, self.total = (
-            QLabel(f"{settings.app_currency} 0.00"),
-            QLabel(f"{settings.app_currency} 0.00"),
+            QLabel(f"{settings.app_currency} 0"),
+            QLabel(f"{settings.app_currency} 0"),
         )
         self.discount, self.tax = MoneyEdit(), MoneyEdit()
         for total_label, total_widget in (
@@ -359,8 +359,8 @@ class PurchasesScreen(QWidget):
         self._cart.clear()
         self.table.setRowCount(0)
         self.payments.clear()
-        self.discount.setText("0.00")
-        self.tax.setText("0.00")
+        self.discount.setText("0")
+        self.tax.setText("0")
         self._calculate()
         self.purchase_completed.emit(str(purchase_number))
         self._load_choices()

@@ -37,8 +37,16 @@ Open **Purchases**, select the supplier and product, then enter the batch number
 packs per carton, manufacture date, expiry date, purchase price, and default selling price. Add all
 batches for the delivery, enter one or more payment lines, discount, and tax, then complete the
 purchase. The purchase, supplier balance, stock batches, payments, audit event, and immutable stock
-movements are committed together. Duplicate product/batch combinations and invalid dates are
-rejected.
+movements are committed together. Invalid dates are rejected, and a batch number repeated within the
+same purchase is rejected too.
+
+Purchasing a product under a batch number that already exists for it does not error: the existing
+batch record stays exactly as it is, and its received and available quantities simply grow by the
+new quantity (100 on hand plus a 50-unit purchase leaves 150 available). A different batch number for
+the same product creates a new batch as usual. Every purchase against a batch, new or restocked, is
+recorded in that batch's movement history. See a product's full purchase history — every batch,
+purchase, date, and quantity added — from **Products**, either by double-clicking the product or
+through its ⋮ menu's **View History**.
 
 ## Creating and printing a sale
 
@@ -166,28 +174,34 @@ compensating transaction rather than editing history.
 
 The dashboard carries four views: **General**, **Customers**, **Dealers**, and **Products**.
 
-**General** is the whole-shop summary: revenue, profit, units sold, stock on hand, low-stock
-products, units expiring within 90 days, and uncollected balances, with charts for daily sales,
-gross profit, top sellers, and inventory status.
+**General** is the whole-shop summary: revenue, profit, units sold, the value credited for goods
+returned, stock on hand, low-stock products, units expiring within 90 days, and uncollected
+balances, with charts for daily sales, gross profit, top sellers, and inventory status.
 
 **Customers** and **Dealers** each show their own side of the trade for the selected period:
-revenue, gross profit, invoice count, average sale value, how many bought, how many are on the
-books, and what is still outstanding — customer balances from unpaid invoices, dealer balances from
+revenue, gross profit, invoice count, what was returned, average sale value, how many bought, how
+many are on the books, and what is still outstanding — customer balances from unpaid invoices, dealer balances from
 their running accounts. Beneath each is a ranking of buyers by revenue with their invoice and unit
-counts, outstanding amount, and last purchase; the ranking's revenue always agrees with the card
-above it. Retail and trade are never mixed.
+counts, what they returned, outstanding amount, and last purchase; the ranking's revenue always
+agrees with the card above it. Retail and trade are never mixed.
 
 **Products** lists the whole catalogue: product, manufacturer, stock on hand with a reorder note,
-active batches, units sold, revenue, profit, last sale, and whether the product is active. Search
+active batches, units sold, revenue, profit, what came back, last sale, and whether the product is
+active. Search
 narrows the list by product or manufacturer.
 
 Click any product to open its own dashboard — the same period figures narrowed to that product:
-units sold, revenue, profit, stock on hand, active batches, units expiring soon, and stock value at
-cost, plus its daily sales and profit charts, a reorder note comparing stock against the minimum
+units sold, revenue, profit, returns, stock on hand, active batches, units expiring soon, and stock
+value at cost, plus its daily sales and profit charts, a reorder note comparing stock against the minimum
 level, and a table of its live batches with expiry, quantities, and prices. **← All products**
 returns to the list, and **Go to product** at the top opens one straight by name.
 
-The reporting period at the top applies to every view. Each view loads when you open it, so a large
+Returns are shown as the value credited, with the number of units beside it where the space allows.
+They are never netted off the sales figure: an invoice stands as issued, and the credit note sits
+alongside it, so revenue and returns can each be read for what they are.
+
+The reporting period at the top applies to every view, to returns as well as sales — a return dated
+outside the range is not counted. Each view loads when you open it, so a large
 catalogue stays quick; press **Refresh** to reload the current view and pick up newly added
 products.
 

@@ -358,7 +358,13 @@ class RowsTableModel(QAbstractTableModel):
             Qt.ItemDataRole.ToolTipRole,
         }:
             return None
-        return str(self._rows[index.row()][index.column()])
+        row = self._rows[index.row()]
+        if index.column() >= len(row):
+            # PySide's header view can briefly report one more section than the
+            # model has columns while a hidden tab is laid out; nothing real lives
+            # past the last column, so render it blank instead of crashing.
+            return None
+        return str(row[index.column()])
 
     def headerData(
         self,
@@ -367,6 +373,8 @@ class RowsTableModel(QAbstractTableModel):
         role: int = Qt.ItemDataRole.DisplayRole,
     ) -> object:
         if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
+            if section >= len(self._headers):
+                return None
             return self._headers[section]
         return None
 

@@ -4,7 +4,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
@@ -26,6 +26,7 @@ from app.services.dto import (
 )
 from app.services.payment_service import PaymentService
 from app.services.pesticide_sale_service import PesticideSaleService
+from app.services.stock_inventory_service import StockInventoryService
 from app.services.stock_purchase_service import StockPurchaseService
 from app.utils.exceptions import ConflictError, ValidationError
 
@@ -60,7 +61,11 @@ def _purchase(
         actor,
     )
     session.flush()
-    batch = session.scalar(select(StockBatch).where(StockBatch.purchase_id == purchase.id))
+    batch = session.scalar(
+        select(StockBatch).where(
+            StockBatch.product_id == product.id, StockBatch.batch_number == batch_number
+        )
+    )
     assert batch is not None
     return purchase, batch
 
@@ -329,3 +334,86 @@ def test_sale_date_controls_expiry_validation(
     )
 
     assert sale.sale_date == historical_date
+
+
+def test_purchasing_an_existing_batch_restocks_it_instead_of_erroring(
+    db_session: Session,
+    owner: AuthenticatedUser,
+    supplier: Supplier,
+    product: Product,
+) -> None:
+    _first_purchase, batch = _purchase(
+        db_session, owner, supplier, product, batch_number="RESTOCK-1"
+    )
+    assert batch.quantity_received == 10
+    assert batch.quantity_available == 10
+    original_batch_id = batch.id
+
+    _second_purchase, restocked = _purchase(
+        db_session, owner, supplier, product, batch_number="RESTOCK-1"
+    )
+    db_session.flush()
+
+    # Same batch record, not a new one, with quantity added on top of what was there.
+    assert restocked.id == original_batch_id
+    assert restocked.quantity_received == 20
+    assert restocked.quantity_available == 20
+    assert (
+        db_session.scalar(
+            select(func.count(StockBatch.id)).where(
+                StockBatch.product_id == product.id, StockBatch.batch_number == "RESTOCK-1"
+            )
+        )
+        == 1
+    )
+
+    history = StockInventoryService(db_session).purchase_history(product.id)
+    assert len(history) == 2
+    assert {entry.quantity_added for entry in history} == {10}
+    assert {entry.balance_after for entry in history} == {10, 20}
+
+
+def test_purchasing_the_same_product_with_a_different_batch_creates_a_separate_batch(
+    db_session: Session,
+    owner: AuthenticatedUser,
+    supplier: Supplier,
+    product: Product,
+) -> None:
+    _first_purchase, first_batch = _purchase(
+        db_session, owner, supplier, product, batch_number="BATCH-A"
+    )
+    _second_purchase, second_batch = _purchase(
+        db_session, owner, supplier, product, batch_number="BATCH-B"
+    )
+    db_session.flush()
+
+    assert first_batch.id != second_batch.id
+    assert first_batch.quantity_available == 10
+    assert second_batch.quantity_available == 10
+
+    history = StockInventoryService(db_session).purchase_history(product.id)
+    assert {entry.batch_number for entry in history} == {"BATCH-A", "BATCH-B"}
+
+
+def test_cancelling_a_restock_purchase_only_reverses_what_it_added(
+    db_session: Session,
+    owner: AuthenticatedUser,
+    supplier: Supplier,
+    product: Product,
+) -> None:
+    _first_purchase, batch = _purchase(
+        db_session, owner, supplier, product, batch_number="RESTOCK-2"
+    )
+    second_purchase, restocked = _purchase(
+        db_session, owner, supplier, product, batch_number="RESTOCK-2"
+    )
+    db_session.flush()
+    assert restocked.quantity_available == 20
+
+    StockPurchaseService(db_session).cancel(second_purchase.id, owner)
+    db_session.flush()
+
+    assert batch.id == restocked.id
+    assert restocked.quantity_available == 10
+    assert restocked.quantity_received == 10
+    assert restocked.is_active is True

@@ -162,6 +162,7 @@ class OverviewTab(QWidget):
         ("Sales", "Revenue in selected period", "green"),
         ("Profit", "Gross profit after costs", "blue"),
         ("Units Sold", "Packs and units sold", "purple"),
+        ("Returns", "Credited for goods returned", "red"),
         ("Current Inventory", "Available sellable units", "green"),
         ("Low Stock Products", "At or below reorder level", "amber"),
         ("Expiring in 90 Days", "Units requiring attention", "red"),
@@ -189,6 +190,12 @@ class OverviewTab(QWidget):
         self.cards.set_value("Sales", format_money(metrics.sales, self._currency))
         self.cards.set_value("Profit", format_money(metrics.profit, self._currency))
         self.cards.set_value("Units Sold", f"{metrics.units_sold:,}")
+        self.cards.set_value(
+            "Returns",
+            f"{format_money(metrics.returns, self._currency)}  ({metrics.returned_units:,} units)"
+            if metrics.returned_units
+            else format_money(metrics.returns, self._currency),
+        )
         self.cards.set_value("Current Inventory", f"{metrics.current_inventory:,}")
         self.cards.set_value("Low Stock Products", f"{metrics.low_stock_products:,}")
         self.cards.set_value("Expiring in 90 Days", f"{metrics.expiring_units:,}")
@@ -254,7 +261,16 @@ class PartyTab(QWidget):
         heading = QLabel(title)
         heading.setObjectName("SectionTitle")
         self.model = RowsTableModel(
-            (party_label, "Contact", "Invoices", "Units", "Sales", "Outstanding", "Last Sale")
+            (
+                party_label,
+                "Contact",
+                "Invoices",
+                "Units",
+                "Sales",
+                "Returns",
+                "Outstanding",
+                "Last Sale",
+            )
         )
         self.table = QTableView()
         self.table.setModel(self.model)
@@ -272,6 +288,7 @@ class PartyTab(QWidget):
         self.cards.set_value("Sales", format_money(metrics.sales, self._currency))
         self.cards.set_value("Profit", format_money(metrics.profit, self._currency))
         self.cards.set_value("Invoices", f"{metrics.invoices:,}")
+        self.cards.set_value("Returns", format_money(metrics.returns, self._currency))
         self.cards.set_value("Average Sale", format_money(metrics.average_sale, self._currency))
         self.cards.set_value("Bought in Period", f"{metrics.buyers_in_period:,}")
         self.cards.set_value("On the Books", f"{metrics.active_parties:,}")
@@ -284,6 +301,7 @@ class PartyTab(QWidget):
                     f"{row.invoices:,}",
                     f"{row.units:,}",
                     format_money(row.sales, self._currency),
+                    format_money(row.returned, self._currency),
                     format_money(row.outstanding, self._currency),
                     format_date(row.last_sold),
                 )
@@ -297,6 +315,7 @@ CUSTOMER_SPECIFICATIONS = (
     ("Sales", "Revenue from customers", "green"),
     ("Profit", "Gross profit after costs", "blue"),
     ("Invoices", "Counter sales in the period", "purple"),
+    ("Returns", "Credited for goods returned", "red"),
     ("Average Sale", "Revenue per invoice", "blue"),
     ("Bought in Period", "Customers who bought", "green"),
     ("On the Books", "Customers on record", "green"),
@@ -307,6 +326,7 @@ DEALER_SPECIFICATIONS = (
     ("Sales", "Revenue from dealers", "green"),
     ("Profit", "Gross profit after costs", "blue"),
     ("Invoices", "Trade sales in the period", "purple"),
+    ("Returns", "Credited for goods returned", "red"),
     ("Average Sale", "Revenue per invoice", "blue"),
     ("Bought in Period", "Dealers who bought", "green"),
     ("On the Books", "Active dealer accounts", "green"),
@@ -321,6 +341,7 @@ class ProductTab(QWidget):
         ("Units Sold", "Packs sold in selected period", "purple"),
         ("Sales", "Revenue from this product", "green"),
         ("Profit", "Gross profit after costs", "blue"),
+        ("Returns", "Credited for goods returned", "red"),
         ("In Stock", "Available units across batches", "green"),
         ("Active Batches", "Batches currently held", "blue"),
         ("Expiring in 90 Days", "Units requiring attention", "red"),
@@ -423,6 +444,12 @@ class ProductTab(QWidget):
         self.cards.set_value("Units Sold", f"{metrics.units_sold:,}")
         self.cards.set_value("Sales", format_money(metrics.sales, self._currency))
         self.cards.set_value("Profit", format_money(metrics.profit, self._currency))
+        self.cards.set_value(
+            "Returns",
+            f"{format_money(metrics.returns, self._currency)}  ({metrics.units_returned:,} units)"
+            if metrics.units_returned
+            else format_money(metrics.returns, self._currency),
+        )
         self.cards.set_value("In Stock", f"{metrics.in_stock:,}")
         self.cards.set_value("Active Batches", f"{metrics.active_batches:,}")
         self.cards.set_value("Expiring in 90 Days", f"{metrics.expiring_units:,}")
@@ -473,6 +500,7 @@ class ProductsTab(QWidget):
         "Units Sold",
         "Sales",
         "Profit",
+        "Returns",
         "Last Sold",
         "Status",
     )
@@ -550,6 +578,9 @@ class ProductsTab(QWidget):
                     f"{row.units_sold:,}",
                     format_money(row.sales, self._currency),
                     format_money(row.profit, self._currency),
+                    f"{format_money(row.returns, self._currency)} ({row.units_returned:,})"
+                    if row.units_returned
+                    else "—",
                     format_date(row.last_sold),
                     "Active" if row.is_active else "Inactive",
                 )

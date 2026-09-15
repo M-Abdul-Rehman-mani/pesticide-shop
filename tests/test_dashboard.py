@@ -237,6 +237,8 @@ def _rows(*names: str, manufacturer: str = "Test Crop Sciences") -> list[Product
             sales=Decimal("450.00"),
             profit=Decimal("150.00"),
             last_sold=None,
+            units_returned=1,
+            returns=Decimal("60.00"),
         )
         for name in names
     ]
@@ -265,6 +267,7 @@ def test_the_dashboard_has_four_views_and_lists_every_product(
     assert products.model.data(products.model.index(0, 0)) == "Alpha Product 1-L"
     assert products.model.data(products.model.index(0, 2)) == "12"
     assert products.model.data(products.model.index(0, 5)) == "PKR 450"
+    assert products.model.data(products.model.index(0, 7)) == "PKR 60 (1)", "returns are listed"
     assert "2 products" in products.count.text()
     assert products.showing_product is False
 
@@ -513,3 +516,94 @@ def test_the_ranking_agrees_with_the_metric_card_above_it(
     assert rows[0].sales == card.sales == Decimal("900.00")
     assert rows[0].invoices == card.invoices == 1
     assert rows[0].units == 6, "units still add up across the lines"
+
+
+def test_every_dashboard_reports_what_came_back(
+    db_session: Session,
+    owner: AuthenticatedUser,
+    supplier: Supplier,
+    product: Product,
+    customer: Customer,
+) -> None:
+    """Returns belong beside sales on every view, not only on the returns list."""
+
+    from app.models.sale import SaleItem
+    from app.services.sale_return_service import ReturnLineInput, SaleReturnService
+
+    batch = _stock(db_session, owner, supplier, product, batch_number="DASH-RET")
+    sale = PesticideSaleService(db_session).create(
+        CreatePesticideSaleCommand(
+            lines=(PesticideSaleLineInput(batch.id, 6),), payments=(), customer_id=customer.id
+        ),
+        owner,
+    )
+    db_session.flush()
+    item = db_session.scalars(select(SaleItem).where(SaleItem.sale_id == sale.id)).one()
+    SaleReturnService(db_session).record(
+        sale.id, (ReturnLineInput(item.id, 2),), owner, reason="Damaged in transit"
+    )
+    db_session.flush()
+
+    reports = ReportService(db_session)
+    period = DateRange.today(TIMEZONE)
+
+    # General
+    overview = reports.dashboard(period)
+    assert overview.returns == Decimal("300.00")
+    assert overview.returned_units == 2
+    assert overview.sales == Decimal("900.00"), "the invoice stands as issued"
+    assert reports.returns(period) == (2, Decimal("300.00"))
+
+    # Customers, card and ranking row
+    card = reports.customer_dashboard(period)
+    assert card.returns == Decimal("300.00")
+    row = reports.top_customers(period)[0]
+    assert row.returned == Decimal("300.00")
+    assert row.sales == Decimal("900.00")
+
+    # Dealers saw none of this.
+    assert reports.dealer_dashboard(period).returns == Decimal("0.00")
+
+    # Products, list and the product's own dashboard
+    listed = next(entry for entry in reports.product_catalogue(period) if entry.id == product.id)
+    assert (listed.units_returned, listed.returns) == (2, Decimal("300.00"))
+    metrics = reports.product_dashboard(product.id, period)
+    assert (metrics.units_returned, metrics.returns) == (2, Decimal("300.00"))
+
+
+def test_a_return_outside_the_period_is_not_counted(
+    db_session: Session,
+    owner: AuthenticatedUser,
+    supplier: Supplier,
+    product: Product,
+    customer: Customer,
+) -> None:
+    """The reporting period governs returns exactly as it governs sales."""
+
+    from datetime import timedelta
+
+    from app.models.sale import SaleItem
+    from app.services.sale_return_service import ReturnLineInput, SaleReturnService
+
+    batch = _stock(db_session, owner, supplier, product, batch_number="DASH-RET-2")
+    sale = PesticideSaleService(db_session).create(
+        CreatePesticideSaleCommand(
+            lines=(PesticideSaleLineInput(batch.id, 4),), payments=(), customer_id=customer.id
+        ),
+        owner,
+    )
+    db_session.flush()
+    item = db_session.scalars(select(SaleItem).where(SaleItem.sale_id == sale.id)).one()
+    SaleReturnService(db_session).record(
+        sale.id, (ReturnLineInput(item.id, 1),), owner, reason="Wrong pack"
+    )
+    db_session.flush()
+
+    yesterday = date.today() - timedelta(days=1)
+    elsewhere = DateRange.local_days(yesterday, yesterday, TIMEZONE)
+    reports = ReportService(db_session)
+    assert reports.returns(elsewhere) == (0, Decimal("0.00"))
+    assert reports.dashboard(elsewhere).returns == Decimal("0.00")
+    assert reports.customer_dashboard(elsewhere).returns == Decimal("0.00")
+    listed = next(entry for entry in reports.product_catalogue(elsewhere) if entry.id == product.id)
+    assert (listed.units_returned, listed.returns) == (0, Decimal("0.00"))

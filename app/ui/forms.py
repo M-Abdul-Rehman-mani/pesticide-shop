@@ -24,11 +24,11 @@ from app.utils.validators import nonnegative_money
 
 
 class MoneyEdit(QLineEdit):
-    def __init__(self, value: str = "0.00", parent: QWidget | None = None) -> None:
+    """A money field restricted to whole numbers; the shop prices in whole rupees."""
+
+    def __init__(self, value: str = "0", parent: QWidget | None = None) -> None:
         super().__init__(value, parent)
-        self.setValidator(
-            QRegularExpressionValidator(QRegularExpression(r"^[0-9]{0,13}(\.[0-9]{0,2})?$"))
-        )
+        self.setValidator(QRegularExpressionValidator(QRegularExpression(r"^[0-9]{0,13}$")))
         self.setAlignment(Qt.AlignmentFlag.AlignRight)
 
     def decimal_value(self, field: str = "Amount") -> Decimal:
@@ -62,7 +62,7 @@ class PaymentEditor(QWidget):
         remove.clicked.connect(self.remove_selected)
         self.add_row()
 
-    def add_row(self, method: PaymentMethod = PaymentMethod.CASH, amount: str = "0.00") -> None:
+    def add_row(self, method: PaymentMethod = PaymentMethod.CASH, amount: str = "0") -> None:
         row = self.table.rowCount()
         self.table.insertRow(row)
         methods = QComboBox()

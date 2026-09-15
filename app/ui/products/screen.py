@@ -31,6 +31,7 @@ from app.models.inventory import StockBatch
 from app.models.product import Product
 from app.security.authentication import AuthenticatedUser
 from app.services.catalog_service import ProductService
+from app.services.stock_inventory_service import StockInventoryService
 from app.ui.forms import MoneyEdit
 from app.ui.widgets import (
     RowsTableModel,
@@ -42,6 +43,7 @@ from app.ui.widgets import (
     show_success,
 )
 from app.ui.workers import FunctionWorker, start_worker
+from app.utils.formatting import format_date
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +167,36 @@ class PriceDialog(QDialog):
         layout.addRow(buttons)
 
 
+class PurchaseHistoryDialog(QDialog):
+    """Every purchase that added stock to one product, batch by batch."""
+
+    def __init__(
+        self,
+        product_name: str,
+        currency: str,
+        rows: list[tuple[object, ...]],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Purchase History — {product_name}")
+        self.setMinimumSize(640, 420)
+        layout = QVBoxLayout(self)
+        self.model = RowsTableModel(
+            ("Batch", "Purchase", "Supplier", "Date", "Quantity Added", "Purchase Price"), self
+        )
+        self.table = QTableView()
+        self.table.setModel(self.model)
+        configure_table(self.table, stretch_column=1, minimum_section_size=80)
+        self.model.set_rows(rows)
+        layout.addWidget(self.table, 1)
+        state = QLabel(record_count_text(len(rows), "purchase"))
+        state.setObjectName("RecordCount")
+        layout.addWidget(state)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
 class ProductsScreen(QWidget):
     def __init__(
         self,
@@ -224,6 +256,7 @@ class ProductsScreen(QWidget):
         layout.addWidget(self.state_label)
         add.clicked.connect(self._add)
         price.clicked.connect(self._change_prices)
+        self.table.doubleClicked.connect(lambda index: self._view_history(index.row()))
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(300)
@@ -337,6 +370,7 @@ class ProductsScreen(QWidget):
             len(rows),
             (
                 ("View", self._view),
+                ("View History", self._view_history),
                 ("Edit", self._edit),
                 ("Activate / deactivate", self._toggle_active),
                 ("Delete", self._delete_row),
@@ -423,6 +457,35 @@ class ProductsScreen(QWidget):
                 ("Low-stock threshold", data.minimum_stock),
                 ("Description", data.description),
             ),
+        )
+
+    def _view_history(self, row: int) -> None:
+        if row >= len(self._ids):
+            return
+        product_id = self._ids[row]
+        product_name = self._data[row].name
+
+        def operation() -> list[tuple[object, ...]]:
+            with self._session_factory() as session:
+                entries = StockInventoryService(session).purchase_history(product_id)
+                return [
+                    (
+                        entry.batch_number,
+                        entry.purchase_number,
+                        entry.supplier,
+                        format_date(entry.purchased_at),
+                        f"{entry.quantity_added:,}",
+                        f"{self._currency} {entry.purchase_price:,.0f}",
+                    )
+                    for entry in entries
+                ]
+
+        def show(result: object) -> None:
+            rows = cast(list[tuple[object, ...]], result)
+            PurchaseHistoryDialog(product_name, self._currency, rows, self).exec()
+
+        self._worker = start_worker(
+            operation, succeeded=show, failed=lambda error: show_error(self, error)
         )
 
     def _delete(self, row: int) -> None:
