@@ -60,7 +60,7 @@ def build_sale_document(
         shop = load_shop_profile(session, settings)
         preferences = load_print_preferences(session, settings)
         invoice_number = sale.invoice_number
-        sale_data = SaleReceiptData.from_sale(sale, method_text)
+        sale_data = SaleReceiptData.from_sale(sale, method_text, timezone=settings.app_timezone)
         already_issued = sale.print_count > 0
     if record_issue:
         # The copy is claimed before it is rendered, and claimed by the database

@@ -33,6 +33,10 @@ class Dealer(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default="true"
     )
+    #: A practice record (see scripts/create_test_data.py); never counted in any figure.
+    is_test: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
 
     @property
     def display_name(self) -> str:

@@ -123,7 +123,9 @@ class OutboxDeliveryService:
             )
             profile = load_shop_profile(session, self._settings)
             data = SaleReceiptData.from_sale(
-                sale, ", ".join(dict.fromkeys(method.value for method in methods)) or "UNPAID"
+                sale,
+                ", ".join(dict.fromkeys(method.value for method in methods)) or "UNPAID",
+                timezone=self._settings.app_timezone,
             )
             payload = ReceiptGenerator().generate_a4(data, profile)
             return EmailAttachment(f"{sale.invoice_number}.pdf", payload)

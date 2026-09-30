@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
@@ -274,7 +274,10 @@ def test_invoice_and_report_exports(
     )
     db_session.flush()
 
-    receipt = SaleReceiptData.from_sale(sale, "CASH")
+    receipt = SaleReceiptData.from_sale(sale, "CASH", timezone="Asia/Karachi")
+    # The printed time is the shop's local time, whatever the connection's zone.
+    assert receipt.sold_at.utcoffset() == timedelta(hours=5)
+    assert receipt.sold_at == sale.sale_date
     shop = ShopProfile(name="Hanan Spray Center", currency="PKR")
     assert ReceiptGenerator().generate_a4(receipt, shop).startswith(b"%PDF")
     assert ReceiptGenerator().generate_thermal(receipt, shop, 58).startswith(b"%PDF")

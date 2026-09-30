@@ -44,6 +44,8 @@ from app.ui.widgets import (
     MetricCard,
     PageHeader,
     RowsTableModel,
+    StockBadge,
+    StockCell,
     configure_date_edit,
     configure_searchable_combo,
     configure_table,
@@ -52,6 +54,7 @@ from app.ui.widgets import (
 )
 from app.ui.workers import FunctionWorker, start_worker
 from app.utils.formatting import format_date, format_money
+from app.utils.stock import StockLevel
 
 _AXIS_LINE = "#d9e4df"
 _AXIS_TEXT = "#60736a"
@@ -363,6 +366,11 @@ class ProductTab(QWidget):
         self.heading = QLabel(product.display_name)
         self.heading.setObjectName("SectionTitle")
         self.heading.setWordWrap(True)
+        self.stock_badge = StockBadge()
+        heading_row = QHBoxLayout()
+        heading_row.setSpacing(10)
+        heading_row.addWidget(self.heading, 1)
+        heading_row.addWidget(self.stock_badge, 0, Qt.AlignmentFlag.AlignVCenter)
         self.summary = QLabel("Loading…")
         self.summary.setObjectName("PageSubtitle")
         self.summary.setWordWrap(True)
@@ -385,7 +393,7 @@ class ProductTab(QWidget):
         self.batch_table.setMinimumHeight(120)
         batch_layout.addWidget(batch_heading)
         batch_layout.addWidget(self.batch_table, 1)
-        layout.addWidget(self.heading)
+        layout.addLayout(heading_row)
         layout.addWidget(self.summary)
         layout.addWidget(self.cards)
         layout.addWidget(self.chart, 3)
@@ -430,6 +438,7 @@ class ProductTab(QWidget):
         for name, *_rest in self.SPECIFICATIONS:
             self.cards.set_value(name, "—")
         self.summary.setText("Loading…")
+        self.stock_badge.hide()
         self.batch_model.set_rows([])
         self.chart.figure.clear()
         self.chart.canvas.draw_idle()
@@ -451,10 +460,14 @@ class ProductTab(QWidget):
             else format_money(metrics.returns, self._currency),
         )
         self.cards.set_value("In Stock", f"{metrics.in_stock:,}")
+        self.stock_badge.set_level(metrics.stock_level if self.product.is_active else StockLevel.OK)
         self.cards.set_value("Active Batches", f"{metrics.active_batches:,}")
         self.cards.set_value("Expiring in 90 Days", f"{metrics.expiring_units:,}")
         self.cards.set_value("Stock Value", format_money(metrics.stock_value, self._currency))
-        stock_note = self._stock_note(metrics)
+        # A deactivated product is not reordered, so it gets no reorder advice.
+        stock_note = (
+            self._stock_note(metrics) if self.product.is_active else f"Stock {metrics.in_stock:,}."
+        )
         last_sold = (
             f"Last sold {format_date(metrics.last_sold)}."
             if metrics.last_sold
@@ -573,7 +586,7 @@ class ProductsTab(QWidget):
                 (
                     row.full_name,
                     row.manufacturer,
-                    f"{row.in_stock:,}" + (" — reorder" if row.needs_reorder else ""),
+                    StockCell(row.in_stock, row.stock_level),
                     f"{row.active_batches:,}",
                     f"{row.units_sold:,}",
                     format_money(row.sales, self._currency),
@@ -587,7 +600,9 @@ class ProductsTab(QWidget):
                 for row in self._visible
             ]
         )
-        self.count.setText(record_count_text(len(self._visible), "product"))
+        count = record_count_text(len(self._visible), "product")
+        flagged = sum(row.stock_level is not StockLevel.OK for row in self._visible)
+        self.count.setText(f"{count} · {flagged:,} low or out of stock" if flagged else count)
 
     def _row_chosen(self, index: QModelIndex) -> None:
         row = index.row()

@@ -14,4 +14,6 @@ RUN python -m pip install -r requirements-worker.txt
 COPY app ./app
 COPY scripts ./scripts
 
-CMD ["celery", "-A", "app.tasks.celery_app", "worker", "--loglevel=INFO"]
+# Tasks are routed to these queues (app/tasks/celery_app.py); a worker left on the
+# default "celery" queue would never pick any of them up.
+CMD ["celery", "-A", "app.tasks.celery_app", "worker", "--loglevel=INFO", "--queues=email,reports,maintenance"]

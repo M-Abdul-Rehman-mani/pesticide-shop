@@ -38,6 +38,13 @@ from app.printing.preferences import load_print_preferences
 from app.printing.print_preview import open_print_preview
 from app.printing.printer_service import PrinterService, write_temporary_pdf
 from app.reports.excel_exporter import ExcelExporter
+from app.reports.live_data import (
+    live_batch,
+    live_dealer,
+    live_payment,
+    live_purchase,
+    live_sale,
+)
 from app.reports.pdf_exporter import PDFReportExporter
 from app.reports.report_service import DateRange
 from app.security.authentication import AuthenticatedUser
@@ -186,7 +193,9 @@ class ReportsScreen(QWidget):
                     rows = session.execute(
                         select(Sale, SaleItem)
                         .join(SaleItem)
-                        .where(Sale.sale_date >= period.start, Sale.sale_date < period.end)
+                        .where(
+                            live_sale(), Sale.sale_date >= period.start, Sale.sale_date < period.end
+                        )
                         .order_by(Sale.sale_date.desc(), Sale.invoice_number)
                     )
                     raw = tuple(
@@ -243,6 +252,7 @@ class ReportsScreen(QWidget):
                         .join(Sale)
                         .where(
                             Sale.status == SaleStatus.COMPLETED,
+                            live_sale(),
                             Sale.sale_date >= period.start,
                             Sale.sale_date < period.end,
                         )
@@ -255,8 +265,10 @@ class ReportsScreen(QWidget):
                         frozenset({1, 2}),
                     )
                 if report_type in {"Inventory", "Expiry"}:
-                    statement = select(StockBatch).order_by(
-                        StockBatch.expiry_date.asc().nullslast()
+                    statement = (
+                        select(StockBatch)
+                        .where(live_batch())
+                        .order_by(StockBatch.expiry_date.asc().nullslast())
                     )
                     if report_type == "Expiry":
                         statement = statement.where(
@@ -300,6 +312,7 @@ class ReportsScreen(QWidget):
                     purchases = session.scalars(
                         select(Purchase)
                         .where(
+                            live_purchase(),
                             Purchase.purchase_date >= period.start,
                             Purchase.purchase_date < period.end,
                         )
@@ -327,7 +340,11 @@ class ReportsScreen(QWidget):
                 if report_type == "Payments":
                     payments = session.scalars(
                         select(Payment)
-                        .where(Payment.created_at >= period.start, Payment.created_at < period.end)
+                        .where(
+                            live_payment(),
+                            Payment.created_at >= period.start,
+                            Payment.created_at < period.end,
+                        )
                         .order_by(Payment.created_at.desc())
                     )
                     raw = tuple(
@@ -349,7 +366,9 @@ class ReportsScreen(QWidget):
                         frozenset({6}),
                     )
                 if report_type == "Dealer Balances":
-                    dealers = session.scalars(select(Dealer).order_by(Dealer.balance.desc()))
+                    dealers = session.scalars(
+                        select(Dealer).where(live_dealer()).order_by(Dealer.balance.desc())
+                    )
                     raw = tuple(
                         (
                             d.display_name,
@@ -380,7 +399,9 @@ class ReportsScreen(QWidget):
                 if report_type == "Daily Cash Closing":
                     payments = session.scalars(
                         select(Payment).where(
-                            Payment.created_at >= period.start, Payment.created_at < period.end
+                            live_payment(),
+                            Payment.created_at >= period.start,
+                            Payment.created_at < period.end,
                         )
                     )
                     totals: dict[str, list[Decimal]] = {}
@@ -406,7 +427,9 @@ class ReportsScreen(QWidget):
                 if report_type == "Customer / Dealer Statements":
                     sales = session.scalars(
                         select(Sale)
-                        .where(Sale.sale_date >= period.start, Sale.sale_date < period.end)
+                        .where(
+                            live_sale(), Sale.sale_date >= period.start, Sale.sale_date < period.end
+                        )
                         .order_by(Sale.sale_date.desc())
                     )
                     raw = tuple(
@@ -463,6 +486,7 @@ class ReportsScreen(QWidget):
                         .join(Sale, Sale.id == SaleItem.sale_id)
                         .where(
                             Sale.status == SaleStatus.COMPLETED,
+                            live_sale(),
                             Sale.sale_date >= period.start,
                             Sale.sale_date < period.end,
                         )
@@ -484,6 +508,7 @@ class ReportsScreen(QWidget):
                     sales = session.scalars(
                         select(Sale).where(
                             Sale.status == SaleStatus.COMPLETED,
+                            live_sale(),
                             Sale.sale_date >= period.start,
                             Sale.sale_date < period.end,
                         )
@@ -491,6 +516,7 @@ class ReportsScreen(QWidget):
                     purchases = session.scalars(
                         select(Purchase).where(
                             Purchase.status == PurchaseStatus.COMPLETED,
+                            live_purchase(),
                             Purchase.purchase_date >= period.start,
                             Purchase.purchase_date < period.end,
                         )
@@ -532,6 +558,7 @@ class ReportsScreen(QWidget):
                         select(Sale).where(
                             Sale.remaining_amount > 0,
                             Sale.status == SaleStatus.COMPLETED,
+                            live_sale(),
                             Sale.sale_date >= period.start,
                             Sale.sale_date < period.end,
                         )
@@ -540,6 +567,7 @@ class ReportsScreen(QWidget):
                         select(Purchase).where(
                             Purchase.remaining_amount > 0,
                             Purchase.status == PurchaseStatus.COMPLETED,
+                            live_purchase(),
                             Purchase.purchase_date >= period.start,
                             Purchase.purchase_date < period.end,
                         )
@@ -584,6 +612,7 @@ class ReportsScreen(QWidget):
                     batches = session.scalars(
                         select(StockBatch)
                         .where(
+                            live_batch(),
                             StockBatch.expiry_date < date.today(),
                             StockBatch.quantity_available > 0,
                         )
@@ -625,6 +654,7 @@ class ReportsScreen(QWidget):
                     .join(Sale, Sale.created_by == User.id)
                     .where(
                         Sale.status == SaleStatus.COMPLETED,
+                        live_sale(),
                         Sale.sale_date >= period.start,
                         Sale.sale_date < period.end,
                     )

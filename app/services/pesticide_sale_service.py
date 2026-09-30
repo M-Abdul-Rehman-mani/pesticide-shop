@@ -24,6 +24,7 @@ from app.services.document_service import DocumentNumberService
 from app.services.dto import CreatePesticideSaleCommand
 from app.services.money_service import document_totals, payment_status
 from app.services.notification_service import NotificationService, QueuedMessage
+from app.services.practice_guard import require_unmixed_sale
 from app.utils.exceptions import ConflictError, NotFoundError, ValidationError
 from app.utils.validators import nonnegative_money
 
@@ -83,6 +84,12 @@ class PesticideSaleService:
         if len(by_id) != len(batch_ids):
             raise NotFoundError("One or more selected stock batches were not found.")
         ordered_batches = [by_id[batch_id] for batch_id in batch_ids]
+        party = dealer or customer
+        require_unmixed_sale(
+            self._session,
+            (batch.product_id for batch in ordered_batches),
+            party_is_test=None if party is None else party.is_test,
+        )
         for line, batch in zip(command.lines, ordered_batches, strict=True):
             if batch.expiry_date and batch.expiry_date < sold_at.date():
                 raise ConflictError(f"Batch {batch.batch_number} expired on {batch.expiry_date}.")
@@ -443,6 +450,13 @@ class PesticideSaleService:
         previous_dealer = accounts.get(sale.dealer_id) if sale.dealer_id else None
         if command.dealer_id and (dealer is None or not dealer.is_active):
             raise NotFoundError("The selected active dealer was not found.")
+
+        party = dealer or customer
+        require_unmixed_sale(
+            self._session,
+            (batches[batch_id].product_id for batch_id in wanted),
+            party_is_test=None if party is None else party.is_test,
+        )
 
         sold_at = sale.sale_date
         previous = {item.stock_batch_id: item.quantity for item in existing}

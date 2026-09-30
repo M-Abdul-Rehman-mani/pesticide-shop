@@ -35,6 +35,7 @@ from app.services.stock_inventory_service import StockInventoryService
 from app.ui.forms import MoneyEdit
 from app.ui.widgets import (
     RowsTableModel,
+    StockCell,
     configure_table,
     populate_row_actions,
     record_count_text,
@@ -44,6 +45,7 @@ from app.ui.widgets import (
 )
 from app.ui.workers import FunctionWorker, start_worker
 from app.utils.formatting import format_date
+from app.utils.stock import StockLevel, stock_level
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,7 +319,13 @@ class ProductsScreen(QWidget):
                             p.category,
                             f"{self._currency} {p.default_purchase_price:,.0f}",
                             f"{self._currency} {p.default_sale_price:,.0f}",
-                            count,
+                            # A deactivated product is not reordered, so it is not flagged.
+                            StockCell(
+                                int(count),
+                                stock_level(int(count), p.minimum_stock)
+                                if p.is_active
+                                else StockLevel.OK,
+                            ),
                             p.minimum_stock,
                             "Yes" if p.is_active else "No",
                             "",
@@ -363,7 +371,11 @@ class ProductsScreen(QWidget):
             result,
         )
         self.model.set_rows(rows)
-        self.state_label.setText(record_count_text(len(rows), "product"))
+        count = record_count_text(len(rows), "product")
+        flagged = sum(
+            isinstance(row[8], StockCell) and row[8].level is not StockLevel.OK for row in rows
+        )
+        self.state_label.setText(f"{count} · {flagged:,} low or out of stock" if flagged else count)
         populate_row_actions(
             self.table,
             11,

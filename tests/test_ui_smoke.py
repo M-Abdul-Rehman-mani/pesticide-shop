@@ -125,14 +125,8 @@ def test_owner_window_contains_complete_pesticide_workflow(
         "show_error",
         lambda _parent, error: report_failures.append(error),
     )
-    for report_name in (
-        "Daily Cash Closing",
-        "Customer / Dealer Statements",
-        "Product Profitability",
-        "Tax & Discounts",
-        "Outstanding Payments",
-        "Expiry Loss",
-    ):
+    # Every report runs, so each query -- all of them filter out TEST records -- executes.
+    for report_name in sorted(report_names):
         reports.report_type.setCurrentText(report_name)  # type: ignore[attr-defined]
         reports.run_report()  # type: ignore[attr-defined]
         assert QThreadPool.globalInstance().waitForDone(10_000)

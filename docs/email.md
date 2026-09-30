@@ -23,6 +23,6 @@ relay; do not store a personal account password. Confirm the provider's sending 
 DKIM, and DMARC configuration. Application logs record delivery failures but redact common
 credential assignments.
 
-The scheduler queues the daily report at `DAILY_REPORT_TIME` in `APP_TIMEZONE`. The report
+The scheduler queues the daily report at `DAILY_REPORT_TIME` in the worker computer's time zone (`TZ` in a container). The report
 contains sales, gross profit, payment-method totals, top products,
 low stock, and outstanding balances.

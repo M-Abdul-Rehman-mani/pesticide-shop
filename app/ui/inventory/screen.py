@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.models.inventory import StockBatch, StockMovement
 from app.models.product import Product
 from app.models.supplier import Supplier
+from app.reports.report_service import ReportService
 from app.security.authentication import AuthenticatedUser
 from app.security.permissions import Permission, has_permission
 from app.services.stock_inventory_service import StockInventoryService
@@ -312,8 +313,9 @@ class InventoryScreen(QWidget):
                         StockBatch.expiry_date <= today + timedelta(days=90),
                     )
                 elif selected_filter == "Low Stock":
+                    totals = ReportService.low_stock_product_ids()
                     statement = statement.where(
-                        StockBatch.quantity_available <= Product.minimum_stock
+                        StockBatch.product_id.in_(totals), StockBatch.is_active.is_(True)
                     )
                 elif selected_filter == "Inactive":
                     statement = statement.where(StockBatch.is_active.is_(False))

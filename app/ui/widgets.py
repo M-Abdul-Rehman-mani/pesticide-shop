@@ -5,10 +5,12 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import TypeVar
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QPersistentModelIndex, Qt
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -34,6 +36,7 @@ from PySide6.QtWidgets import (
 from shiboken6 import isValid
 
 from app.utils.exceptions import ApplicationError
+from app.utils.stock import StockLevel
 
 logger = logging.getLogger(__name__)
 
@@ -329,6 +332,48 @@ def show_success(parent: QWidget, message: str) -> None:
         QMessageBox.information(parent, "Saved", message)
 
 
+#: Text and fill for a stock warning, shared by table cells and badges.
+STOCK_TONES: Mapping[StockLevel, tuple[str, str]] = {
+    StockLevel.LOW: ("#8a5a00", "#fff1d6"),
+    StockLevel.OUT: ("#a8322a", "#fde6e3"),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class StockCell:
+    """A stock figure that carries its warning into the table's colours."""
+
+    quantity: int
+    level: StockLevel
+
+    def __str__(self) -> str:
+        if self.level is StockLevel.OK:
+            return f"{self.quantity:,}"
+        return f"{self.quantity:,}  ⚠ {self.level.label}"
+
+
+class StockBadge(QLabel):
+    """A pill naming a product's stock warning; hidden while stock is healthy."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("StockBadge")
+        self.hide()
+
+    def set_level(self, level: StockLevel) -> None:
+        tone = STOCK_TONES.get(level)
+        if tone is None:
+            self.hide()
+            return
+        foreground, background = tone
+        self.setText(f"⚠ {level.label}")
+        self.setStyleSheet(
+            f"color: {foreground}; background: {background}; border: 1px solid {foreground};"
+            " border-radius: 10px; padding: 2px 10px; font-weight: 700;"
+        )
+        self.show()
+
+
 class RowsTableModel(QAbstractTableModel):
     """Read-only table model; screens paginate before assigning rows."""
 
@@ -356,6 +401,8 @@ class RowsTableModel(QAbstractTableModel):
         if not index.isValid() or role not in {
             Qt.ItemDataRole.DisplayRole,
             Qt.ItemDataRole.ToolTipRole,
+            Qt.ItemDataRole.ForegroundRole,
+            Qt.ItemDataRole.BackgroundRole,
         }:
             return None
         row = self._rows[index.row()]
@@ -364,7 +411,16 @@ class RowsTableModel(QAbstractTableModel):
             # model has columns while a hidden tab is laid out; nothing real lives
             # past the last column, so render it blank instead of crashing.
             return None
-        return str(row[index.column()])
+        value = row[index.column()]
+        if role in {Qt.ItemDataRole.ForegroundRole, Qt.ItemDataRole.BackgroundRole}:
+            tone = STOCK_TONES.get(value.level) if isinstance(value, StockCell) else None
+            if tone is None:
+                return None
+            foreground, background = tone
+            return QBrush(
+                QColor(foreground if role == Qt.ItemDataRole.ForegroundRole else background)
+            )
+        return str(value)
 
     def headerData(
         self,

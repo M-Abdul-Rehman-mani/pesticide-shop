@@ -6,13 +6,13 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote_plus
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic.fields import Field
 from pydantic.functional_validators import field_validator, model_validator
 from pydantic.types import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.utils.clock import system_timezone_name
 from app.utils.paths import environment_file_candidates, resolve_writable
 
 
@@ -33,7 +33,6 @@ class Settings(BaseSettings):
     app_debug: bool = False
     app_secret_key: SecretStr = Field(min_length=32)
     app_session_timeout_minutes: int = Field(default=30, ge=5, le=1440)
-    app_timezone: str = "UTC"
     app_currency: str = Field(default="PKR", min_length=3, max_length=3)
 
     database_host: str = "127.0.0.1"
@@ -91,14 +90,15 @@ class Settings(BaseSettings):
     def empty_tools_directory_is_none(cls, value: object) -> object:
         return None if value == "" else value
 
-    @field_validator("app_timezone")
-    @classmethod
-    def valid_timezone(cls, value: str) -> str:
-        try:
-            ZoneInfo(value)
-        except ZoneInfoNotFoundError as exc:
-            raise ValueError(f"Unknown IANA timezone: {value}") from exc
-        return value
+    @property
+    def app_timezone(self) -> str:
+        """Always the operating system's time zone -- never a separate setting.
+
+        One zone for the clock, the calendar day, reports, and printed times is
+        what keeps every figure and timestamp in step with the computer's clock.
+        """
+
+        return system_timezone_name()
 
     @field_validator("daily_report_time")
     @classmethod

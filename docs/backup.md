@@ -43,3 +43,27 @@ disaster-recovery strategy.
 
 Only OWNER has in-application restore permission. Never restore while sales terminals are open.
 Practice recovery regularly and document the measured recovery time.
+
+## Importing a CSV data export
+
+**Settings > Backup > Back Up To Excel & CSV** writes a `.csv.zip` next to the spreadsheet. It can
+be loaded back, for example onto a new computer:
+
+```bash
+alembic upgrade head                                   # empty database, current schema
+python -m scripts.import_csv_export path/to/shop-data_from_…_to_….csv.zip
+```
+
+Or, as OWNER, **Settings > Backup > Import From CSV Export…** replaces every record in the current
+database (type `REPLACE` to confirm; the application closes afterwards). From the command line the
+same is `python -m scripts.import_csv_export ARCHIVE --replace`.
+
+- The import is all-or-nothing: every file is checked before anything is written, row counts are
+  verified per table, and any error leaves the database exactly as it was.
+- Password hashes are never exported, so every user gets one **temporary password**, shown once
+  when the import finishes, and must choose a new one at first sign-in.
+- Secret settings (the SMTP password) are not exported either; enter them again under Settings.
+- Exports made before this version (no `manifest.json`) still import; their local times are read in
+  this computer's time zone, so import them on a computer set to the shop's zone.
+
+The `.dump` backup remains the complete copy, including passwords; prefer it when both exist.

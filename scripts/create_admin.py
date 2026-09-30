@@ -1,4 +1,8 @@
-"""Interactively bootstrap an owner account without embedding a password."""
+"""Interactively bootstrap an owner account without embedding a password.
+
+The same run adds the TEST customer, dealer, supplier, and product (with stock),
+which are excluded from every dashboard and report.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +14,9 @@ from sqlalchemy import func, select
 from app.database.session import SessionFactory
 from app.models.enums import UserRole
 from app.models.user import User
+from app.security.authentication import AuthenticatedUser
 from app.services.audit_service import AuditService
+from app.services.practice_records import ensure_practice_records
 from app.utils.security import hash_password
 from app.utils.validators import normalize_email
 
@@ -56,7 +62,9 @@ def main() -> int:
             entity_id=user.id,
             new_value={"username": user.username, "email": user.email},
         )
+        practice = ensure_practice_records(session, AuthenticatedUser.from_model(user))
     print(f"Owner {arguments.username!r} created.")
+    print(practice.summary())
     return 0
 
 

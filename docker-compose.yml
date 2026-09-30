@@ -8,7 +8,9 @@ services:
       POSTGRES_DB: ${DATABASE_NAME:-pesticide_shop}
       POSTGRES_USER: ${DATABASE_USER:-pesticide_shop}
       POSTGRES_PASSWORD: ${DATABASE_PASSWORD:?Set DATABASE_PASSWORD in .env}
-      TZ: ${APP_TIMEZONE:-UTC}
+      # Only the server's own log times; the application sets every connection to
+      # the client computer's time zone.
+      TZ: ${TZ:-UTC}
     ports:
       - "${DATABASE_PORT:-5432}:5432"
     volumes:

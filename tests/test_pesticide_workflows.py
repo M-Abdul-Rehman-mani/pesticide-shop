@@ -127,7 +127,7 @@ def test_batch_purchase_and_dealer_sale_are_atomic(
     }, "every owner address gets its own copy"
 
     payload = ReceiptGenerator().generate_a4(
-        SaleReceiptData.from_sale(sale, "CASH"),
+        SaleReceiptData.from_sale(sale, "CASH", timezone="Asia/Karachi"),
         ShopProfile(name="Avenex Crop Sciences", currency="PKR"),
     )
     assert payload.startswith(b"%PDF")

@@ -7,13 +7,16 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -55,6 +58,7 @@ from app.security.authentication import AuthenticatedUser
 from app.security.permissions import Permission, has_permission
 from app.services.backup_service import BackupService
 from app.services.data_export_service import DataExportResult, DataExportService
+from app.services.data_import_service import DataImportResult, DataImportService, summarise
 from app.services.settings_service import SettingsService
 from app.tasks.email_tasks import send_email
 from app.ui.widgets import RowsTableModel, show_error
@@ -119,12 +123,18 @@ class SettingsScreen(QWidget):
     def _build_general(self) -> None:
         tab, form = self._tab_form()
         self.currency = QLineEdit(self._settings.app_currency)
+        # Read-only: the application always follows the computer's own time zone.
         self.timezone = QLineEdit(self._settings.app_timezone)
+        self.timezone.setReadOnly(True)
+        self.timezone.setToolTip(
+            "Follows this computer's time zone. Change it in the operating system's "
+            "date and time settings, then restart the application."
+        )
         self.invoice_prefix = QLineEdit("INV")
         self.return_prefix = QLineEdit("RET")
         self.return_prefix.setToolTip("Numbers the credit note raised when goods come back")
         form.addRow("Currency", self.currency)
-        form.addRow("Timezone", self.timezone)
+        form.addRow("Timezone (system)", self.timezone)
         form.addRow("Invoice prefix", self.invoice_prefix)
         form.addRow("Return prefix", self.return_prefix)
         prefix_note = QLabel(
@@ -406,19 +416,27 @@ class SettingsScreen(QWidget):
         )
         export_note = QLabel(
             "Writes every table to one spreadsheet and one archive of CSV files, named for the "
-            "dates the data covers. Readable anywhere; use a database backup to restore."
+            "dates the data covers. The .csv.zip can be imported back; passwords are not "
+            "exported, so an import gives every user a temporary one."
         )
         export_note.setWordWrap(True)
         restore = QPushButton("Restore Backup…")
         restore.setProperty("danger", True)
         restore.setEnabled(has_permission(self._actor.role, Permission.RESTORE_DATABASE))
         restore.clicked.connect(self._restore)
+        self.import_data_button = QPushButton("Import From CSV Export…")
+        self.import_data_button.setProperty("danger", True)
+        self.import_data_button.setEnabled(
+            has_permission(self._actor.role, Permission.RESTORE_DATABASE)
+        )
+        self.import_data_button.clicked.connect(self._import_data)
         form.addRow("Backup directory", self.backup_directory)
         form.addRow("Retention days", self.retention)
         form.addRow("Database backup", backup_now)
         form.addRow("Data backup", self.export_data_button)
         form.addRow(export_note)
         form.addRow("Owner only", restore)
+        form.addRow("", self.import_data_button)
         self.tabs.addTab(tab, "Backup")
 
     def _build_database(self) -> None:
@@ -467,7 +485,6 @@ class SettingsScreen(QWidget):
     def _load(self) -> None:
         keys = (
             (SettingCategory.GENERAL, "currency"),
-            (SettingCategory.GENERAL, "timezone"),
             (SettingCategory.GENERAL, "invoice_prefix"),
             (SettingCategory.GENERAL, "return_prefix"),
             (SettingCategory.EMAIL, "smtp_host"),
@@ -501,7 +518,6 @@ class SettingsScreen(QWidget):
         data = cast(dict[tuple[SettingCategory, str], str | None], values)
         mappings = (
             ((SettingCategory.GENERAL, "currency"), self.currency),
-            ((SettingCategory.GENERAL, "timezone"), self.timezone),
             ((SettingCategory.GENERAL, "invoice_prefix"), self.invoice_prefix),
             ((SettingCategory.GENERAL, "return_prefix"), self.return_prefix),
             ((SettingCategory.EMAIL, "smtp_host"), self.smtp_host),
@@ -546,7 +562,6 @@ class SettingsScreen(QWidget):
     def save(self) -> None:
         values = (
             (SettingCategory.GENERAL, "currency", self.currency.text(), False),
-            (SettingCategory.GENERAL, "timezone", self.timezone.text(), False),
             (SettingCategory.GENERAL, "invoice_prefix", self.invoice_prefix.text(), False),
             (SettingCategory.GENERAL, "return_prefix", self.return_prefix.text(), False),
             (SettingCategory.EMAIL, "smtp_host", self.smtp_host.text(), False),
@@ -724,6 +739,61 @@ class SettingsScreen(QWidget):
             ),
             failed=lambda error: show_error(self, error),
         )
+
+    def _import_data(self) -> None:
+        runtime_settings = self._backup_runtime_settings()
+        path, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Select CSV Data Export",
+            str(runtime_settings.backup_directory),
+            "CSV data export (*.csv.zip)",
+        )
+        if not path:
+            return
+        typed, accepted = QInputDialog.getText(
+            self,
+            "Replace All Data",
+            "Importing deletes every record now in the database and loads the export in "
+            "its place. Every user gets a temporary password. Close all other copies of the "
+            "application first.\n\nType REPLACE to continue:",
+        )
+        if not accepted or typed.strip() != "REPLACE":
+            return
+        actor = self._actor
+        self.import_data_button.setEnabled(False)
+
+        def operation() -> DataImportResult:
+            with self._session_factory.begin() as session:
+                return DataImportService(session, runtime_settings).import_archive(
+                    Path(path), replace=True, actor=actor
+                )
+
+        self._worker = start_worker(
+            operation,
+            succeeded=self._data_imported,
+            failed=self._data_import_failed,
+        )
+
+    def _data_imported(self, result: DataImportResult) -> None:
+        message = QMessageBox(
+            QMessageBox.Icon.Information,
+            "Import complete",
+            "\n\n".join(summarise(result))
+            + "\n\nWrite the temporary password down. The application now closes; "
+            "start it again and sign in.",
+            QMessageBox.StandardButton.Ok,
+            self,
+        )
+        # Selectable, so the temporary password can be copied rather than retyped.
+        message.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        message.exec()
+        application = QApplication.instance()
+        if application is not None:
+            application.quit()
+
+    def _data_import_failed(self, error: Exception) -> None:
+        self.import_data_button.setEnabled(True)
+        show_error(self, error)
 
     def _backup_runtime_settings(self) -> Settings:
         return self._settings.model_copy(

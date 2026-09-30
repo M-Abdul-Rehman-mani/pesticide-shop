@@ -5,8 +5,9 @@
 Sign in with the owner account, change the temporary password, then open **Shop Settings**. Add the
 shop name, owner name, postal address, contact number, email, website, tax/registration text, and an
 optional PNG/JPEG logo. These values brand new invoices, and the shop name and logo replace the placeholder at the top of the sidebar as soon as they are saved. Under **Settings**, configure the invoice and
-return prefixes, currency, timezone, SMTP account, owner notification emails, printer/receipt format,
-backup, and session timeout. **Owner emails** takes as many addresses as the shop needs: type one and press **Add**, select one
+return prefixes, currency, SMTP account, owner notification emails, printer/receipt format,
+backup, and session timeout. The timezone shown there is the computer's own and follows the
+operating system's date and time settings. **Owner emails** takes as many addresses as the shop needs: type one and press **Add**, select one
 and press **Remove**. Everyone on the list gets a copy of every invoice and the daily report. The
 test email goes to the first address.
 

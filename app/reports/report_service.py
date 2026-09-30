@@ -9,7 +9,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.sql import Subquery
 
@@ -21,6 +21,16 @@ from app.models.payment import Payment
 from app.models.product import Product
 from app.models.sale import Sale, SaleItem
 from app.models.sale_return import SaleReturn, SaleReturnItem
+from app.reports.live_data import (
+    live_batch,
+    live_customer,
+    live_dealer,
+    live_payment,
+    live_product,
+    live_return,
+    live_sale,
+)
+from app.utils.stock import StockLevel, needs_reorder, stock_level
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,7 +137,15 @@ class ProductRow:
 
     @property
     def needs_reorder(self) -> bool:
-        return bool(self.minimum_stock) and self.in_stock <= self.minimum_stock
+        return needs_reorder(self.in_stock, self.minimum_stock)
+
+    @property
+    def stock_level(self) -> StockLevel:
+        """The stock warning to show; a deactivated product is never reordered."""
+
+        if not self.is_active:
+            return StockLevel.OK
+        return stock_level(self.in_stock, self.minimum_stock)
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +163,10 @@ class ProductMetrics:
     last_sold: datetime | None
     units_returned: int = 0
     returns: Decimal = Decimal("0.00")
+
+    @property
+    def stock_level(self) -> StockLevel:
+        return stock_level(self.in_stock, self.minimum_stock)
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +224,7 @@ class ReportService:
         sales_total = self._session.scalar(
             select(func.coalesce(func.sum(Sale.total), Decimal("0.00"))).where(
                 Sale.status == SaleStatus.COMPLETED,
+                live_sale(),
                 Sale.sale_date >= period.start,
                 Sale.sale_date < period.end,
             )
@@ -211,20 +234,22 @@ class ReportService:
             .join(Sale, Sale.id == SaleItem.sale_id)
             .where(
                 Sale.status == SaleStatus.COMPLETED,
+                live_sale(),
                 Sale.sale_date >= period.start,
                 Sale.sale_date < period.end,
             )
         )
         current_inventory = self._session.scalar(
-            select(func.coalesce(func.sum(StockBatch.quantity_available), 0))
+            select(func.coalesce(func.sum(StockBatch.quantity_available), 0)).where(live_batch())
         )
         outstanding = self._session.scalar(
             select(func.coalesce(func.sum(Sale.remaining_amount), Decimal("0.00"))).where(
-                Sale.status == SaleStatus.COMPLETED, Sale.remaining_amount > 0
+                Sale.status == SaleStatus.COMPLETED, live_sale(), Sale.remaining_amount > 0
             )
         )
         expiring = self._session.scalar(
             select(func.coalesce(func.sum(StockBatch.quantity_available), 0)).where(
+                live_batch(),
                 StockBatch.quantity_available > 0,
                 StockBatch.expiry_date.is_not(None),
                 StockBatch.expiry_date <= date.today() + timedelta(days=90),
@@ -253,6 +278,7 @@ class ReportService:
             )
             .join(SaleReturn, SaleReturn.id == SaleReturnItem.sale_return_id)
             .where(
+                live_return(),
                 SaleReturn.returned_at >= period.start,
                 SaleReturn.returned_at < period.end,
             )
@@ -273,6 +299,7 @@ class ReportService:
             .join(Sale, Sale.id == SaleReturn.sale_id)
             .where(
                 identity.is_not(None),
+                live_return(),
                 SaleReturn.returned_at >= period.start,
                 SaleReturn.returned_at < period.end,
             )
@@ -299,6 +326,7 @@ class ReportService:
             .outerjoin(costs, costs.c.sale_id == Sale.id)
             .where(
                 Sale.status == SaleStatus.COMPLETED,
+                live_sale(),
                 Sale.sale_date >= period.start,
                 Sale.sale_date < period.end,
             )
@@ -311,6 +339,7 @@ class ReportService:
             .options(selectinload(Sale.items))
             .where(
                 Sale.status == SaleStatus.COMPLETED,
+                live_sale(),
                 Sale.sale_date >= period.start,
                 Sale.sale_date < period.end,
             )
@@ -343,6 +372,7 @@ class ReportService:
         rows = self._session.execute(
             select(Sale.sale_date, Sale.total).where(
                 Sale.status == SaleStatus.COMPLETED,
+                live_sale(),
                 Sale.sale_date >= period.start,
                 Sale.sale_date < period.end,
             )
@@ -377,6 +407,7 @@ class ReportService:
             .outerjoin(costs, costs.c.sale_id == Sale.id)
             .where(
                 Sale.status == SaleStatus.COMPLETED,
+                live_sale(),
                 Sale.sale_date >= period.start,
                 Sale.sale_date < period.end,
             )
@@ -401,6 +432,7 @@ class ReportService:
             .join(Sale, Sale.id == SaleItem.sale_id)
             .where(
                 Sale.status == SaleStatus.COMPLETED,
+                live_sale(),
                 Sale.sale_date >= period.start,
                 Sale.sale_date < period.end,
             )
@@ -413,18 +445,43 @@ class ReportService:
             for product, units, revenue in rows
         ]
 
+    @staticmethod
+    def low_stock_product_ids() -> Select[tuple[uuid.UUID]]:
+        """Products whose active stock is at or below a reorder level that is set.
+
+        The product's total is what is compared -- the same rule as the dashboard --
+        never a single batch against it. Products with no batch at all are out of
+        stock rather than low, and are not included.
+        """
+
+        return (
+            select(StockBatch.product_id)
+            .join(Product, Product.id == StockBatch.product_id)
+            .where(
+                StockBatch.is_active.is_(True),
+                Product.is_active.is_(True),
+                live_product(),
+                Product.minimum_stock > 0,
+            )
+            .group_by(StockBatch.product_id, Product.minimum_stock)
+            .having(func.sum(StockBatch.quantity_available) <= Product.minimum_stock)
+        )
+
     def low_stock_models(self, *, limit: int = 100) -> list[LowStockModel]:
         rows = self._session.execute(
             select(Product, func.coalesce(func.sum(StockBatch.quantity_available), 0))
-            .outerjoin(StockBatch, StockBatch.product_id == Product.id)
-            .where(Product.is_active.is_(True))
+            .outerjoin(
+                StockBatch,
+                (StockBatch.product_id == Product.id) & StockBatch.is_active.is_(True),
+            )
+            .where(Product.is_active.is_(True), live_product(), Product.minimum_stock > 0)
             .group_by(Product.id)
             .order_by(Product.manufacturer, Product.name)
         )
         result = [
             LowStockModel(product.display_name, int(stock), product.minimum_stock)
             for product, stock in rows
-            if int(stock) <= product.minimum_stock
+            if needs_reorder(int(stock), product.minimum_stock)
         ]
         return result[:limit]
 
@@ -432,17 +489,20 @@ class ReportService:
         today = date.today()
         in_stock = self._session.scalar(
             select(func.coalesce(func.sum(StockBatch.quantity_available), 0)).where(
+                live_batch(),
                 StockBatch.quantity_available > 0,
                 (StockBatch.expiry_date.is_(None) | (StockBatch.expiry_date >= today)),
             )
         )
         expired = self._session.scalar(
             select(func.coalesce(func.sum(StockBatch.quantity_available), 0)).where(
-                StockBatch.quantity_available > 0, StockBatch.expiry_date < today
+                live_batch(), StockBatch.quantity_available > 0, StockBatch.expiry_date < today
             )
         )
         out = self._session.scalar(
-            select(func.count(StockBatch.id)).where(StockBatch.quantity_available == 0)
+            select(func.count(StockBatch.id)).where(
+                live_batch(), StockBatch.quantity_available == 0
+            )
         )
         return {
             "IN_STOCK": int(in_stock or 0),
@@ -455,6 +515,7 @@ class ReportService:
             select(Payment.method, func.sum(Payment.amount))
             .where(
                 Payment.direction == PaymentDirection.INCOMING,
+                live_payment(),
                 Payment.created_at >= period.start,
                 Payment.created_at < period.end,
             )
@@ -465,7 +526,9 @@ class ReportService:
     def products(self, *, include_inactive: bool = False) -> list[ProductSummary]:
         """List products for the dashboard's per-product tabs, in display order."""
 
-        statement = select(Product).order_by(Product.manufacturer, Product.name)
+        statement = (
+            select(Product).where(live_product()).order_by(Product.manufacturer, Product.name)
+        )
         if not include_inactive:
             statement = statement.where(Product.is_active.is_(True))
         return [
@@ -503,6 +566,7 @@ class ReportService:
                 .join(Sale, Sale.id == SaleItem.sale_id)
                 .where(
                     Sale.status == SaleStatus.COMPLETED,
+                    live_sale(),
                     Sale.sale_date >= period.start,
                     Sale.sale_date < period.end,
                 )
@@ -519,6 +583,7 @@ class ReportService:
                 )
                 .join(SaleReturn, SaleReturn.id == SaleReturnItem.sale_return_id)
                 .where(
+                    live_return(),
                     SaleReturn.returned_at >= period.start,
                     SaleReturn.returned_at < period.end,
                 )
@@ -533,11 +598,13 @@ class ReportService:
                     func.coalesce(func.sum(StockBatch.quantity_available), 0),
                     func.count(StockBatch.id),
                 )
-                .where(StockBatch.is_active.is_(True))
+                .where(StockBatch.is_active.is_(True), live_batch())
                 .group_by(StockBatch.product_id)
             )
         }
-        statement = select(Product).order_by(Product.manufacturer, Product.name)
+        statement = (
+            select(Product).where(live_product()).order_by(Product.manufacturer, Product.name)
+        )
         if not include_inactive:
             statement = statement.where(Product.is_active.is_(True))
         rows: list[ProductRow] = []
@@ -584,6 +651,7 @@ class ReportService:
             .where(
                 SaleItem.product_id == product_id,
                 Sale.status == SaleStatus.COMPLETED,
+                live_sale(),
                 Sale.sale_date >= period.start,
                 Sale.sale_date < period.end,
             )
@@ -617,6 +685,7 @@ class ReportService:
             .join(SaleReturn, SaleReturn.id == SaleReturnItem.sale_return_id)
             .where(
                 SaleReturnItem.product_id == product_id,
+                live_return(),
                 SaleReturn.returned_at >= period.start,
                 SaleReturn.returned_at < period.end,
             )
@@ -651,6 +720,7 @@ class ReportService:
             .where(
                 SaleItem.product_id == product_id,
                 Sale.status == SaleStatus.COMPLETED,
+                live_sale(),
                 Sale.sale_date >= period.start,
                 Sale.sale_date < period.end,
             )
@@ -714,6 +784,7 @@ class ReportService:
             .where(
                 recipient,
                 Sale.status == SaleStatus.COMPLETED,
+                live_sale(),
                 Sale.sale_date >= period.start,
                 Sale.sale_date < period.end,
             )
@@ -725,11 +796,15 @@ class ReportService:
 
         invoices, sales, profit, buyers = self._party_totals(period, dealers=False)
         returned = sum(self._returns_by_party(period, dealers=False).values(), Decimal("0.00"))
-        total = self._session.scalar(select(func.count()).select_from(Customer)) or 0
+        total = (
+            self._session.scalar(select(func.count()).select_from(Customer).where(live_customer()))
+            or 0
+        )
         outstanding = self._session.scalar(
             select(func.coalesce(func.sum(Sale.remaining_amount), Decimal("0.00"))).where(
                 Sale.customer_id.is_not(None),
                 Sale.status == SaleStatus.COMPLETED,
+                live_sale(),
                 Sale.remaining_amount > 0,
             )
         )
@@ -750,16 +825,20 @@ class ReportService:
 
         invoices, sales, profit, buyers = self._party_totals(period, dealers=True)
         returned = sum(self._returns_by_party(period, dealers=True).values(), Decimal("0.00"))
-        total = self._session.scalar(select(func.count()).select_from(Dealer)) or 0
+        total = (
+            self._session.scalar(select(func.count()).select_from(Dealer).where(live_dealer())) or 0
+        )
         active = (
             self._session.scalar(
-                select(func.count()).select_from(Dealer).where(Dealer.is_active.is_(True))
+                select(func.count())
+                .select_from(Dealer)
+                .where(Dealer.is_active.is_(True), live_dealer())
             )
             or 0
         )
         outstanding = self._session.scalar(
             select(func.coalesce(func.sum(Dealer.balance), Decimal("0.00"))).where(
-                Dealer.balance > 0
+                Dealer.balance > 0, live_dealer()
             )
         )
         return PartyMetrics(
@@ -805,6 +884,7 @@ class ReportService:
             .outerjoin(units, units.c.sale_id == Sale.id)
             .where(
                 Sale.status == SaleStatus.COMPLETED,
+                live_sale(),
                 Sale.sale_date >= period.start,
                 Sale.sale_date < period.end,
             )
@@ -844,6 +924,7 @@ class ReportService:
             .outerjoin(units, units.c.sale_id == Sale.id)
             .where(
                 Sale.status == SaleStatus.COMPLETED,
+                live_sale(),
                 Sale.sale_date >= period.start,
                 Sale.sale_date < period.end,
             )
@@ -878,6 +959,7 @@ class ReportService:
             .where(
                 Sale.customer_id.in_(customer_ids),
                 Sale.status == SaleStatus.COMPLETED,
+                live_sale(),
                 Sale.remaining_amount > 0,
             )
             .group_by(Sale.customer_id)

@@ -9,6 +9,7 @@ from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
 from xml.sax.saxutils import escape
+from zoneinfo import ZoneInfo
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
@@ -106,11 +107,19 @@ class SaleReceiptData:
     is_duplicate: bool = False
 
     @classmethod
-    def from_sale(cls, sale: Sale, payment_methods: str = "See payment record") -> SaleReceiptData:
+    def from_sale(
+        cls, sale: Sale, payment_methods: str = "See payment record", *, timezone: str
+    ) -> SaleReceiptData:
+        """Build the printable data, with the sale time in the shop's own time zone.
+
+        The sale is stored as an instant; which clock it reads on paper must not
+        depend on the database connection's session time zone.
+        """
+
         recipient = sale.dealer or sale.customer
         return cls(
             invoice_number=sale.invoice_number,
-            sold_at=sale.sale_date,
+            sold_at=sale.sale_date.astimezone(ZoneInfo(timezone)),
             customer_name=(
                 sale.dealer.display_name
                 if sale.dealer

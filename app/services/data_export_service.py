@@ -1,16 +1,24 @@
 """Whole-database export to a spreadsheet workbook and a CSV archive.
 
-The PostgreSQL dump written by :mod:`app.services.backup_service` is the backup
-that can be restored, but it can only be read by PostgreSQL. Shops also need a
-copy they can open, email to an accountant, or archive off-site, so every table
-is exported here as one worksheet and one CSV. The file name carries the span of
-the data it holds, which is what makes a folder of these readable at a glance.
+The PostgreSQL dump written by :mod:`app.services.backup_service` is the complete
+backup, but it can only be read by PostgreSQL. Shops also need a copy they can
+open, email to an accountant, or archive off-site, so every table is exported
+here as one worksheet and one CSV. The file name carries the span of the data it
+holds, which is what makes a folder of these readable at a glance.
+
+The CSV archive can also be loaded back with :mod:`app.services.data_import_service`.
+It carries a ``manifest.json`` naming the time zone its local times are written in
+and the schema revision, JSON columns are written as JSON, and binary columns as
+``base64:`` text, so every value reads back exactly. Password hashes and secret
+settings are never exported, so an import resets passwords instead.
 """
 
 from __future__ import annotations
 
+import base64
 import csv
 import io
+import json
 import uuid
 import zipfile
 from collections.abc import Iterator, Sequence
@@ -21,7 +29,7 @@ from enum import Enum
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Column, DateTime, Table, func, select
+from sqlalchemy import Column, DateTime, Table, func, select, text
 from sqlalchemy.orm import Session
 
 from app.config.settings import Settings
@@ -36,6 +44,15 @@ REDACTED_COLUMNS: frozenset[tuple[str, str]] = frozenset({("users", "password_ha
 
 #: Placeholder written in place of a redacted value so the column still lines up.
 REDACTED_TEXT = "[redacted]"
+
+#: Name of the archive member describing the export itself.
+MANIFEST_NAME = "manifest.json"
+
+#: Bumped when the way values are written changes; the importer reads every version.
+EXPORT_FORMAT = 2
+
+#: Prefix marking binary data written as base64 text.
+BINARY_PREFIX = "base64:"
 
 #: Tables holding operational noise rather than shop records.
 EXCLUDED_TABLES: frozenset[str] = frozenset({"alembic_version"})
@@ -142,6 +159,7 @@ class DataExportService:
                     sheets.append((_label(table.name), headers, rows))
                     archive.writestr(f"{table.name}.csv", self._csv(headers, rows))
                     summaries.append(DatasetSummary(table.name, _label(table.name), len(rows)))
+                archive.writestr(MANIFEST_NAME, self._manifest(summaries))
             ExcelExporter().export_workbook(workbook_path, sheets)
             partial.replace(archive_path)
         except Exception:
@@ -173,11 +191,28 @@ class DataExportService:
                 values[value_column] = REDACTED_TEXT
             yield values
 
+    def _manifest(self, summaries: Sequence[DatasetSummary]) -> str:
+        revision = self._session.execute(text("SELECT version_num FROM alembic_version")).scalar()
+        return json.dumps(
+            {
+                "format": EXPORT_FORMAT,
+                "timezone": self._settings.app_timezone,
+                "schema_revision": revision,
+                "exported_at": datetime.now(ZoneInfo(self._settings.app_timezone)).isoformat(),
+                "tables": {summary.table: summary.rows for summary in summaries},
+            },
+            indent=2,
+        )
+
     def _scalar(self, value: object) -> object:
         if isinstance(value, Enum):
             return value.value
-        if isinstance(value, (uuid.UUID, dict, list)):
+        if isinstance(value, uuid.UUID):
             return str(value)
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, default=str, ensure_ascii=False)
+        if isinstance(value, (bytes, memoryview)):
+            return BINARY_PREFIX + base64.b64encode(bytes(value)).decode("ascii")
         if isinstance(value, datetime) and value.tzinfo is not None:
             return value.astimezone(ZoneInfo(self._settings.app_timezone)).replace(tzinfo=None)
         return value

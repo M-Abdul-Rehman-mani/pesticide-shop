@@ -891,66 +891,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pesticide-shop-manager"
-version = "1.0.0"
-source = { editable = "." }
-dependencies = [
-    { name = "alembic" },
-    { name = "argon2-cffi" },
-    { name = "celery", extra = ["redis"] },
-    { name = "cryptography" },
-    { name = "matplotlib" },
-    { name = "openpyxl" },
-    { name = "psycopg", extra = ["binary"] },
-    { name = "pydantic" },
-    { name = "pydantic-settings" },
-    { name = "pyside6" },
-    { name = "python-dotenv" },
-    { name = "reportlab" },
-    { name = "sqlalchemy" },
-]
-
-[package.optional-dependencies]
-build = [
-    { name = "pyinstaller" },
-]
-dev = [
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "pytest-qt" },
-    { name = "ruff" },
-    { name = "types-openpyxl" },
-    { name = "types-reportlab" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "alembic", specifier = ">=1.13,<2" },
-    { name = "argon2-cffi", specifier = ">=23.1,<26" },
-    { name = "celery", extras = ["redis"], specifier = ">=5.4,<6" },
-    { name = "cryptography", specifier = ">=43,<47" },
-    { name = "matplotlib", specifier = ">=3.9,<4" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13,<3" },
-    { name = "openpyxl", specifier = ">=3.1,<4" },
-    { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
-    { name = "pydantic", specifier = ">=2.8,<3" },
-    { name = "pydantic-settings", specifier = ">=2.4,<3" },
-    { name = "pyinstaller", marker = "extra == 'build'", specifier = ">=6.11,<7" },
-    { name = "pyside6", specifier = ">=6.7,<7" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3,<10" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5,<8" },
-    { name = "pytest-qt", marker = "extra == 'dev'", specifier = ">=4.4,<5" },
-    { name = "python-dotenv", specifier = ">=1.0,<2" },
-    { name = "reportlab", specifier = ">=4.2,<5" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8,<1" },
-    { name = "sqlalchemy", specifier = ">=2.0.36,<3" },
-    { name = "types-openpyxl", marker = "extra == 'dev'", specifier = ">=3.1" },
-    { name = "types-reportlab", marker = "extra == 'dev'", specifier = ">=4.2" },
-]
-provides-extras = ["dev", "build"]
-
-[[package]]
 name = "mypy"
 version = "2.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1128,6 +1068,70 @@ sdist = { url = "https://files.pythonhosted.org/packages/03/4f/2750f7f6f025a1507
 wheels = [
     { url = "https://files.pythonhosted.org/packages/54/16/12b82f791c7f50ddec566873d5bdd245baa1491bac11d15ffb98aecc8f8b/pefile-2024.8.26-py3-none-any.whl", hash = "sha256:76f8b485dcd3b1bb8166f1128d395fa3d87af26360c2358fb75b80019b957c6f", size = 74766, upload-time = "2024-08-26T21:01:02.632Z" },
 ]
+
+[[package]]
+name = "pesticide-shop-manager"
+version = "1.0.0"
+source = { editable = "." }
+dependencies = [
+    { name = "alembic" },
+    { name = "argon2-cffi" },
+    { name = "celery", extra = ["redis"] },
+    { name = "cryptography" },
+    { name = "matplotlib" },
+    { name = "openpyxl" },
+    { name = "psycopg", extra = ["binary"] },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "pyside6" },
+    { name = "python-dotenv" },
+    { name = "reportlab" },
+    { name = "sqlalchemy" },
+    { name = "tzdata" },
+    { name = "tzlocal" },
+]
+
+[package.optional-dependencies]
+build = [
+    { name = "pyinstaller" },
+]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "pytest-qt" },
+    { name = "ruff" },
+    { name = "types-openpyxl" },
+    { name = "types-reportlab" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "alembic", specifier = ">=1.13,<2" },
+    { name = "argon2-cffi", specifier = ">=23.1,<26" },
+    { name = "celery", extras = ["redis"], specifier = ">=5.4,<6" },
+    { name = "cryptography", specifier = ">=43,<47" },
+    { name = "matplotlib", specifier = ">=3.9,<4" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13,<3" },
+    { name = "openpyxl", specifier = ">=3.1,<4" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.2,<4" },
+    { name = "pydantic", specifier = ">=2.8,<3" },
+    { name = "pydantic-settings", specifier = ">=2.4,<3" },
+    { name = "pyinstaller", marker = "extra == 'build'", specifier = ">=6.11,<7" },
+    { name = "pyside6", specifier = ">=6.7,<7" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3,<10" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5,<8" },
+    { name = "pytest-qt", marker = "extra == 'dev'", specifier = ">=4.4,<5" },
+    { name = "python-dotenv", specifier = ">=1.0,<2" },
+    { name = "reportlab", specifier = ">=4.2,<5" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8,<1" },
+    { name = "sqlalchemy", specifier = ">=2.0.36,<3" },
+    { name = "types-openpyxl", marker = "extra == 'dev'", specifier = ">=3.1" },
+    { name = "types-reportlab", marker = "extra == 'dev'", specifier = ">=4.2" },
+    { name = "tzdata", specifier = ">=2024.1" },
+    { name = "tzlocal", specifier = ">=5.2,<6" },
+]
+provides-extras = ["dev", "build"]
 
 [[package]]
 name = "pillow"

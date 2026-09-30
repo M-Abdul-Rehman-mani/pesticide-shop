@@ -208,7 +208,7 @@ def main() -> int:
                 store="FINISHED",
             ),
             owner,
-            owner_email=None,
+            owner_emails=(),
         )
         print(
             f"Seeded {purchase.purchase_number}, four demo roles, three pesticide products, "

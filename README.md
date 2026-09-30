@@ -39,7 +39,7 @@ python main.py
 Start the worker and scheduler in separate terminals:
 
 ```bash
-celery -A app.tasks.celery_app worker --loglevel=INFO
+celery -A app.tasks.celery_app worker --loglevel=INFO --queues=email,reports,maintenance
 celery -A app.tasks.celery_app beat --loglevel=INFO
 ```
 
@@ -50,7 +50,7 @@ SQLite when PostgreSQL is unavailable.
 
 | Area | Variables |
 |---|---|
-| Application | `APP_ENV`, `APP_SECRET_KEY`, `APP_TIMEZONE`, `APP_CURRENCY`, `APP_SESSION_TIMEOUT_MINUTES` |
+| Application | `APP_ENV`, `APP_SECRET_KEY`, `APP_CURRENCY`, `APP_SESSION_TIMEOUT_MINUTES` |
 | PostgreSQL | `DATABASE_HOST`, `DATABASE_PORT`, `DATABASE_NAME`, `DATABASE_USER`, `DATABASE_PASSWORD`, `DATABASE_SSL_MODE` |
 | Test PostgreSQL | `TEST_DATABASE_HOST`, `TEST_DATABASE_PORT`, `TEST_DATABASE_NAME`, `TEST_DATABASE_USER`, `TEST_DATABASE_PASSWORD` |
 | Redis | `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, `REDIS_PASSWORD` |
@@ -72,6 +72,14 @@ alembic upgrade head
 python -m scripts.create_admin --full-name "Shop Owner" --email owner@example.com
 python main.py
 ```
+
+`create_admin` also adds a **TEST Customer**, **TEST Dealer**, **TEST Supplier**, and **TEST Product**
+(with 1,000 units of stock) for practice. They are flagged `is_test`, so every sale, purchase,
+payment, and return involving them is left out of the dashboard, every report, and the owner's
+daily email. TEST and real records never share a document: TEST products are sold only to the TEST
+customer, TEST dealer, or a walk-in, and bought only from the TEST supplier. For an install whose
+owner already exists, run `python -m scripts.create_test_data`; it never creates duplicates, and it
+restocks the TEST product once it sells out.
 
 Startup validates configuration, PostgreSQL connectivity, and the exact Alembic revision before
 showing login. If the database is unavailable it stops with a friendly connection message; it
@@ -146,6 +154,10 @@ python -m scripts.backup_database
 Backups are written to a temporary file and renamed only after `pg_dump` succeeds; retention
 cleanup happens afterward. Restore is OWNER-only and must be performed with every client and
 worker stopped. See [Backup and restore](docs/backup.md) for the full rehearsal procedure.
+
+The CSV data export (`.csv.zip`) can also be imported back with
+`python -m scripts.import_csv_export ARCHIVE` into an empty database, or from **Settings > Backup**;
+see [Importing a CSV data export](docs/backup.md#importing-a-csv-data-export).
 
 ## Printing and email
 

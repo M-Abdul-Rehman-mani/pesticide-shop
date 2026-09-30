@@ -73,12 +73,6 @@ class ApplicationController(QObject):
                         self._settings.app_currency,
                     )
                     or self._settings.app_currency,
-                    "app_timezone": stored.get(
-                        SettingCategory.GENERAL,
-                        "timezone",
-                        self._settings.app_timezone,
-                    )
-                    or self._settings.app_timezone,
                     "app_session_timeout_minutes": int(
                         stored.get(
                             SettingCategory.SECURITY,

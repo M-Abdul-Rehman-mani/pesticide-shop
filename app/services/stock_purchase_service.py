@@ -22,6 +22,7 @@ from app.services.audit_service import AuditService
 from app.services.document_service import DocumentNumberService
 from app.services.dto import CreateStockPurchaseCommand
 from app.services.money_service import document_totals, payment_status
+from app.services.practice_guard import require_unmixed_purchase
 from app.utils.exceptions import ConflictError, NotFoundError, ValidationError
 from app.utils.validators import nonnegative_money
 
@@ -72,6 +73,7 @@ class StockPurchaseService:
         )
         if active_products != product_ids:
             raise NotFoundError("One or more selected products are missing or inactive.")
+        require_unmixed_purchase(self._session, product_ids, supplier_is_test=supplier.is_test)
         key_set = set(keys)
         existing_batches = {
             (batch.product_id, batch.batch_number): batch

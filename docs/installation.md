@@ -63,7 +63,7 @@ the matching host and port in `.env`.
 ## Configuration
 
 Required production values are `APP_SECRET_KEY`, all `DATABASE_*` credentials, and a reachable
-PostgreSQL instance. Redis, SMTP, owner email, report time, backup retention, timezone, and
-currency are also environment-configurable. Non-secret shop preferences can then be managed
+PostgreSQL instance. Redis, SMTP, owner email, report time, backup retention, and currency are
+also environment-configurable. The time zone is always the computer's own (`TZ` in a container). Non-secret shop preferences can then be managed
 by an OWNER/MANAGER in Settings. Changing the application key makes saved encrypted SMTP
 passwords unreadable, so preserve it in a secret manager.
