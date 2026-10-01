@@ -7,7 +7,18 @@ from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sqlalchemy import CheckConstraint, DateTime, Enum, ForeignKey, Index, String, Text, event, func
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    event,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, Mapper, mapped_column, relationship
 
@@ -55,6 +66,11 @@ class Payment(UUIDPrimaryKeyMixin, Base):
     #: the shop received, so they can never be reversed as if they were.
     sale_return_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("sale_returns.id", ondelete="RESTRICT")
+    )
+    #: Moves credit already on a dealer's account onto an invoice (or takes it back
+    #: off). No money changes hands, so cash figures and statements leave it out.
+    applied_credit: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
     )
     method: Mapped[PaymentMethod] = mapped_column(
         Enum(PaymentMethod, name="payment_method", create_type=False), nullable=False

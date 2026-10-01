@@ -137,7 +137,19 @@ class MetricCardGrid(QWidget):
         self._reflow(1 if width < 560 else 2 if width < 900 else 3 if width < 1180 else 4)
 
     def set_value(self, name: str, value: str) -> None:
-        self.cards[name].set_value(value)
+        # A card left out for this user's role simply has nothing to show.
+        if card := self.cards.get(name):
+            card.set_value(value)
+
+
+def _profit_hidden(
+    specifications: tuple[tuple[str, str, str], ...], show_profit: bool
+) -> tuple[tuple[str, str, str], ...]:
+    """Drop the profit card for a role that may not see margins."""
+
+    if show_profit:
+        return specifications
+    return tuple(spec for spec in specifications if spec[0] != "Profit")
 
 
 class ChartCard(QFrame):
@@ -172,13 +184,16 @@ class OverviewTab(QWidget):
         ("Outstanding Payments", "Uncollected sale balance", "amber"),
     )
 
-    def __init__(self, currency: str, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, currency: str, parent: QWidget | None = None, *, show_profit: bool = True
+    ) -> None:
         super().__init__(parent)
         self._currency = currency
+        self._show_profit = show_profit
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(10)
-        self.cards = MetricCardGrid(self.SPECIFICATIONS)
+        self.cards = MetricCardGrid(_profit_hidden(self.SPECIFICATIONS, show_profit))
         self.chart = ChartCard("Performance and inventory insights")
         layout.addWidget(self.cards)
         layout.addWidget(self.chart, 1)
@@ -207,14 +222,18 @@ class OverviewTab(QWidget):
         )
         figure = self.chart.figure
         figure.clear()
-        sales_axes = figure.add_subplot(221)
-        profit_axes = figure.add_subplot(222)
+        # Without profit rights the sales chart takes the whole top row instead.
+        sales_axes = figure.add_subplot(221 if self._show_profit else 211)
         top_axes = figure.add_subplot(223)
         stock_axes = figure.add_subplot(224)
         sales_axes.set_title("Sales by day")
-        profit_axes.set_title("Gross profit")
         _daily_series(sales_axes, chart_rows, "sales", "#23865a", "Sales")
-        _daily_series(profit_axes, chart_rows, "profit", "#4388d6", "Profit")
+        styled = [sales_axes, top_axes, stock_axes]
+        if self._show_profit:
+            profit_axes = figure.add_subplot(222)
+            profit_axes.set_title("Gross profit")
+            _daily_series(profit_axes, chart_rows, "profit", "#4388d6", "Profit")
+            styled.append(profit_axes)
         top_axes.set_title("Top-selling pesticide products")
         if top_models:
             top_axes.barh(
@@ -235,7 +254,7 @@ class OverviewTab(QWidget):
             stock_axes.tick_params(axis="x", labelrotation=35, labelsize=7)
         else:
             _empty(stock_axes, "No inventory")
-        _style_axes(sales_axes, profit_axes, top_axes, stock_axes)
+        _style_axes(*styled)
         self.chart.canvas.draw_idle()
 
 
@@ -249,6 +268,8 @@ class PartyTab(QWidget):
         party_label: str,
         currency: str,
         parent: QWidget | None = None,
+        *,
+        show_profit: bool = True,
     ) -> None:
         super().__init__(parent)
         self._currency = currency
@@ -256,7 +277,7 @@ class PartyTab(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 8, 0, 0)
         layout.setSpacing(10)
-        self.cards = MetricCardGrid(specifications)
+        self.cards = MetricCardGrid(_profit_hidden(specifications, show_profit))
         table_card = QFrame()
         table_card.setObjectName("MetricCard")
         table_layout = QVBoxLayout(table_card)
@@ -352,11 +373,17 @@ class ProductTab(QWidget):
     )
 
     def __init__(
-        self, product: ProductSummary, currency: str, parent: QWidget | None = None
+        self,
+        product: ProductSummary,
+        currency: str,
+        parent: QWidget | None = None,
+        *,
+        show_profit: bool = True,
     ) -> None:
         super().__init__(parent)
         self.product = product
         self._currency = currency
+        self._show_profit = show_profit
         self.loaded = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 8, 0, 0)
@@ -374,8 +401,10 @@ class ProductTab(QWidget):
         self.summary = QLabel("Loading…")
         self.summary.setObjectName("PageSubtitle")
         self.summary.setWordWrap(True)
-        self.cards = MetricCardGrid(self.SPECIFICATIONS)
-        self.chart = ChartCard("Sales and profit for this product")
+        self.cards = MetricCardGrid(_profit_hidden(self.SPECIFICATIONS, show_profit))
+        self.chart = ChartCard(
+            "Sales and profit for this product" if show_profit else "Sales for this product"
+        )
         batch_card = QFrame()
         batch_card.setObjectName("MetricCard")
         batch_layout = QVBoxLayout(batch_card)
@@ -477,13 +506,16 @@ class ProductTab(QWidget):
         self.summary.setText(f"{stock_note} {last_sold}{inactive}")
         figure = self.chart.figure
         figure.clear()
-        sales_axes = figure.add_subplot(121)
-        profit_axes = figure.add_subplot(122)
+        sales_axes = figure.add_subplot(121 if self._show_profit else 111)
         sales_axes.set_title("Sales by day")
-        profit_axes.set_title("Gross profit")
         _daily_series(sales_axes, chart_rows, "sales", "#23865a", "Sales")
-        _daily_series(profit_axes, chart_rows, "profit", "#4388d6", "Profit")
-        _style_axes(sales_axes, profit_axes)
+        if self._show_profit:
+            profit_axes = figure.add_subplot(122)
+            profit_axes.set_title("Gross profit")
+            _daily_series(profit_axes, chart_rows, "profit", "#4388d6", "Profit")
+            _style_axes(sales_axes, profit_axes)
+        else:
+            _style_axes(sales_axes)
         self.chart.canvas.draw_idle()
         self.batch_model.set_rows(
             [
@@ -518,9 +550,15 @@ class ProductsTab(QWidget):
         "Status",
     )
 
-    def __init__(self, currency: str, parent: QWidget | None = None) -> None:
+    def __init__(
+        self, currency: str, parent: QWidget | None = None, *, show_profit: bool = True
+    ) -> None:
         super().__init__(parent)
         self._currency = currency
+        self._show_profit = show_profit
+        self._columns = tuple(
+            column for column in self.COLUMNS if show_profit or column != "Profit"
+        )
         self._rows: list[ProductRow] = []
         self._visible: list[ProductRow] = []
         self.loaded = False
@@ -544,7 +582,7 @@ class ProductsTab(QWidget):
         self.search.textChanged.connect(self._filter)
         search_row.addWidget(QLabel("Search"))
         search_row.addWidget(self.search, 1)
-        self.model = RowsTableModel(self.COLUMNS, page)
+        self.model = RowsTableModel(self._columns, page)
         self.table = QTableView()
         self.table.setModel(self.model)
         configure_table(self.table, stretch_column=0, minimum_section_size=76)
@@ -581,23 +619,27 @@ class ProductsTab(QWidget):
             for row in self._rows
             if not query or query in row.name.lower() or query in row.manufacturer.lower()
         ]
+        profit_at = self.COLUMNS.index("Profit")
         self.model.set_rows(
             [
-                (
-                    row.full_name,
-                    row.manufacturer,
-                    StockCell(row.in_stock, row.stock_level),
-                    f"{row.active_batches:,}",
-                    f"{row.units_sold:,}",
-                    format_money(row.sales, self._currency),
-                    format_money(row.profit, self._currency),
-                    f"{format_money(row.returns, self._currency)} ({row.units_returned:,})"
-                    if row.units_returned
-                    else "—",
-                    format_date(row.last_sold),
-                    "Active" if row.is_active else "Inactive",
+                cells if self._show_profit else cells[:profit_at] + cells[profit_at + 1 :]
+                for cells in (
+                    (
+                        row.full_name,
+                        row.manufacturer,
+                        StockCell(row.in_stock, row.stock_level),
+                        f"{row.active_batches:,}",
+                        f"{row.units_sold:,}",
+                        format_money(row.sales, self._currency),
+                        format_money(row.profit, self._currency),
+                        f"{format_money(row.returns, self._currency)} ({row.units_returned:,})"
+                        if row.units_returned
+                        else "—",
+                        format_date(row.last_sold),
+                        "Active" if row.is_active else "Inactive",
+                    )
+                    for row in self._visible
                 )
-                for row in self._visible
             ]
         )
         count = record_count_text(len(self._visible), "product")
@@ -615,7 +657,7 @@ class ProductsTab(QWidget):
         """Show one product's dashboard, building the view on first use."""
 
         if self.detail is None:
-            self.detail = ProductTab(product, self._currency)
+            self.detail = ProductTab(product, self._currency, show_profit=self._show_profit)
             page = QWidget()
             layout = QVBoxLayout(page)
             layout.setContentsMargins(0, 0, 0, 0)
@@ -668,6 +710,8 @@ class DashboardScreen(QWidget):
         timezone: str,
         currency: str,
         parent: QWidget | None = None,
+        *,
+        show_profit: bool = True,
     ) -> None:
         super().__init__(parent)
         self._session_factory = session_factory
@@ -680,7 +724,7 @@ class DashboardScreen(QWidget):
         layout.addWidget(
             PageHeader(
                 "Business overview",
-                "Track revenue, profit, stock health, and outstanding balances for the whole "
+                "Track revenue, stock health, and outstanding balances for the whole "
                 "shop or for one product at a time.",
             )
         )
@@ -718,12 +762,22 @@ class DashboardScreen(QWidget):
         self.tabs.setElideMode(Qt.TextElideMode.ElideNone)
         self.tabs.tabBar().setExpanding(False)
         self.tabs.setDocumentMode(True)
-        self.overview = OverviewTab(currency)
+        self.overview = OverviewTab(currency, show_profit=show_profit)
         self.customers = PartyTab(
-            "Customers by revenue", CUSTOMER_SPECIFICATIONS, "Customer", currency
+            "Customers by revenue",
+            CUSTOMER_SPECIFICATIONS,
+            "Customer",
+            currency,
+            show_profit=show_profit,
         )
-        self.dealers = PartyTab("Dealers by revenue", DEALER_SPECIFICATIONS, "Dealer", currency)
-        self.products = ProductsTab(currency)
+        self.dealers = PartyTab(
+            "Dealers by revenue",
+            DEALER_SPECIFICATIONS,
+            "Dealer",
+            currency,
+            show_profit=show_profit,
+        )
+        self.products = ProductsTab(currency, show_profit=show_profit)
         self.tabs.addTab(self.overview, "General")
         self.tabs.addTab(self.customers, "Customers")
         self.tabs.addTab(self.dealers, "Dealers")

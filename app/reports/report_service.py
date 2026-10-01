@@ -6,10 +6,10 @@ import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, case, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 from sqlalchemy.sql import Subquery
 
@@ -210,6 +210,15 @@ class PartyRow:
 
 
 @dataclass(frozen=True, slots=True)
+class _ReturnLoss:
+    """The profit one returned line took back, and when and for what product."""
+
+    returned_at: datetime
+    product_id: uuid.UUID
+    lost: Decimal
+
+
+@dataclass(frozen=True, slots=True)
 class LowStockModel:
     product: str
     in_stock: int
@@ -331,7 +340,64 @@ class ReportService:
                 Sale.sale_date < period.end,
             )
         )
-        return Decimal(value or 0)
+        lost = sum((entry.lost for entry in self._return_losses(period)), Decimal("0.00"))
+        return Decimal(value or 0) - lost
+
+    def _return_losses(
+        self,
+        period: DateRange,
+        *,
+        product_id: uuid.UUID | None = None,
+        dealers: bool | None = None,
+    ) -> list[_ReturnLoss]:
+        """Profit given back by each returned line in the period.
+
+        A return hands back its share of the invoice's revenue (tax excluded, as in
+        profit itself). Restocked goods recover their purchase cost; damaged goods
+        written off do not, so they cost the shop the full credit.
+        """
+
+        statement = (
+            select(
+                SaleReturn.returned_at,
+                SaleReturnItem.product_id,
+                SaleReturnItem.total,
+                SaleReturnItem.quantity,
+                SaleReturnItem.restocked,
+                Sale.total,
+                Sale.tax,
+                SaleItem.purchase_cost,
+                SaleItem.quantity,
+            )
+            .join(SaleReturn, SaleReturn.id == SaleReturnItem.sale_return_id)
+            .join(Sale, Sale.id == SaleReturn.sale_id)
+            .join(SaleItem, SaleItem.id == SaleReturnItem.sale_item_id)
+            .where(
+                live_return(),
+                SaleReturn.returned_at >= period.start,
+                SaleReturn.returned_at < period.end,
+            )
+        )
+        if product_id is not None:
+            statement = statement.where(SaleReturnItem.product_id == product_id)
+        if dealers is not None:
+            statement = statement.where(
+                Sale.dealer_id.is_not(None) if dealers else Sale.customer_id.is_not(None)
+            )
+        losses: list[_ReturnLoss] = []
+        for row in self._session.execute(statement):
+            returned_at, product, credit, quantity, restocked = row[:5]
+            invoice_total, tax, line_cost, sold = row[5:]
+            revenue = credit * (invoice_total - tax) / invoice_total if invoice_total else credit
+            recovered = line_cost * quantity / sold if restocked else Decimal("0.00")
+            losses.append(
+                _ReturnLoss(
+                    returned_at,
+                    product,
+                    (revenue - recovered).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
+                )
+            )
+        return losses
 
     def sales(self, period: DateRange) -> list[SalesReportRow]:
         documents = self._session.scalars(
@@ -417,6 +483,8 @@ class ReportService:
             values = totals[occurred_at.astimezone(zone).date()]
             values[0] += Decimal(amount)
             values[1] += Decimal(profit)
+        for loss in self._return_losses(period):
+            totals[loss.returned_at.astimezone(zone).date()][1] -= loss.lost
         return [
             DailyFinancialPoint(day, values[0], values[1]) for day, values in sorted(totals.items())
         ]
@@ -511,17 +579,33 @@ class ReportService:
         }
 
     def payment_breakdown(self, period: DateRange) -> dict[str, Decimal]:
+        """Money actually taken from buyers in the period, net of what went back.
+
+        Return credits and applied account credit move no money, so they are left
+        out; reversals and refunds handed back to buyers are subtracted. Supplier
+        payments are not customer money and never appear here.
+        """
+
+        signed = case(
+            (Payment.direction == PaymentDirection.INCOMING, Payment.amount),
+            else_=-Payment.amount,
+        )
         rows = self._session.execute(
-            select(Payment.method, func.sum(Payment.amount))
+            select(Payment.method, func.sum(signed))
             .where(
-                Payment.direction == PaymentDirection.INCOMING,
                 live_payment(),
+                Payment.applied_credit.is_(False),
+                Payment.purchase_id.is_(None),
+                or_(
+                    Payment.direction == PaymentDirection.OUTGOING,
+                    Payment.sale_return_id.is_(None),
+                ),
                 Payment.created_at >= period.start,
                 Payment.created_at < period.end,
             )
             .group_by(Payment.method)
         )
-        return {method.value: Decimal(total) for method, total in rows}
+        return {method.value: Decimal(total) for method, total in rows if total}
 
     def products(self, *, include_inactive: bool = False) -> list[ProductSummary]:
         """List products for the dashboard's per-product tabs, in display order."""
@@ -607,6 +691,9 @@ class ReportService:
         )
         if not include_inactive:
             statement = statement.where(Product.is_active.is_(True))
+        lost_by_product: dict[uuid.UUID, Decimal] = defaultdict(lambda: Decimal("0.00"))
+        for loss in self._return_losses(period):
+            lost_by_product[loss.product_id] += loss.lost
         rows: list[ProductRow] = []
         for product in self._session.scalars(statement):
             units, sales, profit, last_sold = sold.get(
@@ -614,6 +701,7 @@ class ReportService:
             )
             available, batches = stock.get(product.id, (0, 0))
             back, credited = returned.get(product.id, (0, Decimal("0.00")))
+            profit = Decimal(profit or 0) - lost_by_product.get(product.id, Decimal("0.00"))
             rows.append(
                 ProductRow(
                     id=product.id,
@@ -693,7 +781,11 @@ class ReportService:
         return ProductMetrics(
             units_sold=int(sold[0] or 0),
             sales=Decimal(sold[1] or 0),
-            profit=Decimal(sold[2] or 0),
+            profit=Decimal(sold[2] or 0)
+            - sum(
+                (loss.lost for loss in self._return_losses(period, product_id=product_id)),
+                Decimal("0.00"),
+            ),
             in_stock=int(stock[0] or 0),
             active_batches=int(stock[1] or 0),
             expiring_units=int(expiring or 0),
@@ -730,6 +822,8 @@ class ReportService:
             values = totals[occurred_at.astimezone(zone).date()]
             values[0] += Decimal(amount)
             values[1] += Decimal(profit)
+        for loss in self._return_losses(period, product_id=product_id):
+            totals[loss.returned_at.astimezone(zone).date()][1] -= loss.lost
         return [
             DailyFinancialPoint(day, values[0], values[1]) for day, values in sorted(totals.items())
         ]
@@ -789,7 +883,15 @@ class ReportService:
                 Sale.sale_date < period.end,
             )
         ).one()
-        return int(row[0] or 0), Decimal(row[1] or 0), Decimal(row[2] or 0), int(row[3] or 0)
+        lost = sum(
+            (loss.lost for loss in self._return_losses(period, dealers=dealers)), Decimal("0.00")
+        )
+        return (
+            int(row[0] or 0),
+            Decimal(row[1] or 0),
+            Decimal(row[2] or 0) - lost,
+            int(row[3] or 0),
+        )
 
     def customer_dashboard(self, period: DateRange) -> PartyMetrics:
         """Headline figures for retail customers."""

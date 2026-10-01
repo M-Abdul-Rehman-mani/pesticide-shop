@@ -23,11 +23,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app import __version__
 from app.config.settings import Settings
+from app.email.outbox import MAX_DELIVERY_ATTEMPTS, deliver_pending
 from app.models.email_history import EmailHistory
 from app.models.enums import EmailStatus
 from app.printing.shop_profile import load_shop_profile
@@ -132,8 +133,8 @@ class MainWindow(QMainWindow):
         self._outbox_label = QLabel()
         self._outbox_label.setObjectName("RecordCount")
         self._outbox_label.setToolTip(
-            "Invoice emails wait here until the background worker sends them. "
-            "A growing queue means the worker is not running."
+            "Emails that could not be sent yet. The program retries them every minute "
+            "while it is open; check Settings > Email if the number keeps growing."
         )
         status.addPermanentWidget(self._outbox_label)
         status.addPermanentWidget(shortcuts)
@@ -143,6 +144,7 @@ class MainWindow(QMainWindow):
         self._preferences = QSettings("CropCare", "PesticideShop")
         self._restore_ui_preferences()
         self._install_shortcuts()
+        self._outbox_busy = False
         self._outbox_timer = QTimer(self)
         self._outbox_timer.setInterval(60_000)
         self._outbox_timer.timeout.connect(self._check_outbox)
@@ -281,7 +283,12 @@ class MainWindow(QMainWindow):
         self._add_page(
             sidebar,
             "Dashboard",
-            lambda: DashboardScreen(factory, settings.app_timezone, settings.app_currency),
+            lambda: DashboardScreen(
+                factory,
+                settings.app_timezone,
+                settings.app_currency,
+                show_profit=has_permission(actor.role, Permission.VIEW_PROFIT),
+            ),
             Permission.VIEW_DASHBOARD,
         )
         self._add_page(
@@ -417,20 +424,35 @@ class MainWindow(QMainWindow):
         )
 
     def _check_outbox(self) -> None:
-        """Surface invoice emails that are queued but not going anywhere.
+        """Send any emails that are due, then show how many are still waiting.
 
-        Delivery runs in a Celery worker. When that is not running -- the common
-        case on a single shop PC -- messages pile up silently, so the count is put
-        in front of the operator rather than left in a log.
+        There is no background mail service: while the program is open it retries
+        queued messages itself (see ``deliver_pending``). Anything that still cannot
+        go -- usually because SMTP is not set up -- is counted in the status bar
+        rather than left silently in a log.
         """
 
+        if self._outbox_busy:
+            return
+        self._outbox_busy = True
+        settings = self._settings
+
         def operation() -> int:
+            deliver_pending(self._session_factory, settings)
             with self._session_factory() as session:
                 return int(
                     session.scalar(
                         select(func.count())
                         .select_from(EmailHistory)
-                        .where(EmailHistory.status == EmailStatus.PENDING)
+                        .where(
+                            or_(
+                                EmailHistory.status == EmailStatus.PENDING,
+                                and_(
+                                    EmailHistory.status == EmailStatus.FAILED,
+                                    EmailHistory.attempts < MAX_DELIVERY_ATTEMPTS,
+                                ),
+                            )
+                        )
                     )
                     or 0
                 )
@@ -441,10 +463,15 @@ class MainWindow(QMainWindow):
                 self._outbox_label.clear()
                 self._outbox_label.setStyleSheet("")
                 return
-            self._outbox_label.setText(f"{pending} email{'s' if pending != 1 else ''} queued")
+            self._outbox_label.setText(
+                f"{pending} email{'s' if pending != 1 else ''} waiting to send"
+            )
             self._outbox_label.setStyleSheet("color: #b26a00; font-weight: 700;")
 
-        start_worker(operation, succeeded=show, failed=lambda _error: None)
+        def done() -> None:
+            self._outbox_busy = False
+
+        start_worker(operation, succeeded=show, failed=lambda _error: None, finished=done)
 
     def _refresh_transaction_pages(self, _reference: str) -> None:
         for name in ("Dashboard", "Inventory", "Products", "Customers", "Dealers", "Suppliers"):

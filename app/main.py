@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import sys
 import traceback
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ from PySide6.QtCore import QObject, QTimer
 from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
 
 from app.config.settings import Settings
+from app.security.authentication import AuthenticatedUser
 from app.ui.theme import apply_application_theme
 from app.utils.paths import resource_path
 
@@ -29,6 +31,20 @@ class ApplicationController(QObject):
         self._settings = settings
         self._session_factory = SessionFactory
         self._window: QMainWindow | None = None
+        self._user: AuthenticatedUser | None = None
+        self._remove_session_guard: Callable[[], None] | None = None
+        # Signs the user out within a minute of their account being disabled or
+        # changed, even when they are not doing anything that touches the database.
+        self._account_timer = QTimer(self)
+        self._account_timer.setInterval(60_000)
+        self._account_timer.timeout.connect(self._check_account)
+        # There is no background service, so the open program takes the daily
+        # backup itself once it is due (see app/services/scheduled_backup.py).
+        self._backup_timer = QTimer(self)
+        self._backup_timer.setInterval(15 * 60_000)
+        self._backup_timer.timeout.connect(self._run_due_backup)
+        self._backup_busy = False
+        self._runtime_settings: Settings | None = None
 
     def start(self) -> bool:
         return self._show_login()
@@ -46,7 +62,18 @@ class ApplicationController(QObject):
             if change.exec() != ChangePasswordDialog.DialogCode.Accepted:
                 QTimer.singleShot(0, self._application.quit)
                 return False
-        window = MainWindow(self._session_factory, user, self._load_runtime_settings())
+        from app.security.session_guard import guard_sessions
+
+        self._user = user
+        self._remove_session_guard = guard_sessions(self._session_factory, user)
+        self._account_timer.start()
+        runtime_settings = self._load_runtime_settings()
+        self._runtime_settings = runtime_settings
+        if runtime_settings.backup_automatic:
+            self._backup_timer.start()
+            # A computer that was off at backup time catches up shortly after sign-in.
+            QTimer.singleShot(60_000, self._run_due_backup)
+        window = MainWindow(self._session_factory, user, runtime_settings)
         window.logout_requested.connect(self._logout)
         self._window = window
         screen = window.screen()
@@ -105,7 +132,68 @@ class ApplicationController(QObject):
                 }
             )
 
+    def _check_account(self) -> None:
+        from app.security.authentication import AuthenticationService
+        from app.ui.workers import start_worker
+        from app.utils.exceptions import AuthenticationError
+
+        user = self._user
+        if user is None:
+            return
+
+        def operation() -> None:
+            with self._session_factory() as session:
+                AuthenticationService(session).validate_session(user)
+
+        def failed(error: Exception) -> None:
+            if not isinstance(error, AuthenticationError) or self._user is not user:
+                return
+            QMessageBox.information(self._window, "Signed out", error.message)
+            self._logout()
+
+        start_worker(operation, succeeded=lambda _result: None, failed=failed)
+
+    def _run_due_backup(self) -> None:
+        from app.services.backup_service import BackupResult
+        from app.services.scheduled_backup import run_due_backup
+        from app.ui.workers import start_worker
+
+        settings = self._runtime_settings
+        if settings is None or self._backup_busy or self._window is None:
+            return
+        self._backup_busy = True
+
+        def succeeded(result: object) -> None:
+            if isinstance(result, BackupResult) and self._window is not None:
+                self._window.statusBar().showMessage(
+                    f"Automatic backup saved: {result.path.name}", 15_000
+                )
+
+        def failed(error: Exception) -> None:
+            # Logged by the worker; tried again on the next tick.
+            if self._window is not None:
+                self._window.statusBar().showMessage(
+                    "Automatic backup failed -- see the error log, or use Settings > Backup.",
+                    60_000,
+                )
+
+        def finished() -> None:
+            self._backup_busy = False
+
+        start_worker(
+            lambda: run_due_backup(self._session_factory, settings),
+            succeeded=succeeded,
+            failed=failed,
+            finished=finished,
+        )
+
     def _logout(self) -> None:
+        self._account_timer.stop()
+        self._backup_timer.stop()
+        self._user = None
+        if self._remove_session_guard is not None:
+            self._remove_session_guard()
+            self._remove_session_guard = None
         if self._window is not None:
             window = self._window
             self._window = None

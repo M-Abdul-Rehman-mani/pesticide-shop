@@ -12,6 +12,8 @@ class Permission(StrEnum):
     VIEW_DASHBOARD = "VIEW_DASHBOARD"
     CREATE_SALE = "CREATE_SALE"
     VOID_SALE = "VOID_SALE"
+    #: Re-pricing or re-quantifying an issued invoice, which changes money owed.
+    EDIT_SALE = "EDIT_SALE"
     RECORD_RETURN = "RECORD_RETURN"
     VIEW_INVENTORY = "VIEW_INVENTORY"
     MANAGE_INVENTORY = "MANAGE_INVENTORY"

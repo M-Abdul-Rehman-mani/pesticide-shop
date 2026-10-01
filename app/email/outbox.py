@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import Select, and_, or_, select
 from sqlalchemy.orm import Session, selectinload, sessionmaker
 
 from app.config.settings import Settings
@@ -164,6 +164,19 @@ class DeliveryOutcome:
         return self.sent + self.failed
 
 
+#: A message is given up on after this many failed attempts; it stays in Email
+#: History, where it can still be retried by hand.
+MAX_DELIVERY_ATTEMPTS = 6
+#: Longest wait between automatic retries of a failed message.
+MAX_RETRY_DELAY = timedelta(hours=1)
+
+
+def retry_delay(attempts: int) -> timedelta:
+    """How long a message that has failed ``attempts`` times waits before the next try."""
+
+    return min(timedelta(minutes=2 ** max(attempts, 0)), MAX_RETRY_DELAY)
+
+
 def deliver_pending_for(
     session_factory: sessionmaker[Session],
     settings: Settings,
@@ -171,31 +184,101 @@ def deliver_pending_for(
     entity_type: str,
     entity_id: uuid.UUID,
 ) -> DeliveryOutcome:
-    """Send one record's queued messages now rather than leaving them for the worker.
+    """Send one record's queued messages now, right after it was saved.
 
-    A shop running without the background worker would otherwise watch its invoice
-    emails pile up unsent. Delivery still goes through the outbox: the row is written
-    inside the sale's own transaction and only claimed here, after that transaction
-    has committed. So a refused login or a dropped connection leaves a failed record
-    to retry and never touches the sale, and the message can never be sent twice.
+    Delivery still goes through the outbox: the row is written inside the record's
+    own transaction and only claimed here, after that transaction has committed. So
+    a refused login or a dropped connection leaves a failed record to retry and
+    never touches the sale, and the message can never be sent twice.
     """
 
+    return _deliver(
+        session_factory,
+        settings,
+        select(EmailHistory.id)
+        .where(
+            EmailHistory.entity_type == entity_type,
+            EmailHistory.entity_id == entity_id,
+            EmailHistory.status.in_({EmailStatus.PENDING, EmailStatus.FAILED}),
+        )
+        .order_by(EmailHistory.created_at),
+    )
+
+
+def deliver_email(
+    session_factory: sessionmaker[Session], settings: Settings, email_id: uuid.UUID
+) -> DeliveryOutcome:
+    """Send one message now, whatever its attempt count; used by "Retry" in Email History."""
+
+    return _deliver(
+        session_factory,
+        settings,
+        select(EmailHistory.id).where(
+            EmailHistory.id == email_id, EmailHistory.status != EmailStatus.SENT
+        ),
+    )
+
+
+def deliver_pending(
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+    *,
+    limit: int = 50,
+    now: datetime | None = None,
+) -> DeliveryOutcome:
+    """Send every queued message that is due, oldest first.
+
+    The application calls this on a timer while it is open, so invoices queued
+    while the mail server was unreachable go out once it is back. A failed message
+    waits longer after each attempt (2, 4, 8 … minutes, at most an hour) and is
+    left alone after ``MAX_DELIVERY_ATTEMPTS``. A message stuck in SENDING because
+    the program closed mid-send is picked up again after 15 minutes.
+    """
+
+    moment = now or datetime.now(UTC)
+    retry_due = or_(
+        *(
+            and_(
+                EmailHistory.attempts == attempts,
+                or_(
+                    EmailHistory.last_attempt_at.is_(None),
+                    EmailHistory.last_attempt_at <= moment - retry_delay(attempts),
+                ),
+            )
+            for attempts in range(MAX_DELIVERY_ATTEMPTS)
+        )
+    )
+    return _deliver(
+        session_factory,
+        settings,
+        select(EmailHistory.id)
+        .where(
+            or_(
+                EmailHistory.status == EmailStatus.PENDING,
+                and_(EmailHistory.status == EmailStatus.FAILED, retry_due),
+                and_(
+                    EmailHistory.status == EmailStatus.SENDING,
+                    EmailHistory.attempts < MAX_DELIVERY_ATTEMPTS,
+                    EmailHistory.last_attempt_at <= moment - timedelta(minutes=15),
+                ),
+            )
+        )
+        .order_by(EmailHistory.created_at)
+        .limit(limit),
+    )
+
+
+def _deliver(
+    session_factory: sessionmaker[Session],
+    settings: Settings,
+    pending_query: Select[tuple[uuid.UUID]],
+) -> DeliveryOutcome:
     from app.email.configuration import load_smtp_config
     from app.email.smtp_client import SMTPEmailService
 
     with session_factory() as session:
         config = load_smtp_config(session, settings)
-        pending = list(
-            session.scalars(
-                select(EmailHistory.id)
-                .where(
-                    EmailHistory.entity_type == entity_type,
-                    EmailHistory.entity_id == entity_id,
-                    EmailHistory.status.in_({EmailStatus.PENDING, EmailStatus.FAILED}),
-                )
-                .order_by(EmailHistory.created_at)
-            )
-        )
+        pending = list(session.scalars(pending_query))
     if not pending:
         return DeliveryOutcome()
     if not config.host or not config.from_email:
@@ -208,6 +291,9 @@ def deliver_pending_for(
     for email_id in pending:
         try:
             delivery.deliver(email_id)
+        except (NotFoundError, ConflictError):
+            # Another sender (a second till, or the sale screen) has it in hand.
+            continue
         except Exception:
             # Already logged and recorded against the row by the delivery service.
             failed += 1

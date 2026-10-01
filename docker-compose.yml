@@ -24,22 +24,6 @@ services:
     security_opt:
       - no-new-privileges:true
 
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
-    volumes:
-      - pesticide_shop_redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 12
-    security_opt:
-      - no-new-privileges:true
-
   postgres-test:
     image: postgres:16-alpine
     profiles: ["test"]
@@ -59,4 +43,3 @@ services:
 
 volumes:
   pesticide_shop_postgres_data:
-  pesticide_shop_redis_data:

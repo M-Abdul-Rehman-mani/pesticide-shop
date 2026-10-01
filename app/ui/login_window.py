@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.security.authentication import AuthenticatedUser, AuthenticationService
+from app.security.authentication import sign_in as sign_in_user
 from app.ui.widgets import show_error
 from app.ui.workers import FunctionWorker, start_worker
 
@@ -107,8 +108,7 @@ class LoginDialog(QDialog):
         self.message.setText("Signing in…")
 
         def operation() -> AuthenticatedUser:
-            with self._session_factory.begin() as session:
-                return AuthenticationService(session).authenticate(username, password)
+            return sign_in_user(self._session_factory, username, password)
 
         self._worker = start_worker(
             operation,

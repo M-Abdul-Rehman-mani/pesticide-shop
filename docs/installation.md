@@ -9,7 +9,7 @@ sudo apt update
 sudo apt install python3.11-venv postgresql-client libgl1 libegl1 libxkbcommon0 libxcb-cursor0
 cp .env.example .env
 # Replace every password and APP_SECRET_KEY in .env.
-docker compose up -d postgres redis
+docker compose up -d postgres
 python3.11 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip
@@ -34,7 +34,7 @@ Install 64-bit Python from python.org, PostgreSQL client tools, and Docker Deskt
 
 ```powershell
 Copy-Item .env.example .env
-docker compose up -d postgres redis
+docker compose up -d postgres
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e ".[dev,build]"
@@ -49,21 +49,14 @@ must not be older than the server.
 
 ## Services
 
-Run workers in separate terminals:
-
-```bash
-celery -A app.tasks.celery_app worker --loglevel=INFO --queues=email,reports,maintenance
-celery -A app.tasks.celery_app beat --loglevel=INFO
-```
-
-On Windows, Celery's prefork pool is unavailable; use `--pool=solo`, or run workers in a Linux
-container/WSL service. PostgreSQL and Redis may be installed natively instead of Compose; set
-the matching host and port in `.env`.
+PostgreSQL is the only service. Email retries and the daily backup run inside the open program;
+see `docs/email.md` and `docs/backup.md`. PostgreSQL may be installed natively instead of
+Compose; set the matching host and port in `.env`.
 
 ## Configuration
 
 Required production values are `APP_SECRET_KEY`, all `DATABASE_*` credentials, and a reachable
-PostgreSQL instance. Redis, SMTP, owner email, report time, backup retention, and currency are
+PostgreSQL instance. SMTP, owner email, backup time, backup retention, and currency are
 also environment-configurable. The time zone is always the computer's own (`TZ` in a container). Non-secret shop preferences can then be managed
 by an OWNER/MANAGER in Settings. Changing the application key makes saved encrypted SMTP
 passwords unreadable, so preserve it in a secret manager.

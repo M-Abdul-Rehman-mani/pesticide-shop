@@ -20,6 +20,7 @@ from app.models.sale_return import SaleReturn
 from app.security.authentication import AuthenticatedUser
 from app.security.permissions import Permission, require_permission
 from app.services.audit_service import AuditService
+from app.services.dealer_credit import apply_credit, release_credit
 from app.services.document_service import DocumentNumberService
 from app.services.dto import CreatePesticideSaleCommand
 from app.services.money_service import document_totals, payment_status
@@ -218,6 +219,10 @@ class PesticideSaleService:
                 )
         if dealer:
             dealer.balance += remaining
+            # Credit the dealer already holds pays this invoice down first; the
+            # balance already reflects it, so only the invoice itself changes.
+            apply_credit(self._session, sale, dealer.id, actor)
+            status = sale.payment_status
         self._audit.record(
             actor_id=actor.id,
             action="PESTICIDE_SALE_CREATED",
@@ -316,6 +321,7 @@ class PesticideSaleService:
             raise ConflictError(
                 "Goods have been returned against this invoice, so it can no longer be voided."
             )
+        release_credit(self._session, sale, actor)
         if sale.paid_amount > 0:
             raise ConflictError(
                 "This invoice has payments against it. Reverse them first, then void it."
@@ -340,6 +346,7 @@ class PesticideSaleService:
                     f"Returning batch {batch.batch_number} would exceed the quantity received."
                 )
             batch.quantity_available += item.quantity
+            batch.is_active = True
             self._session.add(
                 StockMovement(
                     batch_id=batch.id,
@@ -384,7 +391,9 @@ class PesticideSaleService:
         must have that reversed first, which keeps the cash trail explicit.
         """
 
-        require_permission(actor.role, Permission.CREATE_SALE)
+        # Changing an issued invoice moves money and stock after the fact, so it
+        # needs more authority than writing a new one.
+        require_permission(actor.role, Permission.EDIT_SALE)
         if not command.lines:
             raise ValidationError("A sale must contain at least one product.")
         if command.customer_id and command.dealer_id:
@@ -410,6 +419,7 @@ class PesticideSaleService:
             raise ConflictError(
                 "Goods have been returned against this invoice, so it can no longer be edited."
             )
+        release_credit(self._session, sale, actor)
         if sale.paid_amount > 0:
             raise ConflictError(
                 "This invoice has payments against it. Reverse them first, then edit it."
@@ -522,6 +532,8 @@ class PesticideSaleService:
             delta = new_quantity - item.quantity
             if delta:
                 previous_batch.quantity_available -= delta
+                if delta < 0:
+                    previous_batch.is_active = True
                 self._session.add(
                     StockMovement(
                         batch_id=previous_batch.id,
@@ -610,6 +622,8 @@ class PesticideSaleService:
         sale.remaining_amount = total
         sale.payment_status = payment_status(total, Decimal("0.00"))
         sale.notes = command.notes.strip() if command.notes else None
+        if dealer is not None:
+            apply_credit(self._session, sale, dealer.id, actor)
         self._audit.record(
             actor_id=actor.id,
             action="SALE_AMENDED",

@@ -14,13 +14,16 @@ Manual OWNER backup:
 python -m scripts.backup_database
 ```
 
-Celery beat runs the scheduled backup 30 minutes after the configured daily report. Monitor
-worker logs and copy backups to encrypted off-host storage. A local disk copy alone is not a
+The open program takes one automatic backup a day at `BACKUP_TIME` (default 21:30). If no
+computer had it open then, the backup runs about a minute after the program is next opened. With
+several computers, a database lock makes sure only one of them takes it. Failures appear in the
+status bar and `logs/errors.log` and are retried every 15 minutes. Set `BACKUP_AUTOMATIC=false`
+to turn this off. Copy backups to encrypted off-host storage. A local disk copy alone is not a
 disaster-recovery strategy.
 
 ## Safe restore procedure
 
-1. Restrict access and stop every desktop client, Celery worker, and Celery beat process.
+1. Restrict access and close the program on every computer.
 2. Take and preserve a fresh backup of the current database.
 3. Verify the selected file belongs to the configured backup directory and its expected date.
 4. Restore into a separate test database first and run `alembic current` plus business checks.

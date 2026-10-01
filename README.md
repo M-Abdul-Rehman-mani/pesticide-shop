@@ -2,8 +2,8 @@
 
 Pesticide Shop Manager is a native PySide6 desktop point-of-sale, batch inventory,
 dealer/customer account, invoice, and reporting application for pesticide and crop-care shops.
-PostgreSQL is the primary database; Redis and Celery provide reliable asynchronous email,
-reporting, and backup work.
+PostgreSQL is the only service it needs. Email delivery and the daily database backup run
+inside the open program, and the owner's daily report is emailed from Settings on request.
 
 The system tracks products by manufacturer, active ingredient, formulation, pack size, batch,
 manufacture/expiry date, cartons, packs, and available quantity. Purchases, sales, stock changes,
@@ -27,7 +27,7 @@ PostgreSQL client tools (`pg_dump`/`pg_restore`) for backup operations.
 ```bash
 cp .env.example .env
 # Change DATABASE_PASSWORD, TEST_DATABASE_PASSWORD, and APP_SECRET_KEY.
-docker compose up -d postgres redis
+docker compose up -d postgres
 python3.11 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e '.[dev,build]'
@@ -36,12 +36,9 @@ python -m scripts.seed_database
 python main.py
 ```
 
-Start the worker and scheduler in separate terminals:
-
-```bash
-celery -A app.tasks.celery_app worker --loglevel=INFO --queues=email,reports,maintenance
-celery -A app.tasks.celery_app beat --loglevel=INFO
-```
+No worker or scheduler is needed. While the program is open it retries queued emails every
+minute and takes one database backup a day at `BACKUP_TIME` (or soon after it is next opened).
+The owner's daily report is sent with **Settings > Email > Send Daily Report**.
 
 The `.env` file is ignored by Git. The application will not silently fall back to
 SQLite when PostgreSQL is unavailable.
@@ -53,9 +50,8 @@ SQLite when PostgreSQL is unavailable.
 | Application | `APP_ENV`, `APP_SECRET_KEY`, `APP_CURRENCY`, `APP_SESSION_TIMEOUT_MINUTES` |
 | PostgreSQL | `DATABASE_HOST`, `DATABASE_PORT`, `DATABASE_NAME`, `DATABASE_USER`, `DATABASE_PASSWORD`, `DATABASE_SSL_MODE` |
 | Test PostgreSQL | `TEST_DATABASE_HOST`, `TEST_DATABASE_PORT`, `TEST_DATABASE_NAME`, `TEST_DATABASE_USER`, `TEST_DATABASE_PASSWORD` |
-| Redis | `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, `REDIS_PASSWORD` |
 | SMTP | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM_EMAIL`, `SMTP_USE_TLS`, `OWNER_EMAIL` |
-| Operations | `DAILY_REPORT_TIME`, `BACKUP_DIRECTORY`, `BACKUP_RETENTION_DAYS`, `BACKUP_COMPRESS`, `LOG_DIRECTORY` |
+| Operations | `BACKUP_TIME`, `BACKUP_AUTOMATIC`, `BACKUP_DIRECTORY`, `BACKUP_RETENTION_DAYS`, `BACKUP_COMPRESS`, `LOG_DIRECTORY` |
 
 If PostgreSQL tools are not on `PATH`, set `POSTGRES_TOOLS_DIRECTORY` to a client `bin` directory
 whose major version is the same as or newer than the server.
@@ -113,7 +109,7 @@ pytest --cov=app --cov-report=term-missing
 ```
 
 Integration tests refuse to use a database whose name does not end in `_test`. The 80% numeric
-gate measures deterministic domain/service code; Qt, Celery wiring, native printer dialogs, and
+gate measures deterministic domain/service code; Qt, native printer dialogs, and
 process entry points are exercised separately by smoke/integration checks and excluded from that
 number.
 
@@ -136,7 +132,7 @@ therefore be built on Windows and a Linux executable on Linux.
 pyinstaller pesticide_shop.spec --clean --noconfirm
 ```
 
-The executable still requires reachable PostgreSQL and Redis services. It bundles Python
+The executable still requires a reachable PostgreSQL server. It bundles Python
 and application dependencies, not a database server.
 
 Run the build on Windows for `.exe` output and on Linux for a Linux binary—PyInstaller does not
@@ -152,8 +148,8 @@ python -m scripts.backup_database
 ```
 
 Backups are written to a temporary file and renamed only after `pg_dump` succeeds; retention
-cleanup happens afterward. Restore is OWNER-only and must be performed with every client and
-worker stopped. See [Backup and restore](docs/backup.md) for the full rehearsal procedure.
+cleanup happens afterward. Restore is OWNER-only and must be performed with the program
+closed on every computer. See [Backup and restore](docs/backup.md) for the full rehearsal procedure.
 
 The CSV data export (`.csv.zip`) can also be imported back with
 `python -m scripts.import_csv_export ARCHIVE` into an empty database, or from **Settings > Backup**;
@@ -172,6 +168,7 @@ in Email History with attempt counts and can be retried without reversing the sa
 - [Setup guide](docs/setup_guide.md)
 - [Installation](docs/installation.md)
 - [Deployment](docs/deployment.md)
+- [Database security](docs/database-security.md) — least-privilege login for shop computers
 - [Email](docs/email.md)
 - [Printing](docs/printing.md)
 - [Backup and restore](docs/backup.md)
@@ -187,7 +184,7 @@ append-only; corrections use explicit void or audited stock-adjustment workflows
   firewall; run `docker compose ps` and `pg_isready`.
 - **Database upgrade required:** activate the same release environment and run
   `alembic upgrade head`.
-- **Email remains FAILED:** verify Redis/Celery are running, send a Settings test email, and inspect
+- **Email remains FAILED:** the program retries every minute while open; send a Settings test email, and inspect
   `logs/email.log` without copying credentials into support messages.
 - **No printers appear:** install/test the printer in Windows or CUPS first, then restart the app.
 - **Backup fails:** ensure PostgreSQL client tools are on `PATH` and the configured directory is

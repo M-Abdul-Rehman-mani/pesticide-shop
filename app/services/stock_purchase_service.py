@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import uuid
 from collections import Counter
-from datetime import UTC, datetime
-from decimal import Decimal
+from datetime import UTC, date, datetime
+from decimal import ROUND_HALF_UP, Decimal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -25,6 +25,48 @@ from app.services.money_service import document_totals, payment_status
 from app.services.practice_guard import require_unmixed_purchase
 from app.utils.exceptions import ConflictError, NotFoundError, ValidationError
 from app.utils.validators import nonnegative_money
+
+_CENT = Decimal("0.01")
+
+
+def _restock(
+    batch: StockBatch,
+    quantity: int,
+    purchase_price: Decimal,
+    selling_price: Decimal,
+    expiry_date: date | None,
+) -> None:
+    """Add a new delivery to an existing batch.
+
+    Cost becomes the weighted average of the units on hand and the units arriving,
+    so every later sale is costed at what the stock really cost. The newest selling
+    price applies, the earlier expiry date is kept (the batch must leave the shelf
+    by the sooner of the two), and a batch that had been removed is put back on sale.
+    """
+
+    on_hand = batch.quantity_available
+    if on_hand > 0:
+        batch.purchase_price = (
+            (batch.purchase_price * on_hand + purchase_price * quantity) / (on_hand + quantity)
+        ).quantize(_CENT, rounding=ROUND_HALF_UP)
+    else:
+        batch.purchase_price = purchase_price
+    batch.selling_price = selling_price
+    if expiry_date is not None and (batch.expiry_date is None or expiry_date < batch.expiry_date):
+        batch.expiry_date = expiry_date
+    batch.quantity_received += quantity
+    batch.quantity_available += quantity
+    batch.is_active = True
+
+
+def _without_cost(batch: StockBatch, quantity: int, price: Decimal) -> Decimal:
+    """The average cost once ``quantity`` units bought at ``price`` are taken back out."""
+
+    remaining = batch.quantity_available - quantity
+    if remaining <= 0:
+        return batch.purchase_price
+    cost = (batch.purchase_price * batch.quantity_available - price * quantity) / remaining
+    return max(cost, Decimal("0.00")).quantize(_CENT, rounding=ROUND_HALF_UP)
 
 
 class StockPurchaseService:
@@ -140,10 +182,8 @@ class StockPurchaseService:
             existing = existing_batches.get((item.product_id, batch_number))
             if existing is not None:
                 # Restock: the batch already exists, so its record stays intact and
-                # only its available quantity grows, with the ledger carrying the
-                # rest of this purchase's history for it.
-                existing.quantity_received += item.quantity
-                existing.quantity_available += item.quantity
+                # the ledger carries the rest of this purchase's history for it.
+                _restock(existing, item.quantity, purchase_price, selling_price, item.expiry_date)
                 batch = existing
             else:
                 batch = StockBatch(
@@ -247,40 +287,43 @@ class StockPurchaseService:
             )
         for movement in movements:
             batch = batches[movement.batch_id]
-            if batch.purchase_id == purchase.id:
-                # This purchase created the batch outright; nothing may have moved since.
-                if batch.quantity_available != batch.quantity_received:
-                    raise ConflictError(
-                        "Stock from this purchase has already changed. "
-                        "Use a stock correction instead."
-                    )
-            elif batch.quantity_available < movement.quantity_change:
-                # This purchase only restocked an existing batch; some of what it added
-                # has already been sold or adjusted away, so undoing it would go negative.
+            # Only what this purchase itself added can be taken back. Anything a later
+            # purchase put on the same batch stays, so a restock is never wiped out.
+            if batch.quantity_available < movement.quantity_change:
                 raise ConflictError(
                     "Stock from this purchase has already changed. Use a stock correction instead."
                 )
         supplier = self._session.execute(
             select(Supplier).where(Supplier.id == purchase.supplier_id).with_for_update(of=Supplier)
         ).scalar_one()
+        unmatched_items = list(purchase.items)
         for movement in movements:
             batch = batches[movement.batch_id]
-            if batch.purchase_id == purchase.id:
-                quantity = batch.quantity_available
+            quantity = movement.quantity_change
+            if batch.quantity_received == quantity:
+                # This purchase is the batch's only source: retire it outright.
                 batch.quantity_available = 0
                 batch.is_active = False
-                balance_after = 0
             else:
-                quantity = movement.quantity_change
+                line = next(
+                    (
+                        entry
+                        for entry in unmatched_items
+                        if entry.product_id == batch.product_id and entry.quantity == quantity
+                    ),
+                    None,
+                )
+                if line is not None:
+                    unmatched_items.remove(line)
+                    batch.purchase_price = _without_cost(batch, quantity, line.purchase_price)
                 batch.quantity_received -= quantity
                 batch.quantity_available -= quantity
-                balance_after = batch.quantity_available
             self._session.add(
                 StockMovement(
                     batch_id=batch.id,
                     transaction_type=InventoryTransactionType.ADJUSTMENT,
                     quantity_change=-quantity,
-                    balance_after=balance_after,
+                    balance_after=batch.quantity_available,
                     reference_id=purchase.id,
                     reference_type="Purchase Cancellation",
                     performed_by=actor.id,

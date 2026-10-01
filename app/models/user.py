@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, Index, String, func
+from sqlalchemy import Boolean, DateTime, Enum, Index, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -25,6 +25,12 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Boolean, nullable=False, default=False, server_default="false"
     )
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: Consecutive wrong passwords since the last successful sign-in.
+    failed_login_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    #: Sign-in is refused until this moment after too many wrong passwords.
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 Index("ix_users_username_lower", func.lower(User.username), unique=True)

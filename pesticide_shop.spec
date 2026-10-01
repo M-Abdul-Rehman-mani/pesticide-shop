@@ -19,13 +19,9 @@ datas += collect_data_files("alembic")
 icon = project_root / "app" / "ui" / "assets" / "app-icon.ico"
 
 hiddenimports = collect_submodules("app")
-hiddenimports += collect_submodules("celery")
-hiddenimports += collect_submodules("kombu")
-hiddenimports += collect_submodules("billiard")
 hiddenimports += [
     "sqlalchemy.dialects.postgresql.psycopg",
     "psycopg_binary",
-    "redis",
     # Printing and preview are loaded lazily from the UI, so the bundler cannot
     # discover these Qt modules by following imports alone.
     "PySide6.QtPdf",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -52,11 +53,6 @@ class Settings(BaseSettings):
     test_database_user: str = "pesticide_shop_test"
     test_database_password: SecretStr | None = None
 
-    redis_host: str = "127.0.0.1"
-    redis_port: int = Field(default=6380, ge=1, le=65535)
-    redis_db: int = Field(default=0, ge=0)
-    redis_password: SecretStr | None = None
-
     smtp_host: str | None = None
     smtp_port: int = Field(default=587, ge=1, le=65535)
     smtp_username: str | None = None
@@ -66,7 +62,10 @@ class Settings(BaseSettings):
     smtp_timeout_seconds: int = Field(default=30, ge=1, le=120)
     owner_email: str | None = None
 
-    daily_report_time: str = "21:00"
+    #: The program takes one automatic backup a day at this local time (HH:MM),
+    #: or as soon as it is next opened if the computer was off.
+    backup_time: str = "21:30"
+    backup_automatic: bool = True
     backup_directory: Path = Path("backups")
     backup_retention_days: int = Field(default=30, ge=1, le=3650)
     backup_compress: bool = True
@@ -100,16 +99,21 @@ class Settings(BaseSettings):
 
         return system_timezone_name()
 
-    @field_validator("daily_report_time")
+    @field_validator("backup_time")
     @classmethod
-    def valid_report_time(cls, value: str) -> str:
+    def valid_backup_time(cls, value: str) -> str:
         parts = value.split(":")
         if len(parts) != 2 or not all(part.isdigit() for part in parts):
-            raise ValueError("daily_report_time must use HH:MM format")
+            raise ValueError("backup_time must use HH:MM format")
         hour, minute = (int(part) for part in parts)
         if hour not in range(24) or minute not in range(60):
-            raise ValueError("daily_report_time must be a valid 24-hour time")
+            raise ValueError("backup_time must be a valid 24-hour time")
         return f"{hour:02d}:{minute:02d}"
+
+    @property
+    def backup_time_of_day(self) -> time:
+        hour, minute = (int(part) for part in self.backup_time.split(":"))
+        return time(hour, minute)
 
     @model_validator(mode="after")
     def reject_demo_secret_in_production(self) -> Settings:
@@ -136,13 +140,6 @@ class Settings(BaseSettings):
             f"postgresql+psycopg://{user}:{password}@{self.test_database_host}:"
             f"{self.test_database_port}/{self.test_database_name}?sslmode={self.database_ssl_mode}"
         )
-
-    @property
-    def redis_url(self) -> str:
-        password = ""
-        if self.redis_password and self.redis_password.get_secret_value():
-            password = f":{quote_plus(self.redis_password.get_secret_value())}@"
-        return f"redis://{password}{self.redis_host}:{self.redis_port}/{self.redis_db}"
 
 
 @lru_cache(maxsize=1)

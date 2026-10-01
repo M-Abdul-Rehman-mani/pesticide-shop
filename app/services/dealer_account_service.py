@@ -14,10 +14,12 @@ from app.models.dealer import Dealer
 from app.models.enums import PaymentDirection, PaymentMethod, SaleStatus
 from app.models.payment import Payment
 from app.models.sale import Sale
+from app.models.sale_return import SaleReturn
 from app.reports.report_service import DateRange
 from app.security.authentication import AuthenticatedUser
 from app.security.permissions import Permission, require_permission
 from app.services.audit_service import AuditService
+from app.services.dealer_credit import available_credit
 from app.services.money_service import payment_status
 from app.utils.exceptions import ConflictError, NotFoundError, ValidationError
 from app.utils.validators import nonnegative_money
@@ -25,6 +27,7 @@ from app.utils.validators import nonnegative_money
 ZERO = Decimal("0.00")
 INVOICE = "INVOICE"
 PAYMENT = "PAYMENT"
+RETURN = "RETURN"
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +74,8 @@ class DealerStatement:
     credit_limit: Decimal
     #: Balance carried into the statement when a date range is applied.
     opening_balance: Decimal = Decimal("0.00")
+    #: Credited for goods returned, less any of it handed back as cash.
+    returned: Decimal = Decimal("0.00")
 
     @property
     def available_credit(self) -> Decimal | None:
@@ -212,24 +217,35 @@ class DealerAccountService:
                 .order_by(Sale.sale_date)
             )
         )
-        payments = list(
-            self._session.scalars(
-                select(Payment)
-                .where(
-                    Payment.dealer_id == dealer_id,
-                    Payment.direction == PaymentDirection.INCOMING,
-                )
-                .order_by(Payment.created_at)
-            )
+        # Applied account credit moves no money, and a return credit is shown once,
+        # as the return document itself, so neither is listed as a payment.
+        entries_query = (
+            select(Payment)
+            .where(Payment.dealer_id == dealer_id, Payment.applied_credit.is_(False))
+            .order_by(Payment.created_at)
         )
-        refunds = list(
+        movements = list(self._session.scalars(entries_query))
+        payments = [
+            payment
+            for payment in movements
+            if payment.direction is PaymentDirection.INCOMING and not payment.is_return_credit
+        ]
+        reversals = [
+            payment
+            for payment in movements
+            if payment.direction is PaymentDirection.OUTGOING and not payment.is_return_credit
+        ]
+        refunds = [
+            payment
+            for payment in movements
+            if payment.direction is PaymentDirection.OUTGOING and payment.is_return_credit
+        ]
+        returns = list(
             self._session.scalars(
-                select(Payment)
-                .where(
-                    Payment.dealer_id == dealer_id,
-                    Payment.direction == PaymentDirection.OUTGOING,
-                )
-                .order_by(Payment.created_at)
+                select(SaleReturn)
+                .join(Sale, Sale.id == SaleReturn.sale_id)
+                .where(Sale.dealer_id == dealer_id, Sale.status == SaleStatus.COMPLETED)
+                .order_by(SaleReturn.returned_at)
             )
         )
         events: list[tuple[datetime, str, str, str, Decimal, Decimal]] = [
@@ -247,13 +263,35 @@ class DealerAccountService:
             )
             for payment in payments
         )
-        # A reversal is a charge back onto the account.
+        events.extend(
+            (
+                document.returned_at,
+                RETURN,
+                document.return_number,
+                f"Goods returned against {document.sale.invoice_number}",
+                ZERO,
+                document.total,
+            )
+            for document in returns
+        )
+        # A reversal or a cash refund is a charge back onto the account.
+        events.extend(
+            (
+                reversal.created_at,
+                PAYMENT,
+                reversal.reference or "—",
+                f"{reversal.method.value.replace('_', ' ').title()} reversed",
+                reversal.amount,
+                ZERO,
+            )
+            for reversal in reversals
+        )
         events.extend(
             (
                 refund.created_at,
                 PAYMENT,
                 refund.reference or "—",
-                f"{refund.method.value.replace('_', ' ').title()} reversed",
+                f"{refund.method.value.replace('_', ' ').title()} refund for returned goods",
                 refund.amount,
                 ZERO,
             )
@@ -274,6 +312,9 @@ class DealerAccountService:
             )
         invoiced = sum((sale.total for sale in sales), ZERO)
         paid = sum((payment.amount for payment in payments), ZERO) - sum(
+            (reversal.amount for reversal in reversals), ZERO
+        )
+        returned = sum((document.total for document in returns), ZERO) - sum(
             (refund.amount for refund in refunds), ZERO
         )
         return DealerStatement(
@@ -281,9 +322,10 @@ class DealerAccountService:
             entries=tuple(entries),
             invoiced=invoiced,
             paid=paid,
-            outstanding=invoiced - paid,
+            outstanding=invoiced - paid - returned,
             credit_limit=dealer.credit_limit,
             opening_balance=opening,
+            returned=returned,
         )
 
     @staticmethod
@@ -324,8 +366,21 @@ class DealerAccountService:
             )
         if original.dealer_id is None:
             raise ConflictError("This payment is not against a dealer account.")
+        if original.applied_credit:
+            raise ConflictError(
+                "This entry used the dealer's advance credit, not new money. Edit or void the "
+                "invoice to put the credit back on the account."
+            )
         if self._is_reversed(original):
             raise ConflictError("This payment has already been reversed.")
+        if (
+            original.sale_id is None
+            and available_credit(self._session, original.dealer_id) < original.amount
+        ):
+            raise ConflictError(
+                "Some of this advance has already paid invoices. Edit or void those invoices "
+                "first so the credit returns to the account."
+            )
         dealer = self._session.execute(
             select(Dealer).where(Dealer.id == original.dealer_id).with_for_update(of=Dealer)
         ).scalar_one()
@@ -375,6 +430,7 @@ class DealerAccountService:
             Payment.created_at >= payment.created_at,
             # A refund handed back with returned goods is not a reversal of anything.
             Payment.sale_return_id.is_(None),
+            Payment.applied_credit.is_(False),
         )
         statement = (
             statement.where(Payment.sale_id == payment.sale_id)
@@ -389,7 +445,7 @@ class DealerAccountService:
         return list(
             self._session.scalars(
                 select(Payment)
-                .where(Payment.dealer_id == dealer_id)
+                .where(Payment.dealer_id == dealer_id, Payment.applied_credit.is_(False))
                 .order_by(Payment.created_at.desc())
             )
         )

@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -24,6 +24,49 @@ from app.services.money_service import payment_status
 from app.utils.exceptions import ConflictError, NotFoundError, ValidationError
 
 ZERO = Decimal("0.00")
+CENT = Decimal("0.01")
+
+
+def _cents(value: Decimal) -> Decimal:
+    return value.quantize(CENT, rounding=ROUND_HALF_UP)
+
+
+def invoice_shares(sale: Sale) -> dict[uuid.UUID, Decimal]:
+    """Split what the invoice actually charged across its lines.
+
+    A line's share is its own net total (after its line discount) plus its part of
+    the order discount and tax, apportioned by line value. The rounded shares add
+    up to the invoice total exactly, so returning everything credits exactly what
+    the customer was charged -- never the undiscounted list price.
+    """
+
+    items = sorted(sale.items, key=lambda item: str(item.id))
+    if not items:
+        return {}
+    base = sum((item.total for item in items), ZERO)
+    if base > 0:
+        raw = {item.id: item.total * sale.total / base for item in items}
+    else:
+        units = sum(item.quantity for item in items)
+        raw = {item.id: sale.total * item.quantity / units for item in items}
+    shares = {item_id: _cents(value) for item_id, value in raw.items()}
+    residual = sale.total - sum(shares.values(), ZERO)
+    if residual:
+        largest = max(items, key=lambda item: raw[item.id]).id
+        shares[largest] += residual
+    return shares
+
+
+def line_credit(share: Decimal, sold: int, already_returned: int, quantity: int) -> Decimal:
+    """Credit for ``quantity`` more units of a line, given what came back before.
+
+    Worked out cumulatively so a line returned in several parts credits exactly its
+    share once the last unit is back, with no rounding drift.
+    """
+
+    before = _cents(share * already_returned / sold)
+    after = _cents(share * (already_returned + quantity) / sold)
+    return after - before
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,11 +88,21 @@ class ReturnableLine:
     batch_number: str
     sold: int
     already_returned: int
+    #: What one unit actually cost the buyer, after discounts and tax.
     unit_price: Decimal
+    #: The line's share of the invoice total; ``None`` falls back to ``unit_price``.
+    net_value: Decimal | None = None
 
     @property
     def returnable(self) -> int:
         return self.sold - self.already_returned
+
+    def credit_for(self, quantity: int) -> Decimal:
+        """The credit returning ``quantity`` units of this line would give."""
+
+        if self.net_value is None:
+            return self.unit_price * quantity
+        return line_credit(self.net_value, self.sold, self.already_returned, quantity)
 
 
 class SaleReturnService:
@@ -75,6 +128,7 @@ class SaleReturnService:
                 .group_by(SaleReturnItem.sale_item_id)
             ).all()
         }
+        shares = invoice_shares(sale)
         return [
             ReturnableLine(
                 sale_item_id=item.id,
@@ -82,7 +136,8 @@ class SaleReturnService:
                 batch_number=item.batch_number,
                 sold=item.quantity,
                 already_returned=returned.get(item.id, 0),
-                unit_price=item.unit_price,
+                unit_price=_cents(shares[item.id] / item.quantity),
+                net_value=shares[item.id],
             )
             for item in sale.items
         ]
@@ -163,7 +218,7 @@ class SaleReturnService:
         credit = ZERO
         for line in lines:
             item = items[line.sale_item_id]
-            line_total = item.unit_price * line.quantity
+            line_total = available[line.sale_item_id].credit_for(line.quantity)
             credit += line_total
             self._session.add(
                 SaleReturnItem(
@@ -172,7 +227,7 @@ class SaleReturnService:
                     stock_batch_id=item.stock_batch_id,
                     product_id=item.product_id,
                     quantity=line.quantity,
-                    unit_price=item.unit_price,
+                    unit_price=_cents(line_total / line.quantity),
                     total=line_total,
                     restocked=line.restock,
                 )
@@ -187,6 +242,8 @@ class SaleReturnService:
                     f"Returning batch {batch.batch_number} would exceed the quantity received."
                 )
             batch.quantity_available += line.quantity
+            # Goods back on the shelf are sellable again, even from a removed batch.
+            batch.is_active = True
             self._session.add(
                 StockMovement(
                     batch_id=batch.id,

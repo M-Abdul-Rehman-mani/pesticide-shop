@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.models.enums import UserRole
 from app.models.user import User
@@ -17,6 +17,10 @@ from app.services.audit_service import AuditService
 from app.utils.exceptions import AuthenticationError, ConflictError, NotFoundError, ValidationError
 from app.utils.security import hash_password, password_needs_rehash, verify_password
 from app.utils.validators import normalize_email
+
+#: Consecutive wrong passwords that lock an account, and for how long.
+MAX_FAILED_LOGINS = 5
+LOCKOUT_PERIOD = timedelta(minutes=15)
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,18 +50,25 @@ class AuthenticationService:
         self._audit = AuditService(session)
 
     def authenticate(self, username: str, password: str) -> AuthenticatedUser:
+        """Check the credentials and start a session.
+
+        A failure raises without writing anything: the caller's transaction is
+        rolled back, so failures are recorded separately through
+        ``record_failed_login`` (see ``sign_in``).
+        """
+
         normalized = username.strip().lower()
         user = self._session.execute(
             select(User).where(func.lower(User.username) == normalized)
         ).scalar_one_or_none()
-        if not verify_password(user.password_hash if user else None, password):
-            self._audit.record(
-                actor_id=user.id if user else None,
-                action="LOGIN_FAILED",
-                entity_type="User",
-                entity_id=user.id if user else None,
-                new_value={"username": normalized},
+        now = datetime.now(UTC)
+        if user is not None and user.locked_until is not None and user.locked_until > now:
+            minutes = max(1, -(-int((user.locked_until - now).total_seconds()) // 60))
+            raise AuthenticationError(
+                "This account is locked after too many failed sign-in attempts. "
+                f"Try again in {minutes} minute(s)."
             )
+        if not verify_password(user.password_hash if user else None, password):
             raise AuthenticationError()
         if user is None:
             # Verification cannot succeed without a stored hash. This explicit guard
@@ -67,7 +78,9 @@ class AuthenticationService:
             raise AuthenticationError("This user account is disabled.")
         if password_needs_rehash(user.password_hash):
             user.password_hash = hash_password(password, allow_weak_demo_password=True)
-        user.last_login_at = datetime.now(UTC)
+        user.last_login_at = now
+        user.failed_login_attempts = 0
+        user.locked_until = None
         self._audit.record(
             actor_id=user.id,
             action="LOGIN_SUCCEEDED",
@@ -75,6 +88,41 @@ class AuthenticationService:
             entity_id=user.id,
         )
         return AuthenticatedUser.from_model(user)
+
+    def record_failed_login(self, username: str) -> None:
+        """Audit a failed sign-in and lock the account after repeated failures."""
+
+        normalized = username.strip().lower()
+        user = self._session.execute(
+            select(User).where(func.lower(User.username) == normalized).with_for_update()
+        ).scalar_one_or_none()
+        now = datetime.now(UTC)
+        locked_now = False
+        already_locked = (
+            user is not None and user.locked_until is not None and user.locked_until > now
+        )
+        if user is not None and not already_locked:
+            user.failed_login_attempts += 1
+            if user.failed_login_attempts >= MAX_FAILED_LOGINS:
+                user.locked_until = now + LOCKOUT_PERIOD
+                user.failed_login_attempts = 0
+                locked_now = True
+        self._audit.record(
+            actor_id=user.id if user else None,
+            action="LOGIN_FAILED",
+            entity_type="User",
+            entity_id=user.id if user else None,
+            new_value={"username": normalized, "locked": locked_now or already_locked},
+        )
+
+    def validate_session(self, actor: AuthenticatedUser) -> None:
+        """Refuse a signed-in session whose account was disabled or changed role."""
+
+        user = self._session.get(User, actor.id)
+        if user is None or not user.is_active or user.role is not actor.role:
+            raise AuthenticationError(
+                "Your account was disabled or its role changed. Please sign in again."
+            )
 
     def create_user(
         self,
@@ -180,3 +228,21 @@ class AuthenticationService:
                 or_(func.lower(User.username) == normalized, func.lower(User.email) == normalized)
             )
         ).scalar_one_or_none()
+
+
+def sign_in(
+    session_factory: sessionmaker[Session], username: str, password: str
+) -> AuthenticatedUser:
+    """Authenticate, recording any failure in its own committed transaction.
+
+    The failure must survive the rollback of the sign-in attempt itself, or the
+    audit trail and the lockout counter would never see it.
+    """
+
+    try:
+        with session_factory.begin() as session:
+            return AuthenticationService(session).authenticate(username, password)
+    except AuthenticationError:
+        with session_factory.begin() as session:
+            AuthenticationService(session).record_failed_login(username)
+        raise

@@ -202,7 +202,7 @@ class SaleReturnDialog(QDialog):
     def _update_credit(self) -> None:
         credit = sum(
             (
-                line.unit_price * box.value()
+                line.credit_for(box.value())
                 for line, box in zip(self._lines, self._quantities, strict=True)
             ),
             Decimal("0.00"),
@@ -434,15 +434,18 @@ class SalesScreen(QWidget):
             list[tuple[uuid.UUID, str, str, int, Decimal, str]],
         ]:
             with self._session_factory() as session:
-                customers = list(
-                    session.scalars(select(Customer).order_by(Customer.name).limit(500))
-                )
+                # Every party is listed -- the box filters as you type -- so a large
+                # customer book never hides anyone. Only the shown columns are read.
+                customers = session.execute(
+                    select(Customer.id, Customer.name, Customer.phone, Customer.address).order_by(
+                        Customer.name
+                    )
+                ).all()
                 dealers = list(
                     session.scalars(
                         select(Dealer)
                         .where(Dealer.is_active.is_(True))
                         .order_by(Dealer.business_name, Dealer.name)
-                        .limit(500)
                     )
                 )
                 batches = list(
@@ -1287,6 +1290,11 @@ class SalesScreen(QWidget):
         """Load a completed invoice back into the sale form for correction."""
 
         if row >= len(self._history_sales):
+            return
+        if not has_permission(self._actor.role, Permission.EDIT_SALE):
+            QMessageBox.information(
+                self, "Not permitted", "Your role cannot edit an issued invoice."
+            )
             return
         sale = self._history_sales[row]
         if sale.status is not SaleStatus.COMPLETED:

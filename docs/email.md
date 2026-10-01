@@ -4,10 +4,12 @@ SMTP credentials can come from `.env` or the Settings screen. A password saved i
 encrypted using `APP_SECRET_KEY` and is never displayed again. Use “Send Test Email” before
 enabling shop notifications.
 
-Sale and return transactions create `email_history` rows in the same database commit. Celery
-claims rows with `FOR UPDATE SKIP LOCKED`, marks an attempt, builds the current PDF receipt,
-then sends outside the transaction. Failures become `FAILED` with a bounded error message and
-are retried with exponential backoff. The owner can inspect history and retry failed messages.
+Sale and return transactions create `email_history` rows in the same database commit. Right
+after the commit the program claims those rows with `FOR UPDATE SKIP LOCKED`, marks an attempt,
+builds the current PDF receipt, and sends outside the transaction. Failures become `FAILED` with
+a bounded error message. There is no background service: while the program is open it retries
+due messages every minute, waiting 2, 4, 8 … minutes (at most an hour) between attempts and
+giving up after 6 attempts. The owner can inspect Email History and retry any message by hand.
 
 Required SMTP fields:
 
@@ -23,6 +25,7 @@ relay; do not store a personal account password. Confirm the provider's sending 
 DKIM, and DMARC configuration. Application logs record delivery failures but redact common
 credential assignments.
 
-The scheduler queues the daily report at `DAILY_REPORT_TIME` in the worker computer's time zone (`TZ` in a container). The report
-contains sales, gross profit, payment-method totals, top products,
-low stock, and outstanding balances.
+The daily owner report is sent on request: choose a day under **Settings > Email > Daily owner
+report** and press **Send Daily Report**. It goes to the saved owner emails as a PDF containing
+sales, gross profit (net of returns), returns, money received by method, top products, low stock,
+and outstanding balances.

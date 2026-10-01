@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
+from datetime import date
 from pathlib import Path
 from typing import cast
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDateEdit,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -37,6 +39,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.config.settings import Settings
 from app.email.configuration import OWNER_EMAIL_SEPARATOR, parse_owner_emails
 from app.email.email_service import OutgoingEmail
+from app.email.outbox import DeliveryOutcome, deliver_email, deliver_pending_for
 from app.email.smtp_client import SMTPConfig, SMTPEmailService
 from app.models.email_history import EmailHistory
 from app.models.enums import EmailStatus, SettingCategory
@@ -54,13 +57,13 @@ from app.printing.printer_service import (
 from app.printing.receipt_generator import ReceiptGenerator
 from app.printing.sample_receipt import sample_receipt
 from app.printing.shop_profile import load_shop_profile
+from app.reports.daily_report import DAILY_REPORT_ENTITY, queue_daily_report
 from app.security.authentication import AuthenticatedUser
 from app.security.permissions import Permission, has_permission
 from app.services.backup_service import BackupService
 from app.services.data_export_service import DataExportResult, DataExportService
 from app.services.data_import_service import DataImportResult, DataImportService, summarise
 from app.services.settings_service import SettingsService
-from app.tasks.email_tasks import send_email
 from app.ui.widgets import RowsTableModel, show_error
 from app.ui.workers import FunctionWorker, start_worker
 from app.utils.exceptions import ValidationError
@@ -177,7 +180,37 @@ class SettingsScreen(QWidget):
         gmail_note.setWordWrap(True)
         form.addRow(gmail_note)
         form.addRow("", test)
+        form.addRow("Daily owner report", self._build_daily_report())
         self.tabs.addTab(tab, "Email")
+
+    def _build_daily_report(self) -> QWidget:
+        """Pick a day and email its report to the saved owner addresses."""
+
+        box = QWidget()
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        row = QHBoxLayout()
+        self.report_date = QDateEdit(QDate.currentDate())
+        self.report_date.setCalendarPopup(True)
+        self.report_date.setDisplayFormat("dd-MMM-yyyy")
+        self.report_date.setMaximumDate(QDate.currentDate())
+        self.daily_report_button = QPushButton("Send Daily Report")
+        self.daily_report_button.setProperty("secondary", True)
+        self.daily_report_button.clicked.connect(self._send_daily_report)
+        self.daily_report_button.setEnabled(
+            has_permission(self._actor.role, Permission.VIEW_REPORTS)
+        )
+        row.addWidget(self.report_date)
+        row.addWidget(self.daily_report_button)
+        row.addStretch()
+        note = QLabel(
+            "Emails that day's sales, profit, payments, top products, and low stock as a PDF "
+            "to the saved owner emails above. Save any changes to the list first."
+        )
+        note.setWordWrap(True)
+        layout.addLayout(row)
+        layout.addWidget(note)
+        return box
 
     def _build_owner_emails(self) -> QWidget:
         """A list of the people copied on every invoice, with add and remove."""
@@ -433,6 +466,14 @@ class SettingsScreen(QWidget):
         form.addRow("Backup directory", self.backup_directory)
         form.addRow("Retention days", self.retention)
         form.addRow("Database backup", backup_now)
+        automatic = QLabel(
+            f"Automatic: every day at {self._settings.backup_time}, taken by whichever computer "
+            "has the program open (or soon after it is next opened). Set BACKUP_TIME in .env."
+            if self._settings.backup_automatic
+            else "Automatic daily backups are off (BACKUP_AUTOMATIC=false in .env)."
+        )
+        automatic.setWordWrap(True)
+        form.addRow("", automatic)
         form.addRow("Data backup", self.export_data_button)
         form.addRow(export_note)
         form.addRow("Owner only", restore)
@@ -666,6 +707,50 @@ class SettingsScreen(QWidget):
             failed=lambda error: show_error(self, error),
         )
 
+    def _send_daily_report(self) -> None:
+        report_date = cast(date, self.report_date.date().toPython())
+        settings = self._settings
+        actor = self._actor
+        self.daily_report_button.setEnabled(False)
+
+        def operation() -> DeliveryOutcome:
+            with self._session_factory.begin() as session:
+                report_id = queue_daily_report(session, settings, report_date, actor)
+            # Sent straight away; anything that fails stays in Email History and is
+            # retried automatically while the program is open.
+            return deliver_pending_for(
+                self._session_factory,
+                settings,
+                entity_type=DAILY_REPORT_ENTITY,
+                entity_id=report_id,
+            )
+
+        def sent(result: object) -> None:
+            outcome = cast(DeliveryOutcome, result)
+            if outcome.skipped:
+                text = "The report is queued. Set up SMTP on this tab to send it."
+            elif outcome.failed and not outcome.sent:
+                text = (
+                    "The report could not be sent and will be retried. Check Email History "
+                    "for the reason."
+                )
+            elif outcome.failed:
+                text = (
+                    f"Sent {outcome.sent} cop{'y' if outcome.sent == 1 else 'ies'}; "
+                    f"{outcome.failed} failed and will be retried."
+                )
+            else:
+                text = f"The report for {report_date:%d-%b-%Y} was emailed to the owner."
+            QMessageBox.information(self, "Daily report", text)
+            self._load_email_history()
+
+        self._worker = start_worker(
+            operation,
+            succeeded=sent,
+            failed=lambda error: show_error(self, error),
+            finished=lambda: self.daily_report_button.setEnabled(True),
+        )
+
     def _backup_now(self) -> None:
         runtime_settings = self._backup_runtime_settings()
         self._worker = start_worker(
@@ -845,18 +930,29 @@ class SettingsScreen(QWidget):
             return
         email_id = self._email_ids[selected[0].row()]
 
-        def operation() -> None:
+        settings = self._settings
+
+        def operation() -> DeliveryOutcome:
             with self._session_factory.begin() as session:
                 record = session.get(EmailHistory, email_id)
                 if record and record.status is not EmailStatus.SENT:
                     record.status = EmailStatus.PENDING
                     record.last_error = None
-            send_email.delay(str(email_id))
+            return deliver_email(self._session_factory, settings, email_id)
+
+        def retried(result: object) -> None:
+            outcome = cast(DeliveryOutcome, result)
+            if outcome.sent:
+                text = "The email was sent."
+            elif outcome.skipped:
+                text = "SMTP is not set up yet, so the email stays queued."
+            elif outcome.failed:
+                text = "The email failed again. The reason is shown in the list."
+            else:
+                text = "This email has already been sent."
+            QMessageBox.information(self, "Retry email", text)
+            self._load_email_history()
 
         self._worker = start_worker(
-            operation,
-            succeeded=lambda _result: QMessageBox.information(
-                self, "Email queued", "The email was queued for retry."
-            ),
-            failed=lambda error: show_error(self, error),
+            operation, succeeded=retried, failed=lambda error: show_error(self, error)
         )
